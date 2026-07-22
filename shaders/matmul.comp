@@ -1,0 +1,21 @@
+#version 450
+// matmul.comp — fp32 matmul compute shader: y = W @ x
+//   W is [n_out, n_in] row-major, x is [n_in], y is [n_out].
+// One invocation computes one output row (one dot product). Compiled to SPIR-V
+// by glslc (see Makefile VULKAN target) and embedded as shaders/matmul_spv.h.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly  buffer Wbuf { float W[]; };
+layout(std430, binding = 1) readonly  buffer Xbuf { float x[]; };
+layout(std430, binding = 2) writeonly buffer Ybuf { float y[]; };
+
+layout(push_constant) uniform Push { uint n_out; uint n_in; } pc;
+
+void main() {
+    uint o = gl_GlobalInvocationID.x;
+    if (o >= pc.n_out) return;
+    float acc = 0.0;
+    uint base = o * pc.n_in;
+    for (uint i = 0u; i < pc.n_in; ++i) acc += W[base + i] * x[i];
+    y[o] = acc;
+}

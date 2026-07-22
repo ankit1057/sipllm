@@ -1,0 +1,73 @@
+// model.h — model hyperparameters, tensor naming, and the weight reference the
+// transformer consumes.
+//
+// The transformer is written once against WeightRef and never learns whether a
+// weight is fp32 (toy model / small configs) or block-quantized (real GGUF).
+// LayerLoader decides residency; the forward pass just calls linear().
+#pragma once
+
+#include "llm/weight_source.h"
+
+#include <string>
+
+namespace llm {
+
+// Llama-family decoder configuration. GQA is expressed via n_kv_heads; when it
+// equals n_heads there is no grouping (Llama-2 7B), when smaller there is
+// (Llama-3 8B uses 8 kv heads for 32 query heads).
+struct ModelConfig {
+    int64_t n_layers   = 0;
+    int64_t n_heads    = 0;
+    int64_t n_kv_heads = 0;
+    int64_t dim        = 0;    // hidden size / embedding length
+    int64_t head_dim   = 0;    // usually dim / n_heads
+    int64_t ffn_dim    = 0;    // feed-forward intermediate size
+    int64_t vocab_size = 0;
+    int64_t ctx_len    = 0;    // trained context length
+    float   rope_theta = 10000.f;
+    float   rms_eps    = 1e-5f;
+    bool    tie_embeddings = false;   // output projection shares token_embd
+
+    int64_t q_dim()  const { return n_heads * head_dim; }
+    int64_t kv_dim() const { return n_kv_heads * head_dim; }
+    int64_t gqa_group() const { return n_heads / n_kv_heads; }
+
+    // Build from a WeightSource's metadata, accepting both GGUF ("llama.*")
+    // keys and the toy .llmw short keys. Falls back to tensor shapes where a
+    // hyperparameter is missing.
+    static ModelConfig from_source(const WeightSource& src);
+
+    std::string summary() const;
+};
+
+// GGUF-compatible tensor names. Using the exact llama.cpp naming everywhere
+// means the toy writer and the real GGUF loader are interchangeable.
+namespace names {
+inline std::string blk(int64_t i, const char* suffix) {
+    return "blk." + std::to_string(i) + "." + suffix;
+}
+inline std::string attn_norm(int64_t i)   { return blk(i, "attn_norm.weight"); }
+inline std::string attn_q(int64_t i)      { return blk(i, "attn_q.weight"); }
+inline std::string attn_k(int64_t i)      { return blk(i, "attn_k.weight"); }
+inline std::string attn_v(int64_t i)      { return blk(i, "attn_v.weight"); }
+inline std::string attn_out(int64_t i)    { return blk(i, "attn_output.weight"); }
+inline std::string ffn_norm(int64_t i)    { return blk(i, "ffn_norm.weight"); }
+inline std::string ffn_gate(int64_t i)    { return blk(i, "ffn_gate.weight"); }
+inline std::string ffn_up(int64_t i)      { return blk(i, "ffn_up.weight"); }
+inline std::string ffn_down(int64_t i)    { return blk(i, "ffn_down.weight"); }
+constexpr const char* token_embd = "token_embd.weight";
+constexpr const char* output_norm = "output_norm.weight";
+constexpr const char* output = "output.weight";
+} // namespace names
+
+// A resident weight: pointer to bytes (fp32 or quantized), its type, and the
+// logical [n_out, n_in] shape. For 1-D norm weights n_out==1 and data is fp32.
+struct WeightRef {
+    const void* data   = nullptr;
+    DType       dtype  = DType::F32;
+    int64_t     n_out  = 0;
+    int64_t     n_in   = 0;
+    bool valid() const { return data != nullptr; }
+};
+
+} // namespace llm

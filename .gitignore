@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+*.o
+*.spv
+
+# Generated from shaders/matmul.comp by `make shader`
+shaders/matmul_spv.h
+
+# Models (fetch or generate locally — see README)
+models/
+*.gguf
+
+# Vendored / third-party trees (see golden/README.md to build llama.cpp)
+third_party/
+
+# Golden-test run artifacts
+*.dump
+cmp_*.json
+golden/matrix_results.json
+
+# Local editor / assistant config
+.claude/
+CLAUDE.md
+
+# OS cruft
+.DS_Store
