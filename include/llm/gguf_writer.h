@@ -147,6 +147,9 @@ struct ToyGgufConfig {
     bool post_norms = false;          // emit Gemma2 post-attention / post-ffn norms
     float attn_softcap = 0.f;         // Gemma2 attn logit softcap (0 = none)
     float final_softcap = 0.f;        // Gemma2 final logit softcap (0 = none)
+    bool qk_norm = false;             // emit Gemma3 per-head q/k norms
+    float rope_local = 0.f;           // Gemma3 local (sliding) RoPE base (0 = none)
+    int64_t swa_pattern = 0;          // Gemma3 global-layer period (0 = all global)
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -169,6 +172,8 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     w.u32("general.alignment", 32);
     if (c.attn_softcap > 0.f)  w.f32(a + "attn_logit_softcapping", c.attn_softcap);
     if (c.final_softcap > 0.f) w.f32(a + "final_logit_softcapping", c.final_softcap);
+    if (c.rope_local > 0.f)    w.f32(a + "rope.local_freq_base", c.rope_local);
+    if (c.swa_pattern > 0)     w.u32(a + "attention.sliding_window_pattern", (uint32_t)c.swa_pattern);
     if (c.with_tokenizer) {
         // Minimal byte-level vocab: one token per byte value 0..vocab-1.
         std::vector<std::string> toks; std::vector<int32_t> types;
@@ -209,6 +214,8 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
         emit(names::attn_k(i), {kv_dim, c.dim}, true);
         emit(names::attn_v(i), {kv_dim, c.dim}, true);
         emit(names::attn_out(i), {c.dim, q_dim}, true);
+        if (c.qk_norm) { ones(names::blk(i, "attn_q_norm.weight"), head_dim);
+                         ones(names::blk(i, "attn_k_norm.weight"), head_dim); }
         if (c.post_norms) ones(names::blk(i, "post_attention_norm.weight"), c.dim);
         ones(names::ffn_norm(i), c.dim);
         emit(names::ffn_gate(i), {c.ffn_dim, c.dim}, true);

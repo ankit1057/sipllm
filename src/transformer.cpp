@@ -101,6 +101,7 @@ void Transformer::block(int64_t layer, int64_t pos) {
             block_llama(layer, pos);
             return;
         case Arch::Gemma2:
+        case Arch::Gemma3:    // Gemma2 shape + QK-norm + per-layer RoPE (handled in-block)
             block_gemma2(layer, pos);
             return;
         case Arch::Unknown:
@@ -208,8 +209,28 @@ void Transformer::block_gemma2(int64_t layer, int64_t pos) {
     linear(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), pool_);
     linear(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), pool_);
 
-    apply_rope(q_.data(), n_heads, hd, pos, cfg_.rope_theta);
-    apply_rope(k_.data(), n_kv,    hd, pos, cfg_.rope_theta);
+    // Gemma 3 QK-norm: (1+w) RMSNorm per head over head_dim, applied to q/k
+    // before RoPE. Absent in Gemma 2 (invalid refs) => skipped.
+    WeightRef qn = loader_->getWeight(Role::AttnQNorm);
+    WeightRef kn = loader_->getWeight(Role::AttnKNorm);
+    if (qn.valid())
+        for (int64_t h = 0; h < n_heads; ++h)
+            rmsnorm_gemma(q_.data() + h * hd, q_.data() + h * hd,
+                          static_cast<const float*>(qn.data), hd, eps);
+    if (kn.valid())
+        for (int64_t h = 0; h < n_kv; ++h)
+            rmsnorm_gemma(k_.data() + h * hd, k_.data() + h * hd,
+                          static_cast<const float*>(kn.data), hd, eps);
+
+    // Gemma 3 uses a smaller RoPE base on sliding-window (local) layers; the
+    // pattern marks every Nth layer global. 0 pattern / 0 local base => the
+    // single rope_theta (Gemma 2 and everything else).
+    float theta = cfg_.rope_theta;
+    if (cfg_.rope_theta_local > 0.f && cfg_.sliding_window_pattern > 0 &&
+        ((layer + 1) % cfg_.sliding_window_pattern) != 0)
+        theta = cfg_.rope_theta_local;   // local (sliding-window) layer
+    apply_rope(q_.data(), n_heads, hd, pos, theta);
+    apply_rope(k_.data(), n_kv,    hd, pos, theta);
 
     std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));
     std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));

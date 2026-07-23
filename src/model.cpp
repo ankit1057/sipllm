@@ -12,6 +12,7 @@ Arch arch_from_name(const std::string& name) {
     if (name == "mistral") return Arch::Mistral;
     if (name == "qwen2")   return Arch::Qwen2;
     if (name == "gemma2")  return Arch::Gemma2;
+    if (name == "gemma3")  return Arch::Gemma3;
     return Arch::Unknown;
 }
 
@@ -21,6 +22,7 @@ const char* arch_name(Arch a) {
         case Arch::Mistral: return "mistral";
         case Arch::Qwen2:   return "qwen2";
         case Arch::Gemma2:  return "gemma2";
+        case Arch::Gemma3:  return "gemma3";
         case Arch::Unknown: return "unknown";
     }
     return "unknown";
@@ -104,11 +106,15 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     if (first_float(src, {K("attn_logit_softcapping")}, f))  c.attn_logit_softcap = (float)f;
     if (first_float(src, {K("final_logit_softcapping")}, f))  c.final_logit_softcap = (float)f;
     if (first_float(src, {K("attention.query_pre_attn_scalar")}, f)) c.query_pre_attn_scalar = (float)f;
-    if (c.arch_kind == Arch::Gemma2) {
+    if (c.arch_kind == Arch::Gemma2 || c.arch_kind == Arch::Gemma3) {
         c.gemma_rmsnorm = true;
         if (c.dim > 0) c.embedding_scale = std::sqrt((float)c.dim);
         if (c.rms_eps == 1e-5f) c.rms_eps = 1e-6f;   // Gemma default eps
     }
+    // Gemma 3 local/global RoPE: separate base for sliding-window layers, and
+    // the pattern that says which layers are global.
+    if (first_float(src, {K("rope.local_freq_base")}, f)) c.rope_theta_local = (float)f;
+    if (first_int(src, {K("attention.sliding_window_pattern")}, v)) c.sliding_window_pattern = v;
 
     if (c.head_dim == 0 && c.n_heads > 0 && c.dim > 0) c.head_dim = c.dim / c.n_heads;
     return c;
