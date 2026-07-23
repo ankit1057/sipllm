@@ -98,6 +98,11 @@ void Transformer::block(int64_t layer, int64_t pos) {
         case Arch::Llama:
         case Arch::Mistral:   // RMSNorm + RoPE + GQA + SwiGLU, same as Llama
         case Arch::Qwen2:     // Llama block + optional q/k/v biases (applied below)
+            block_llama(layer, pos);
+            return;
+        case Arch::Gemma2:
+            block_gemma2(layer, pos);
+            return;
         case Arch::Unknown:
         default:
             block_llama(layer, pos);
@@ -180,11 +185,86 @@ void Transformer::block_llama(int64_t layer, int64_t pos) {
     if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
 }
 
+// Gemma 2 block: (1+w) RMSNorm, pre + post norms around each sublayer, GeGLU
+// FFN, optional attention-logit soft-capping, and a head_dim that is
+// independent of the model dim. No q/k/v biases. See ops.h for the primitives.
+void Transformer::block_gemma2(int64_t layer, int64_t pos) {
+    const int64_t dim = cfg_.dim;
+    const int64_t hd = cfg_.head_dim;
+    const int64_t n_heads = cfg_.n_heads;
+    const int64_t n_kv = cfg_.n_kv_heads;
+    const int64_t kv_dim = cfg_.kv_dim();
+    const int64_t group = cfg_.gqa_group();
+    // Attention scale: 1/sqrt(query_pre_attn_scalar) if given, else 1/sqrt(head_dim).
+    const float qs = cfg_.query_pre_attn_scalar > 0.f ? cfg_.query_pre_attn_scalar : (float)hd;
+    const float scale = 1.0f / std::sqrt(qs);
+    const float eps = cfg_.rms_eps;
+
+    // --- attention (pre-norm) ---
+    WeightRef an = loader_->getWeight(Role::AttnNorm);
+    rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(an.data), dim, eps);
+
+    linear(q_.data(), loader_->getWeight(Role::AttnQ), xb_.data(), pool_);
+    linear(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), pool_);
+    linear(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), pool_);
+
+    apply_rope(q_.data(), n_heads, hd, pos, cfg_.rope_theta);
+    apply_rope(k_.data(), n_kv,    hd, pos, cfg_.rope_theta);
+
+    std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));
+    std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
+
+    for (int64_t h = 0; h < n_heads; ++h) {
+        const float* qh = q_.data() + h * hd;
+        const int64_t kvh = h / group;
+        for (int64_t t = 0; t <= pos; ++t) {
+            const float* kt = kv_->k(layer, t) + kvh * hd;
+            att_[t] = dot_f32(qh, kt, hd) * scale;
+        }
+        // Gemma 2 caps attention logits before the softmax.
+        softcap_inplace(att_.data(), pos + 1, cfg_.attn_logit_softcap);
+        softmax(att_.data(), pos + 1);
+        float* out = attn_out_.data() + h * hd;
+        for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
+        for (int64_t t = 0; t <= pos; ++t) {
+            const float* vt = kv_->v(layer, t) + kvh * hd;
+            axpy_f32(out, vt, att_[t], hd);
+        }
+    }
+
+    // output projection -> post-attention norm -> residual
+    linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
+    WeightRef apn = loader_->getWeight(Role::AttnPostNorm);
+    if (apn.valid())
+        rmsnorm_gemma(proj_.data(), proj_.data(), static_cast<const float*>(apn.data), dim, eps);
+    vec_add_inplace(x_.data(), proj_.data(), dim);
+
+    // --- feed-forward (GeGLU, pre-norm) ---
+    WeightRef fn = loader_->getWeight(Role::FfnNorm);
+    rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(fn.data), dim, eps);
+
+    linear(hb_.data(),  loader_->getWeight(Role::FfnGate), xb_.data(), pool_);
+    linear(hb2_.data(), loader_->getWeight(Role::FfnUp),   xb_.data(), pool_);
+    gelu_inplace(hb_.data(), cfg_.ffn_dim);                       // GELU, not SiLU
+    mul_f32(hb_.data(), hb_.data(), hb2_.data(), cfg_.ffn_dim);   // gate*up
+    linear(proj_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
+
+    // post-FFN norm -> residual
+    WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
+    if (fpn.valid())
+        rmsnorm_gemma(proj_.data(), proj_.data(), static_cast<const float*>(fpn.data), dim, eps);
+    vec_add_inplace(x_.data(), proj_.data(), dim);
+
+    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
+}
+
 const float* Transformer::forward(int64_t token, int64_t pos) {
     LLM_CHECK(pos < kv_->max_ctx(), "forward: position exceeds context window");
 
     // token -> embedding (streamed one row from disk, or resident if tied)
     loader_->embed_token(token, x_.data());
+    // Gemma scales token embeddings by sqrt(dim); 1.0 elsewhere (no-op).
+    if (cfg_.embedding_scale != 1.0f) scale_f32(x_.data(), cfg_.embedding_scale, cfg_.dim);
 
     if (profiling_) { timings_.assign(cfg_.n_layers, LayerTiming{}); }
 
@@ -214,8 +294,13 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
 
     // final norm + output projection to logits
     WeightRef on = loader_->output_norm_weight();
-    rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
+    if (cfg_.gemma_rmsnorm)
+        rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
+    else
+        rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
     linear(logits_.data(), loader_->output_weight(), xb_.data(), pool_);
+    // Gemma 2 caps the final logits (no-op when the cap is 0).
+    softcap_inplace(logits_.data(), cfg_.vocab_size, cfg_.final_logit_softcap);
     return logits_.data();
 }
 

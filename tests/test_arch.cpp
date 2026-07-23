@@ -112,6 +112,46 @@ TEST(qwen2_bias_changes_output) {
     CHECK(maxdiff > 1e-4);   // bias demonstrably changes the output
 }
 
+// Shared Gemma-2 toy config (post-norms + soft-caps).
+static ToyGgufConfig gemma2_cfg(uint32_t seed, float final_cap) {
+    ToyGgufConfig c; c.arch = "gemma2"; c.post_norms = true;
+    c.attn_softcap = 50.f; c.final_softcap = final_cap;
+    c.n_layers = 2; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 2;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = seed;
+    return c;
+}
+
+TEST(gemma2_config_discovery) {
+    ToyGgufConfig c = gemma2_cfg(31, 30.f);
+    std::string p = scratch("gemma2_cfg.gguf"); write_toy_gguf(p, c);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    CHECK(cfg.arch_kind == Arch::Gemma2 && cfg.gemma_rmsnorm);
+    APPROX(cfg.embedding_scale, std::sqrt(32.0), 1e-4);
+    APPROX(cfg.attn_logit_softcap, 50.0, 1e-4);
+    APPROX(cfg.final_logit_softcap, 30.0, 1e-4);
+    CHECK(g.find("blk.0.post_attention_norm.weight") != nullptr);
+    CHECK(g.find("blk.0.post_ffw_norm.weight") != nullptr);
+}
+
+TEST(gemma2_forward_finite_and_deterministic) {
+    ToyGgufConfig c = gemma2_cfg(31, 30.f);
+    std::string p = scratch("gemma2_fwd.gguf"); write_toy_gguf(p, c);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(p, toks), b = forward_gguf(p, toks);
+    CHECK(a == b);                                  // deterministic
+    for (float v : a) CHECK(std::isfinite(v));      // GeGLU + softcap path stable
+}
+
+TEST(gemma2_final_softcap_bounds_logits) {
+    // An aggressive final cap of 1.0 must clamp every logit strictly inside
+    // (-1, 1), since cap*tanh(.) < cap. Proves the final soft-cap is applied.
+    ToyGgufConfig c = gemma2_cfg(31, 1.0f);
+    std::string p = scratch("gemma2_cap.gguf"); write_toy_gguf(p, c);
+    auto a = forward_gguf(p, {5, 2, 9, 1, 7});
+    for (float v : a) CHECK(std::fabs(v) < 1.0f);
+}
+
 int main() {
     printf("== test_arch ==\n");
     return llmtest::run_all();

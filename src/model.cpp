@@ -2,6 +2,7 @@
 #include "llm/model.h"
 #include "llm/common.h"
 
+#include <cmath>
 #include <cstdio>
 
 namespace llm {
@@ -10,6 +11,7 @@ Arch arch_from_name(const std::string& name) {
     if (name == "llama")   return Arch::Llama;
     if (name == "mistral") return Arch::Mistral;
     if (name == "qwen2")   return Arch::Qwen2;
+    if (name == "gemma2")  return Arch::Gemma2;
     return Arch::Unknown;
 }
 
@@ -18,6 +20,7 @@ const char* arch_name(Arch a) {
         case Arch::Llama:   return "llama";
         case Arch::Mistral: return "mistral";
         case Arch::Qwen2:   return "qwen2";
+        case Arch::Gemma2:  return "gemma2";
         case Arch::Unknown: return "unknown";
     }
     return "unknown";
@@ -94,6 +97,18 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     if (first_int(src, {K("rope.scaling.original_context_length"),
                         "llama.rope.scaling.original_context_length"}, v))
         c.rope_orig_ctx_len = v;
+
+    // Gemma-family behavior. Soft-capping and the query scalar are read
+    // generically; the (1+w) norm and the sqrt(dim) embedding scale are implied
+    // by the architecture.
+    if (first_float(src, {K("attn_logit_softcapping")}, f))  c.attn_logit_softcap = (float)f;
+    if (first_float(src, {K("final_logit_softcapping")}, f))  c.final_logit_softcap = (float)f;
+    if (first_float(src, {K("attention.query_pre_attn_scalar")}, f)) c.query_pre_attn_scalar = (float)f;
+    if (c.arch_kind == Arch::Gemma2) {
+        c.gemma_rmsnorm = true;
+        if (c.dim > 0) c.embedding_scale = std::sqrt((float)c.dim);
+        if (c.rms_eps == 1e-5f) c.rms_eps = 1e-6f;   // Gemma default eps
+    }
 
     if (c.head_dim == 0 && c.n_heads > 0 && c.dim > 0) c.head_dim = c.dim / c.n_heads;
     return c;

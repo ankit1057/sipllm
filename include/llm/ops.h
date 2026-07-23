@@ -35,6 +35,19 @@ void softmax(float* x, int64_t n);
 // SiLU / swish: x * sigmoid(x), in place.
 void silu_inplace(float* x, int64_t n);
 
+// Tanh-approximation GELU (Gemma "gelu_pytorch_tanh"), in place:
+//   0.5*x*(1 + tanh( sqrt(2/pi) * (x + 0.044715*x^3) ))
+void gelu_inplace(float* x, int64_t n);
+
+// Logit soft-capping (Gemma 2): x = cap * tanh(x / cap), in place. cap<=0 is a
+// no-op. Bounds attention scores / final logits to (-cap, cap).
+void softcap_inplace(float* x, int64_t n, float cap);
+
+// Gemma-style RMSNorm: the learned scale is (1 + weight):
+//   out[i] = x[i] / sqrt(mean(x^2)+eps) * (1 + weight[i])
+void rmsnorm_gemma(float* out, const float* x, const float* weight, int64_t n,
+                   float eps = 1e-6f);
+
 // ---- matmul ---------------------------------------------------------------
 
 // Single-vector (batch=1) linear: y = W @ x

@@ -21,6 +21,8 @@ const char* LayerLoader::role_suffix(Role r) {
         case Role::AttnQBias: return "attn_q.bias";
         case Role::AttnKBias: return "attn_k.bias";
         case Role::AttnVBias: return "attn_v.bias";
+        case Role::AttnPostNorm: return "post_attention_norm.weight";
+        case Role::FfnPostNorm:  return "post_ffw_norm.weight";
         default:             return "?";
     }
 }
@@ -29,14 +31,19 @@ std::string LayerLoader::role_name(int layer, Role r) const {
     return names::blk(layer, role_suffix(r));
 }
 
-static bool is_norm(Role r) { return r == Role::AttnNorm || r == Role::FfnNorm; }
+static bool is_post_norm(Role r) {
+    return r == Role::AttnPostNorm || r == Role::FfnPostNorm;
+}
+static bool is_norm(Role r) {
+    return r == Role::AttnNorm || r == Role::FfnNorm || is_post_norm(r);
+}
 static bool is_bias(Role r) {
     return r == Role::AttnQBias || r == Role::AttnKBias || r == Role::AttnVBias;
 }
 // 1-D fp32 weights (norms, biases): tiny, always dequantized on load.
 static bool is_1d_fp32(Role r) { return is_norm(r) || is_bias(r); }
 // Roles that may legitimately be absent (arch-dependent). Missing -> invalid ref.
-static bool is_optional(Role r) { return is_bias(r); }
+static bool is_optional(Role r) { return is_bias(r) || is_post_norm(r); }
 
 LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     : src_(src), cfg_(cfg), opt_(opt), n_layers_(cfg.n_layers) {
