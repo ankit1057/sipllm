@@ -42,7 +42,20 @@ void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
     }
 }
 
+// Dispatch one block to the per-architecture implementation. Every arch except
+// the Llama reference is added as a new case here (issues #10-#16); Unknown
+// architectures fall through to the Llama path unchanged.
 void Transformer::block(int64_t layer, int64_t pos) {
+    switch (cfg_.arch_kind) {
+        case Arch::Llama:
+        case Arch::Unknown:
+        default:
+            block_llama(layer, pos);
+            return;
+    }
+}
+
+void Transformer::block_llama(int64_t layer, int64_t pos) {
     const int64_t dim = cfg_.dim;
     const int64_t hd = cfg_.head_dim;
     const int64_t n_heads = cfg_.n_heads;
