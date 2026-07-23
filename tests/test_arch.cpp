@@ -257,6 +257,52 @@ TEST(phi3_partial_rotary_changes_output) {
     CHECK(maxdiff > 1e-4);
 }
 
+TEST(moe_config_discovery) {
+    ToyGgufConfig c; c.arch = "llama"; c.n_experts = 4; c.n_experts_used = 2;
+    c.n_layers = 2; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 2;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = 61;
+    std::string p = scratch("moe_cfg.gguf"); write_toy_gguf(p, c);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    CHECK(cfg.is_moe() && cfg.n_experts == 4 && cfg.n_experts_used == 2);
+    CHECK(g.find("blk.0.ffn_gate_inp.weight") != nullptr);
+    CHECK(g.find("blk.0.ffn_gate_exps.weight") != nullptr);
+    CHECK(g.find("blk.0.ffn_gate.weight") == nullptr);   // no dense FFN
+}
+
+TEST(moe_single_expert_equals_dense) {
+    // A 1-expert MoE (top-1, weight 1.0) is exactly a dense FFN. The expert
+    // tensors are filled in the same RNG order/size as the dense gate/up/down
+    // and the router is emitted last, so the shared weights are identical =>
+    // byte-identical logits.
+    ToyGgufConfig cd; cd.arch = "llama";
+    cd.n_layers = 3; cd.dim = 32; cd.n_heads = 4; cd.n_kv_heads = 2;
+    cd.ffn_dim = 64; cd.vocab_size = 48; cd.seed = 61;
+    ToyGgufConfig cm = cd; cm.n_experts = 1; cm.n_experts_used = 1;
+    std::string pd = scratch("moe_dense.gguf"), pm = scratch("moe_one.gguf");
+    write_toy_gguf(pd, cd); write_toy_gguf(pm, cm);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(pd, toks), b = forward_gguf(pm, toks);
+    CHECK(a.size() == b.size() && !a.empty());
+    for (size_t i = 0; i < a.size(); ++i) APPROX(a[i], b[i], 1e-4);
+}
+
+TEST(moe_expert_count_changes_output) {
+    // Same weights; routing 1 expert vs all 4 must produce different logits.
+    ToyGgufConfig base; base.arch = "llama"; base.n_experts = 4;
+    base.n_layers = 3; base.dim = 32; base.n_heads = 4; base.n_kv_heads = 2;
+    base.ffn_dim = 64; base.vocab_size = 48; base.seed = 61;
+    ToyGgufConfig one = base; one.n_experts_used = 1;
+    ToyGgufConfig all = base; all.n_experts_used = 4;
+    std::string p1 = scratch("moe_k1.gguf"), p4 = scratch("moe_k4.gguf");
+    write_toy_gguf(p1, one); write_toy_gguf(p4, all);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(p1, toks), b = forward_gguf(p4, toks);
+    double maxdiff = 0;
+    for (size_t i = 0; i < a.size(); ++i) maxdiff = std::max(maxdiff, (double)std::fabs(a[i] - b[i]));
+    CHECK(maxdiff > 1e-4);
+}
+
 int main() {
     printf("== test_arch ==\n");
     return llmtest::run_all();

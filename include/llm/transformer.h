@@ -68,6 +68,8 @@ private:
     void block_llama(int64_t layer, int64_t pos);  // reference: RMSNorm+RoPE+GQA+SwiGLU
     void block_gemma2(int64_t layer, int64_t pos); // GeGLU + pre/post (1+w) norms + softcap
     void block_phi3(int64_t layer, int64_t pos);   // fused QKV + fused gate/up + partial RoPE
+    void block_moe(int64_t layer, int64_t pos);    // Mixtral: router + top-k expert FFNs
+    void attention_llama(int64_t layer, int64_t pos); // shared attention sublayer
 
     LayerLoader* loader_;
     KVCache*     kv_;
@@ -86,6 +88,8 @@ private:
     std::vector<float> hb_;      // ffn_dim
     std::vector<float> hb2_;     // ffn_dim
     std::vector<float> fused_;   // q_dim+2*kv_dim or 2*ffn_dim (Phi-3 fused proj)
+    std::vector<float> router_;  // n_experts (MoE gating scores)
+    std::vector<float> moe_;     // dim (MoE weighted expert accumulator)
     std::vector<float> logits_;  // vocab
 
     bool profiling_ = false;

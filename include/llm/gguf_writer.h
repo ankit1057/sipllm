@@ -152,6 +152,8 @@ struct ToyGgufConfig {
     int64_t swa_pattern = 0;          // Gemma3 global-layer period (0 = all global)
     bool fused_qkv = false;           // Phi3: one attn_qkv + fused ffn_up (gate;up)
     int64_t rope_dim = 0;             // Phi3 partial rotary dims (0 = full head_dim)
+    int64_t n_experts = 0;            // Mixtral expert count (0 = dense FFN)
+    int64_t n_experts_used = 0;       // Mixtral experts per token (0 => all)
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -181,6 +183,11 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
         // not mistaken for it during config discovery.
         w.u32(a + "attention.key_length", (uint32_t)head_dim);
         if (c.rope_dim > 0) w.u32(a + "rope.dimension_count", (uint32_t)c.rope_dim);
+    }
+    if (c.n_experts > 0) {
+        w.u32(a + "expert_count", (uint32_t)c.n_experts);
+        w.u32(a + "expert_used_count",
+              (uint32_t)(c.n_experts_used > 0 ? c.n_experts_used : c.n_experts));
     }
     if (c.with_tokenizer) {
         // Minimal byte-level vocab: one token per byte value 0..vocab-1.
@@ -232,14 +239,22 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
                          ones(names::blk(i, "attn_k_norm.weight"), head_dim); }
         if (c.post_norms) ones(names::blk(i, "post_attention_norm.weight"), c.dim);
         ones(names::ffn_norm(i), c.dim);
-        if (c.fused_qkv) {
+        if (c.n_experts > 0) {
+            // Packed 3D expert projections. Filled in the same RNG order and
+            // total size as the dense gate/up/down, so a single-expert MoE has
+            // identical weights to a dense model with the same seed.
+            emit(names::blk(i, "ffn_gate_exps.weight"), {c.n_experts, c.ffn_dim, c.dim}, true);
+            emit(names::blk(i, "ffn_up_exps.weight"),   {c.n_experts, c.ffn_dim, c.dim}, true);
+            emit(names::blk(i, "ffn_down_exps.weight"), {c.n_experts, c.dim, c.ffn_dim}, true);
+        } else if (c.fused_qkv) {
             // Fused gate+up ([gate; up]) — same RNG order as separate gate,up.
             emit(names::ffn_up(i), {2 * c.ffn_dim, c.dim}, true);
+            emit(names::ffn_down(i), {c.dim, c.ffn_dim}, true);
         } else {
             emit(names::ffn_gate(i), {c.ffn_dim, c.dim}, true);
             emit(names::ffn_up(i), {c.ffn_dim, c.dim}, true);
+            emit(names::ffn_down(i), {c.dim, c.ffn_dim}, true);
         }
-        emit(names::ffn_down(i), {c.dim, c.ffn_dim}, true);
         if (c.post_norms) ones(names::blk(i, "post_ffw_norm.weight"), c.dim);
     }
     ones(names::output_norm, c.dim);
@@ -261,6 +276,13 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
             vecf(names::blk(i, "attn_v.bias"), kv_dim);
         }
     }
+
+    // MoE router (ffn_gate_inp). Emitted AFTER all weights so a single-expert
+    // MoE's weight RNG stream matches a dense model with the same seed, which
+    // lets a test assert the two produce identical output.
+    if (c.n_experts > 0)
+        for (int64_t i = 0; i < c.n_layers; ++i)
+            emit(names::blk(i, "ffn_gate_inp.weight"), {c.n_experts, c.dim}, true);
     w.write(path);
 }
 

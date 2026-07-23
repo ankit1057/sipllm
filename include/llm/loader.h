@@ -47,6 +47,8 @@ enum class Role {
     AttnQNorm, AttnKNorm,
     // Optional fused projection (Phi-3): one attn_qkv.weight split into q/k/v.
     AttnQKV,
+    // Optional Mixtral MoE tensors: router + packed 3D expert projections.
+    FfnGateInp, FfnGateExps, FfnUpExps, FfnDownExps,
     COUNT
 };
 
