@@ -64,6 +64,7 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         LLM_CHECK(pos_ < kv_->max_ctx(), "context window exceeded during prefill");
         const float* logits = tf_->forward(prompt_ids[i], pos_);
         ++pos_;
+        sampler.accept(prompt_ids[i]);   // seed repetition-penalty history
         if (i + 1 == prompt_ids.size()) {
             first_logits_.assign(logits, logits + vocab);
             next = sampler.sample(logits, vocab);
