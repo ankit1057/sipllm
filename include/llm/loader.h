@@ -43,6 +43,8 @@ enum class Role {
     // Optional post-sublayer norms (Gemma 2): applied to the attn / FFN output
     // before the residual add.
     AttnPostNorm, FfnPostNorm,
+    // Optional per-head query/key norms (Gemma 3), applied before RoPE.
+    AttnQNorm, AttnKNorm,
     COUNT
 };
 

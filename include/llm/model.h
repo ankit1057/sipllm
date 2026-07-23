@@ -20,6 +20,7 @@ enum class Arch {
     Mistral,   // structurally identical to Llama (sliding-window attn not modeled)
     Qwen2,     // Llama-like + bias on q/k/v projections (Qwen2 / Qwen2.5)
     Gemma2,    // GeGLU, (1+w) RMSNorm, pre+post norms, embd scale, logit softcap
+    Gemma3,    // Gemma2 shape + QK-norm + per-layer local/global RoPE, no softcap
     Unknown,   // recognized string but no dedicated block yet -> treated as Llama
 };
 
@@ -68,6 +69,11 @@ struct ModelConfig {
     float   attn_logit_softcap  = 0.f; // cap on attention scores (Gemma2 ~50)
     float   final_logit_softcap = 0.f; // cap on output logits (Gemma2 ~30)
     float   query_pre_attn_scalar = 0.f; // attn scale denom; 0 => head_dim
+    // Gemma 3: sliding-window pattern (every Nth layer is global) with a
+    // separate RoPE base for local layers. 0 pattern / 0 local base => all
+    // layers use rope_theta (inert for Gemma2 and everything else).
+    float   rope_theta_local = 0.f;      // RoPE base for local (sliding) layers
+    int64_t sliding_window_pattern = 0;  // global layer every Nth (Gemma3: 6)
 
     int64_t q_dim()  const { return n_heads * head_dim; }
     int64_t kv_dim() const { return n_kv_heads * head_dim; }

@@ -152,6 +152,67 @@ TEST(gemma2_final_softcap_bounds_logits) {
     for (float v : a) CHECK(std::fabs(v) < 1.0f);
 }
 
+TEST(gemma3_config_discovery) {
+    ToyGgufConfig c; c.arch = "gemma3"; c.post_norms = true; c.qk_norm = true;
+    c.rope_local = 10000.f; c.rope_theta = 1000000.f; c.swa_pattern = 3;
+    c.n_layers = 4; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 2;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = 41;
+    std::string p = scratch("gemma3_cfg.gguf"); write_toy_gguf(p, c);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    CHECK(cfg.arch_kind == Arch::Gemma3 && cfg.gemma_rmsnorm);
+    APPROX(cfg.embedding_scale, std::sqrt(32.0), 1e-4);
+    APPROX(cfg.rope_theta_local, 10000.0, 1e-3);
+    CHECK(cfg.sliding_window_pattern == 3);
+    CHECK(g.find("blk.0.attn_q_norm.weight") != nullptr);
+    CHECK(g.find("blk.0.attn_k_norm.weight") != nullptr);
+}
+
+static ToyGgufConfig gemma3_base(uint32_t seed) {
+    ToyGgufConfig c; c.arch = "gemma3"; c.post_norms = true;
+    c.n_layers = 4; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 2;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = seed;
+    return c;
+}
+
+TEST(gemma3_forward_finite_and_deterministic) {
+    ToyGgufConfig c = gemma3_base(41); c.qk_norm = true;
+    c.rope_local = 10000.f; c.rope_theta = 1000000.f; c.swa_pattern = 3;
+    std::string p = scratch("gemma3_fwd.gguf"); write_toy_gguf(p, c);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(p, toks), b = forward_gguf(p, toks);
+    CHECK(a == b);
+    for (float v : a) CHECK(std::isfinite(v));
+}
+
+TEST(gemma3_qk_norm_changes_output) {
+    // Same weights; QK-norm on vs off must move the logits (it renormalizes q/k).
+    ToyGgufConfig off = gemma3_base(41);              // no qk_norm
+    ToyGgufConfig on  = gemma3_base(41); on.qk_norm = true;
+    std::string po = scratch("g3_noqk.gguf"), pn = scratch("g3_qk.gguf");
+    write_toy_gguf(po, off); write_toy_gguf(pn, on);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(po, toks), b = forward_gguf(pn, toks);
+    double maxdiff = 0;
+    for (size_t i = 0; i < a.size(); ++i) maxdiff = std::max(maxdiff, (double)std::fabs(a[i] - b[i]));
+    CHECK(maxdiff > 1e-4);
+}
+
+TEST(gemma3_local_rope_changes_output) {
+    // Same weights; a distinct local RoPE base on sliding-window layers must
+    // change the output vs using the single global base everywhere.
+    ToyGgufConfig g = gemma3_base(41); g.qk_norm = true; g.rope_theta = 1000000.f;
+    ToyGgufConfig same = g;                              // no local base -> all global
+    ToyGgufConfig split = g; split.rope_local = 10000.f; split.swa_pattern = 3;
+    std::string ps = scratch("g3_global.gguf"), pl = scratch("g3_local.gguf");
+    write_toy_gguf(ps, same); write_toy_gguf(pl, split);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(ps, toks), b = forward_gguf(pl, toks);
+    double maxdiff = 0;
+    for (size_t i = 0; i < a.size(); ++i) maxdiff = std::max(maxdiff, (double)std::fabs(a[i] - b[i]));
+    CHECK(maxdiff > 1e-4);
+}
+
 int main() {
     printf("== test_arch ==\n");
     return llmtest::run_all();
