@@ -56,6 +56,35 @@ TEST(dot_neon_matches_scalar) {
     }
 }
 
+// Equivalence of the vectorized simd.h kernels (NEON on ARM, AVX2 on x86_64,
+// scalar elsewhere) against a plain scalar oracle — same guard as #4 asks for
+// dot_f32, extended to axpy/mul/scale so every AVX2 lane is exercised in CI.
+TEST(simd_kernels_match_scalar) {
+    std::mt19937 rng(321);
+    std::uniform_real_distribution<float> d(-1.f, 1.f);
+    for (int n : {1, 3, 7, 8, 9, 16, 31, 32, 33, 129, 256, 1000}) {
+        std::vector<float> a(n), b(n);
+        for (int i = 0; i < n; ++i) { a[i] = d(rng); b[i] = d(rng); }
+        const float alpha = 0.75f, s = -1.5f;
+
+        // axpy: y += alpha*x
+        std::vector<float> y1(b), y2(b);
+        axpy_f32(y1.data(), a.data(), alpha, n);
+        for (int i = 0; i < n; ++i) y2[i] += alpha * a[i];
+        for (int i = 0; i < n; ++i) APPROX(y1[i], y2[i], 1e-5);
+
+        // mul: out = a*b
+        std::vector<float> m(n);
+        mul_f32(m.data(), a.data(), b.data(), n);
+        for (int i = 0; i < n; ++i) APPROX(m[i], a[i] * b[i], 1e-6);
+
+        // scale: x *= s
+        std::vector<float> sc(a);
+        scale_f32(sc.data(), s, n);
+        for (int i = 0; i < n; ++i) APPROX(sc[i], a[i] * s, 1e-6);
+    }
+}
+
 TEST(matmul_identity) {
     // Identity weight matrix must reproduce the input vector.
     const int n = 5;
