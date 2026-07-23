@@ -119,7 +119,7 @@ private:
         std::vector<uint8_t> buf[(int)Role::COUNT];
         WeightRef            ref[(int)Role::COUNT];
     };
-    struct Job { int slot; int layer; };
+    struct Job { int slot = -1; int layer = -1; };
 
     void   fill_slot(Slot& s, int layer);    // no lock held; does I/O + dequant
     void   load_weight_into(Slot& s, Role role, int layer);

@@ -33,7 +33,19 @@ else
 endif
 ARCHFLAGS ?= $(CXXFLAGS_ARCH)
 
-CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(ARCHFLAGS) $(INCLUDE)
+# ---- release hardening ----------------------------------------------------
+# Force deterministic zero-initialization of every automatic (stack) variable.
+# This is a class-elimination fix for an intermittent uninitialized-stack read
+# that only surfaced under -O3 with reused (non-zeroed) stack pages and turned a
+# garbage local into a near-null memmove destination (SIGSEGV). Cost is
+# near-zero (a few extra stores); it makes any such latent read return 0 (the
+# benign value fresh/demand-zeroed pages already had) rather than heap garbage.
+# Kept SEPARATE from OPT so it survives `make OPT="-O3"` overrides (the exact
+# invocation the bug was reproduced under). The Linux sanitizer/valgrind CI
+# gates build with HARDEN= (empty) so they can still DETECT uninitialized reads.
+HARDEN ?= -ftrivial-auto-var-init=zero
+
+CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(ARCHFLAGS) $(HARDEN) $(INCLUDE)
 
 BUILD := build
 SRC   := $(wildcard src/*.cpp)

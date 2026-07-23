@@ -35,3 +35,106 @@ jobs:
         run: |
           ./build/make_toy_model /tmp/toy.gguf --gguf
           ./build/inspect_gguf /tmp/toy.gguf | head -20
+
+  # -------------------------------------------------------------------------
+  # Correctness gate 1: sanitizers. Built with HARDEN= (no auto-var-init) so
+  # the sanitizers retain their ability to DETECT uninitialized reads, races,
+  # OOB and UB — the release build hardens with -ftrivial-auto-var-init=zero,
+  # but these jobs must stay able to catch a regression at its source.
+  sanitizers:
+    name: sanitizers (${{ matrix.san }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - san: address,undefined
+            opt: "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+            env: "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
+          - san: thread
+            opt: "-O1 -g -fsanitize=thread -fno-omit-frame-pointer"
+            env: "TSAN_OPTIONS=halt_on_error=1:history_size=7"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Build (${{ matrix.san }})
+        run: |
+          make -j"$(nproc)" CXX=clang++ HARDEN= ARCHFLAGS="" OPT="${{ matrix.opt }}" \
+            build/llm build/make_toy_model build/test_stress
+      - name: Synthesize toy models
+        run: |
+          ./build/make_toy_model /tmp/toy_q8.gguf --gguf --q8 --layers 4 --dim 256 --heads 8 --kv 8 --ffn 1024 --vocab 320 --ctx 128
+          ./build/make_toy_model /tmp/toy_f32.gguf --gguf        --layers 4 --dim 256 --heads 8 --kv 8 --ffn 1024 --vocab 320 --ctx 128
+      - name: Smoke scenarios under ${{ matrix.san }}
+        run: |
+          export ${{ matrix.env }}
+          set -e
+          for f in /tmp/toy_q8.gguf /tmp/toy_f32.gguf; do
+            ./build/llm "$f" -p AAAA -n 8 --greedy
+            ./build/llm "$f" -p "The quick brown fox" -n 8 --greedy --no-async --threads 1
+            ./build/llm "$f" -p Hello -n 8 --greedy --threads 4 --buffers 3
+            ./build/llm "$f" -p AAAA -n 8 --greedy --residency fp32
+          done
+      - name: Prompt/config fuzz under ${{ matrix.san }}
+        run: |
+          export ${{ matrix.env }}
+          SIPLLM_STRESS_ITERS=12 ./build/test_stress
+
+  # -------------------------------------------------------------------------
+  # Correctness gate 2: Valgrind memcheck with origin tracking. This is the
+  # deterministic detector for the intermittent uninitialized-stack read that
+  # is unavailable on macOS arm64. Built with HARDEN= so an uninitialized read
+  # is NOT masked — --error-exitcode=1 fails the build and names the origin.
+  valgrind:
+    name: valgrind (uninitialized-read gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang + valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang valgrind
+      - name: Build (clang -O3, no hardening so valgrind can detect)
+        run: |
+          make -j"$(nproc)" CXX=clang++ HARDEN= ARCHFLAGS="" OPT="-O3" \
+            build/llm build/make_toy_model build/test_stress
+      - name: Synthesize toy models
+        run: |
+          ./build/make_toy_model /tmp/toy_q8.gguf --gguf --q8 --layers 4 --dim 256 --heads 8 --kv 8 --ffn 1024 --vocab 320 --ctx 128
+          ./build/make_toy_model /tmp/toy_f32.gguf --gguf        --layers 4 --dim 256 --heads 8 --kv 8 --ffn 1024 --vocab 320 --ctx 128
+      - name: Valgrind across prompts/configs
+        run: |
+          set -e
+          VG="valgrind -q --track-origins=yes --error-exitcode=1 --num-callers=30 --errors-for-leak-kinds=none --leak-check=no"
+          for f in /tmp/toy_q8.gguf /tmp/toy_f32.gguf; do
+            $VG ./build/llm "$f" -p AAAA -n 8 --greedy
+            $VG ./build/llm "$f" -p "The quick brown fox" -n 6 --greedy --no-async --threads 1
+            $VG ./build/llm "$f" -p Hello -n 6 --greedy --threads 2 --buffers 3
+            $VG ./build/llm "$f" -p AAAA -n 6 --greedy --residency fp32
+          done
+      - name: Valgrind the fuzz harness (end-to-end, all configs)
+        run: |
+          valgrind -q --track-origins=yes --error-exitcode=1 --num-callers=30 \
+            --errors-for-leak-kinds=none --leak-check=no \
+            env SIPLLM_STRESS_ITERS=4 ./build/test_stress
+
+  # -------------------------------------------------------------------------
+  # Correctness gate 3: high-volume crash/fuzz on the release (hardened) build.
+  # Long in-process runs reuse thread-pool/prefetch stacks — the condition under
+  # which the original crash surfaced. Any crash or implausible stat fails.
+  stress-fuzz:
+    name: stress / fuzz (release build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Build release (hardened) + stress harness
+        run: make -j"$(nproc)" CXX=clang++ build/llm build/make_toy_model build/test_stress
+      - name: Run fuzz harness
+        run: SIPLLM_STRESS_ITERS=200 ./build/test_stress
