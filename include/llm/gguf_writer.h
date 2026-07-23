@@ -154,6 +154,9 @@ struct ToyGgufConfig {
     int64_t rope_dim = 0;             // Phi3 partial rotary dims (0 = full head_dim)
     int64_t n_experts = 0;            // Mixtral expert count (0 = dense FFN)
     int64_t n_experts_used = 0;       // Mixtral experts per token (0 => all)
+    bool gelu_ffn = false;            // GPT-2/Phi-2 non-gated GELU MLP (ffn_up/down only)
+    bool full_bias = false;           // GPT-2/Phi-2 LayerNorm + projection biases
+    bool pos_emb = false;             // GPT-2 learned position embeddings
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -246,6 +249,10 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
             emit(names::blk(i, "ffn_gate_exps.weight"), {c.n_experts, c.ffn_dim, c.dim}, true);
             emit(names::blk(i, "ffn_up_exps.weight"),   {c.n_experts, c.ffn_dim, c.dim}, true);
             emit(names::blk(i, "ffn_down_exps.weight"), {c.n_experts, c.dim, c.ffn_dim}, true);
+        } else if (c.gelu_ffn) {
+            // GPT-2 / Phi-2 non-gated GELU MLP: just up (c_fc) and down (c_proj).
+            emit(names::ffn_up(i), {c.ffn_dim, c.dim}, true);
+            emit(names::ffn_down(i), {c.dim, c.ffn_dim}, true);
         } else if (c.fused_qkv) {
             // Fused gate+up ([gate; up]) — same RNG order as separate gate,up.
             emit(names::ffn_up(i), {2 * c.ffn_dim, c.dim}, true);
@@ -259,6 +266,27 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     }
     ones(names::output_norm, c.dim);
     emit(names::output, {c.vocab_size, c.dim}, true);
+
+    // GPT-2 / Phi-2: LayerNorm + projection biases, an output_norm bias, and
+    // (GPT-2) learned position embeddings. Random values — no cross-model
+    // equivalence relies on these, only that the biased path runs.
+    if (c.full_bias) {
+        auto vecf = [&](const std::string& name, int64_t n) {
+            std::vector<float> f(n);
+            for (auto& v : f) v = nd(rng);
+            w.add_tensor(name, DType::F32, {n}, f.data(), n * 4);
+        };
+        for (int64_t i = 0; i < c.n_layers; ++i) {
+            vecf(names::blk(i, "attn_norm.bias"), c.dim);
+            vecf(names::blk(i, "ffn_norm.bias"), c.dim);
+            vecf(names::blk(i, "attn_qkv.bias"), q_dim + 2 * kv_dim);
+            vecf(names::blk(i, "attn_output.bias"), c.dim);
+            vecf(names::blk(i, "ffn_up.bias"), c.ffn_dim);
+            vecf(names::blk(i, "ffn_down.bias"), c.dim);
+        }
+        vecf("output_norm.bias", c.dim);
+    }
+    if (c.pos_emb) emit("position_embd.weight", {c.ctx_len, c.dim}, false);
 
     // Optional q/k/v biases (Qwen2). Emitted AFTER all weights so the weight
     // RNG stream is identical to a bias-free model with the same seed — that

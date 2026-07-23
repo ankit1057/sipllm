@@ -49,6 +49,8 @@ enum class Role {
     AttnQKV,
     // Optional Mixtral MoE tensors: router + packed 3D expert projections.
     FfnGateInp, FfnGateExps, FfnUpExps, FfnDownExps,
+    // Optional LayerNorm + projection biases (GPT-2 / Phi-2, fully-biased archs).
+    AttnNormBias, FfnNormBias, AttnQKVBias, AttnOutBias, FfnUpBias, FfnDownBias,
     COUNT
 };
 
@@ -100,6 +102,10 @@ public:
     void embed_token(int64_t token, float* dst) const;
     WeightRef output_norm_weight() const;   // fp32, [dim]
     WeightRef output_weight() const;         // native dtype, [vocab, dim]
+    // Optional globals (GPT-2). output_norm_bias: fp32 [dim] or invalid.
+    WeightRef output_norm_bias_weight() const;
+    bool has_pos_embd() const { return pos_embd_is_resident_; }
+    void add_pos_embd(int64_t pos, float* dst) const;   // dst[i] += position_embd[pos][i]
 
     const ModelConfig& config() const { return cfg_; }
     const Stats& stats() const { return stats_; }
@@ -140,6 +146,11 @@ private:
     std::vector<uint8_t> out_norm_;            // fp32
     std::vector<uint8_t> out_weight_;          // native dtype
     WeightRef out_weight_ref_;
+    std::vector<uint8_t> out_norm_bias_;        // fp32, optional (GPT-2)
+    bool out_norm_bias_present_ = false;
+    const TensorInfo* pos_embd_info_ = nullptr; // position_embd (GPT-2)
+    std::vector<float> pos_embd_;               // resident fp32 [ctx, dim]
+    bool pos_embd_is_resident_ = false;
 
     // prefetch pipeline
     std::thread worker_;

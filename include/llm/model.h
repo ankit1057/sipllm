@@ -22,7 +22,8 @@ enum class Arch {
     Gemma2,    // GeGLU, (1+w) RMSNorm, pre+post norms, embd scale, logit softcap
     Gemma3,    // Gemma2 shape + QK-norm + per-layer local/global RoPE, no softcap
     Phi3,      // Llama-like + fused QKV, fused gate/up, partial-rotary RoPE
-    Phi2,      // parallel block + LayerNorm + GELU (routed with the #16 long tail)
+    Phi2,      // parallel block + LayerNorm + partial-rotary RoPE + GELU MLP
+    GPT2,      // LayerNorm + learned positional embeddings + GELU MLP, no RoPE
     Unknown,   // recognized string but no dedicated block yet -> treated as Llama
 };
 
@@ -85,6 +86,13 @@ struct ModelConfig {
     int64_t n_experts = 0;               // total experts (expert_count)
     int64_t n_experts_used = 0;          // experts per token (expert_used_count)
     bool is_moe() const { return n_experts > 0 && n_experts_used > 0; }
+
+    // GPT-2 / Phi-2 knobs (all false => inert for every other arch).
+    bool    use_layernorm    = false;   // LayerNorm (mean+var) instead of RMSNorm
+    bool    learned_pos_emb  = false;   // add position_embd[pos] to the embedding
+    bool    parallel_residual = false;  // attn and FFN both read the same norm (Phi-2)
+    bool    ffn_gelu         = false;   // non-gated GELU MLP: down(gelu(up(x)))
+    float   layernorm_eps    = 1e-5f;   // LayerNorm epsilon
 
     int64_t q_dim()  const { return n_heads * head_dim; }
     int64_t kv_dim() const { return n_kv_heads * head_dim; }

@@ -205,6 +205,23 @@ TEST(rmsnorm_gemma_math) {
     APPROX(out[0], 4.0, 1e-4);           // 3/1.5 * (1+1)
 }
 
+TEST(layernorm_math) {
+    // x = {1,2,3,4}: mean 2.5, var 1.25, std sqrt(1.25).
+    float x[4] = {1.f, 2.f, 3.f, 4.f};
+    float w[4] = {1.f, 1.f, 1.f, 1.f};
+    float out[4];
+    layernorm(out, x, w, nullptr, 4, 0.f);
+    const double std = std::sqrt(1.25);
+    APPROX(out[0], (1.0 - 2.5) / std, 1e-5);   // normalized, mean subtracted
+    APPROX(out[3], (4.0 - 2.5) / std, 1e-5);
+    double sum = 0; for (float v : out) sum += v;
+    APPROX(sum, 0.0, 1e-4);                     // zero mean after LayerNorm
+    // bias shifts the output.
+    float b[4] = {10.f, 10.f, 10.f, 10.f};
+    layernorm(out, x, w, b, 4, 0.f);
+    APPROX(out[0], (1.0 - 2.5) / std + 10.0, 1e-5);
+}
+
 int main() {
     printf("== test_ops ==\n");
     return llmtest::run_all();
