@@ -12,10 +12,27 @@
 
 namespace llm {
 
-// Llama-family decoder configuration. GQA is expressed via n_kv_heads; when it
-// equals n_heads there is no grouping (Llama-2 7B), when smaller there is
-// (Llama-3 8B uses 8 kv heads for 32 query heads).
+// Decoder architecture family. Resolved from GGUF `general.architecture`. The
+// engine started Llama-only; this enum is the dispatch seam every other
+// architecture hangs off of (see Transformer::block).
+enum class Arch {
+    Llama,     // RMSNorm + RoPE + GQA + SwiGLU, no biases, no softcap (reference)
+    Unknown,   // recognized string but no dedicated block yet -> treated as Llama
+};
+
+Arch arch_from_name(const std::string& name);
+const char* arch_name(Arch a);
+
+// Decoder configuration. GQA is expressed via n_kv_heads; when it equals
+// n_heads there is no grouping (Llama-2 7B), when smaller there is (Llama-3 8B
+// uses 8 kv heads for 32 query heads).
 struct ModelConfig {
+    // Architecture identity. `arch` is the raw GGUF string (e.g. "llama",
+    // "qwen2"); `arch_kind` is the resolved dispatch enum. Defaults keep every
+    // existing Llama/toy model on the unchanged reference path.
+    std::string arch = "llama";
+    Arch        arch_kind = Arch::Llama;
+
     int64_t n_layers   = 0;
     int64_t n_heads    = 0;
     int64_t n_kv_heads = 0;
@@ -32,7 +49,7 @@ struct ModelConfig {
     int64_t kv_dim() const { return n_kv_heads * head_dim; }
     int64_t gqa_group() const { return n_heads / n_kv_heads; }
 
-    // Build from a WeightSource's metadata, accepting both GGUF ("llama.*")
+    // Build from a WeightSource's metadata, accepting both GGUF ("<arch>.*")
     // keys and the toy .llmw short keys. Falls back to tensor shapes where a
     // hyperparameter is missing.
     static ModelConfig from_source(const WeightSource& src);

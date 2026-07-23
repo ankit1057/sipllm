@@ -53,7 +53,8 @@ public:
     void set_hidden_hook(HiddenHook h) { hidden_hook_ = std::move(h); }
 
 private:
-    void block(int64_t layer, int64_t pos);   // one transformer block on x_
+    void block(int64_t layer, int64_t pos);        // arch dispatch on cfg_.arch_kind
+    void block_llama(int64_t layer, int64_t pos);  // reference: RMSNorm+RoPE+GQA+SwiGLU
 
     LayerLoader* loader_;
     KVCache*     kv_;
