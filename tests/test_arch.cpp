@@ -213,6 +213,50 @@ TEST(gemma3_local_rope_changes_output) {
     CHECK(maxdiff > 1e-4);
 }
 
+TEST(phi3_config_discovery) {
+    ToyGgufConfig c; c.arch = "phi3"; c.fused_qkv = true;
+    c.n_layers = 2; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 2;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = 51;
+    std::string p = scratch("phi3_cfg.gguf"); write_toy_gguf(p, c);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    CHECK(cfg.arch_kind == Arch::Phi3 && cfg.fused_qkv && cfg.fused_gate_up);
+    CHECK(g.find("blk.0.attn_qkv.weight") != nullptr);
+    CHECK(g.find("blk.0.attn_q.weight") == nullptr);   // fused, no separate q
+}
+
+TEST(phi3_full_rotary_matches_llama) {
+    // Phi-3 with full rotary == Llama over the same weights: the fused
+    // attn_qkv / ffn_up tensors are filled in the same RNG order as the split
+    // tensors, and block_phi3 with rot=head_dim is exactly the Llama block.
+    ToyGgufConfig cl; cl.arch = "llama";
+    cl.n_layers = 3; cl.dim = 32; cl.n_heads = 4; cl.n_kv_heads = 2;
+    cl.ffn_dim = 64; cl.vocab_size = 48; cl.seed = 51;
+    ToyGgufConfig cp = cl; cp.arch = "phi3"; cp.fused_qkv = true;   // full rotary (no rope_dim)
+    std::string pl = scratch("phi_llama.gguf"), pp = scratch("phi_phi3.gguf");
+    write_toy_gguf(pl, cl); write_toy_gguf(pp, cp);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(pl, toks), b = forward_gguf(pp, toks);
+    CHECK(a.size() == b.size() && !a.empty());
+    for (size_t i = 0; i < a.size(); ++i) APPROX(a[i], b[i], 1e-4);
+}
+
+TEST(phi3_partial_rotary_changes_output) {
+    // Same fused weights, but partial rotary (rope_dim < head_dim) must differ
+    // from full rotary — only the first rope_dim dims of each head are rotated.
+    ToyGgufConfig full; full.arch = "phi3"; full.fused_qkv = true;
+    full.n_layers = 3; full.dim = 32; full.n_heads = 4; full.n_kv_heads = 2;
+    full.ffn_dim = 64; full.vocab_size = 48; full.seed = 51;   // head_dim = 8
+    ToyGgufConfig part = full; part.rope_dim = 4;              // rotate 4 of 8 dims
+    std::string pf = scratch("phi_full.gguf"), pp = scratch("phi_part.gguf");
+    write_toy_gguf(pf, full); write_toy_gguf(pp, part);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(pf, toks), b = forward_gguf(pp, toks);
+    double maxdiff = 0;
+    for (size_t i = 0; i < a.size(); ++i) maxdiff = std::max(maxdiff, (double)std::fabs(a[i] - b[i]));
+    CHECK(maxdiff > 1e-4);
+}
+
 int main() {
     printf("== test_arch ==\n");
     return llmtest::run_all();

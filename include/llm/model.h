@@ -21,6 +21,8 @@ enum class Arch {
     Qwen2,     // Llama-like + bias on q/k/v projections (Qwen2 / Qwen2.5)
     Gemma2,    // GeGLU, (1+w) RMSNorm, pre+post norms, embd scale, logit softcap
     Gemma3,    // Gemma2 shape + QK-norm + per-layer local/global RoPE, no softcap
+    Phi3,      // Llama-like + fused QKV, fused gate/up, partial-rotary RoPE
+    Phi2,      // parallel block + LayerNorm + GELU (routed with the #16 long tail)
     Unknown,   // recognized string but no dedicated block yet -> treated as Llama
 };
 
@@ -74,6 +76,10 @@ struct ModelConfig {
     // layers use rope_theta (inert for Gemma2 and everything else).
     float   rope_theta_local = 0.f;      // RoPE base for local (sliding) layers
     int64_t sliding_window_pattern = 0;  // global layer every Nth (Gemma3: 6)
+    // Phi-3: fused QKV / gate+up projections and partial-rotary RoPE.
+    bool    fused_qkv = false;           // one attn_qkv.weight split into q,k,v
+    bool    fused_gate_up = false;       // ffn_up packs [gate;up] (2*ffn rows)
+    int64_t rope_dim = 0;                // rotary dims per head; 0 => full head_dim
 
     int64_t q_dim()  const { return n_heads * head_dim; }
     int64_t kv_dim() const { return n_kv_heads * head_dim; }

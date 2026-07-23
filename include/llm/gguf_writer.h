@@ -150,6 +150,8 @@ struct ToyGgufConfig {
     bool qk_norm = false;             // emit Gemma3 per-head q/k norms
     float rope_local = 0.f;           // Gemma3 local (sliding) RoPE base (0 = none)
     int64_t swa_pattern = 0;          // Gemma3 global-layer period (0 = all global)
+    bool fused_qkv = false;           // Phi3: one attn_qkv + fused ffn_up (gate;up)
+    int64_t rope_dim = 0;             // Phi3 partial rotary dims (0 = full head_dim)
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -174,6 +176,12 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     if (c.final_softcap > 0.f) w.f32(a + "final_logit_softcapping", c.final_softcap);
     if (c.rope_local > 0.f)    w.f32(a + "rope.local_freq_base", c.rope_local);
     if (c.swa_pattern > 0)     w.u32(a + "attention.sliding_window_pattern", (uint32_t)c.swa_pattern);
+    if (c.fused_qkv) {
+        // Pin head_dim explicitly so rope.dimension_count (partial rotary) is
+        // not mistaken for it during config discovery.
+        w.u32(a + "attention.key_length", (uint32_t)head_dim);
+        if (c.rope_dim > 0) w.u32(a + "rope.dimension_count", (uint32_t)c.rope_dim);
+    }
     if (c.with_tokenizer) {
         // Minimal byte-level vocab: one token per byte value 0..vocab-1.
         std::vector<std::string> toks; std::vector<int32_t> types;
@@ -210,16 +218,27 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     emit(names::token_embd, {c.vocab_size, c.dim}, true);
     for (int64_t i = 0; i < c.n_layers; ++i) {
         ones(names::attn_norm(i), c.dim);
-        emit(names::attn_q(i), {q_dim, c.dim}, true);
-        emit(names::attn_k(i), {kv_dim, c.dim}, true);
-        emit(names::attn_v(i), {kv_dim, c.dim}, true);
+        if (c.fused_qkv) {
+            // Fused q/k/v in one tensor. Filled in the same RNG order as the
+            // separate q,k,v below, so the values are identical.
+            emit(names::blk(i, "attn_qkv.weight"), {q_dim + 2 * kv_dim, c.dim}, true);
+        } else {
+            emit(names::attn_q(i), {q_dim, c.dim}, true);
+            emit(names::attn_k(i), {kv_dim, c.dim}, true);
+            emit(names::attn_v(i), {kv_dim, c.dim}, true);
+        }
         emit(names::attn_out(i), {c.dim, q_dim}, true);
         if (c.qk_norm) { ones(names::blk(i, "attn_q_norm.weight"), head_dim);
                          ones(names::blk(i, "attn_k_norm.weight"), head_dim); }
         if (c.post_norms) ones(names::blk(i, "post_attention_norm.weight"), c.dim);
         ones(names::ffn_norm(i), c.dim);
-        emit(names::ffn_gate(i), {c.ffn_dim, c.dim}, true);
-        emit(names::ffn_up(i), {c.ffn_dim, c.dim}, true);
+        if (c.fused_qkv) {
+            // Fused gate+up ([gate; up]) — same RNG order as separate gate,up.
+            emit(names::ffn_up(i), {2 * c.ffn_dim, c.dim}, true);
+        } else {
+            emit(names::ffn_gate(i), {c.ffn_dim, c.dim}, true);
+            emit(names::ffn_up(i), {c.ffn_dim, c.dim}, true);
+        }
         emit(names::ffn_down(i), {c.dim, c.ffn_dim}, true);
         if (c.post_norms) ones(names::blk(i, "post_ffw_norm.weight"), c.dim);
     }
