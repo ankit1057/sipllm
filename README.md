@@ -83,11 +83,11 @@ sipllm registry                                            # what's available
 ```
 
 **Bundled models** (all public / ungated, all Llama-architecture — what the
-engine implements today): `smollm2` (SmolLM2-1.7B-Instruct — the recommended
-default, best quality/size here), `llama3.2` (Llama-3.2-1B/`:3b`-Instruct), and
-`tinyllama` (1.1B — tiny and prone to rambling; fine for smoke tests). Each takes
-quant tags, e.g. `smollm2:q8_0`, `tinyllama:q4_k_m`. Bigger *instruct* models
-hallucinate far less than TinyLlama.
+engine implements today): `llama3.2` (Llama-3.2-1B/`:3b`-Instruct — verified
+end-to-end here), `smollm2` (SmolLM2-1.7B-Instruct / `:360m` — standard Llama
+arch, strong for its size), and `tinyllama` (1.1B — tiny and prone to rambling;
+fine for smoke tests). Each takes quant tags, e.g. `smollm2:q8_0`,
+`tinyllama:q4_k_m`. Bigger *instruct* models hallucinate far less than TinyLlama.
 
 Model names resolve to public GGUF files and cache in `~/.sipllm/models`. You can
 also pass any GGUF **URL** or **local path** directly, or add your own names to
