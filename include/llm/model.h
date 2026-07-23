@@ -17,6 +17,7 @@ namespace llm {
 // architecture hangs off of (see Transformer::block).
 enum class Arch {
     Llama,     // RMSNorm + RoPE + GQA + SwiGLU, no biases, no softcap (reference)
+    Mistral,   // structurally identical to Llama (sliding-window attn not modeled)
     Unknown,   // recognized string but no dedicated block yet -> treated as Llama
 };
 

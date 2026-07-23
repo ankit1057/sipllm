@@ -141,6 +141,7 @@ struct ToyGgufConfig {
     DType weight_type = DType::F32;   // projections; norms always F32
     uint32_t seed = 4321;
     bool with_tokenizer = false;      // emit a byte-level tokenizer vocab
+    std::string arch = "llama";       // general.architecture + hparam key prefix
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -150,15 +151,16 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     std::normal_distribution<float> nd(0.f, 0.02f);
 
     GgufWriter w;
-    w.str("general.architecture", "llama");
-    w.u32("llama.block_count", (uint32_t)c.n_layers);
-    w.u32("llama.attention.head_count", (uint32_t)c.n_heads);
-    w.u32("llama.attention.head_count_kv", (uint32_t)c.n_kv_heads);
-    w.u32("llama.embedding_length", (uint32_t)c.dim);
-    w.u32("llama.feed_forward_length", (uint32_t)c.ffn_dim);
-    w.u32("llama.context_length", (uint32_t)c.ctx_len);
-    w.f32("llama.rope.freq_base", c.rope_theta);
-    w.f32("llama.attention.layer_norm_rms_epsilon", c.rms_eps);
+    const std::string a = c.arch + ".";   // hparams are namespaced under the arch
+    w.str("general.architecture", c.arch);
+    w.u32(a + "block_count", (uint32_t)c.n_layers);
+    w.u32(a + "attention.head_count", (uint32_t)c.n_heads);
+    w.u32(a + "attention.head_count_kv", (uint32_t)c.n_kv_heads);
+    w.u32(a + "embedding_length", (uint32_t)c.dim);
+    w.u32(a + "feed_forward_length", (uint32_t)c.ffn_dim);
+    w.u32(a + "context_length", (uint32_t)c.ctx_len);
+    w.f32(a + "rope.freq_base", c.rope_theta);
+    w.f32(a + "attention.layer_norm_rms_epsilon", c.rms_eps);
     w.u32("general.alignment", 32);
     if (c.with_tokenizer) {
         // Minimal byte-level vocab: one token per byte value 0..vocab-1.
