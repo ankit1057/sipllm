@@ -40,6 +40,9 @@ enum class Role {
     // Optional roles — absent in most architectures, loaded only when the
     // tensor exists (see LayerLoader::is_optional). Qwen2 adds q/k/v biases.
     AttnQBias, AttnKBias, AttnVBias,
+    // Optional post-sublayer norms (Gemma 2): applied to the attn / FFN output
+    // before the residual add.
+    AttnPostNorm, FfnPostNorm,
     COUNT
 };
 

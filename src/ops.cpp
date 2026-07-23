@@ -39,6 +39,28 @@ void silu_inplace(float* x, int64_t n) {
     }
 }
 
+void gelu_inplace(float* x, int64_t n) {
+    constexpr float kSqrt2OverPi = 0.7978845608028654f;   // sqrt(2/pi)
+    for (int64_t i = 0; i < n; ++i) {
+        float v = x[i];
+        float inner = kSqrt2OverPi * (v + 0.044715f * v * v * v);
+        x[i] = 0.5f * v * (1.0f + std::tanh(inner));
+    }
+}
+
+void softcap_inplace(float* x, int64_t n, float cap) {
+    if (cap <= 0.f) return;
+    const float inv = 1.0f / cap;
+    for (int64_t i = 0; i < n; ++i) x[i] = cap * std::tanh(x[i] * inv);
+}
+
+void rmsnorm_gemma(float* out, const float* x, const float* weight, int64_t n,
+                   float eps) {
+    float ss = sumsq_f32(x, n);
+    float scale = 1.0f / std::sqrt(ss / static_cast<float>(n) + eps);
+    for (int64_t i = 0; i < n; ++i) out[i] = x[i] * scale * (1.0f + weight[i]);
+}
+
 void matmul(float* y, const float* W, const float* x,
             int64_t n_out, int64_t n_in, ThreadPool* pool) {
     auto body = [&](int, int64_t begin, int64_t end) {

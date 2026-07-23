@@ -173,6 +173,38 @@ TEST(silu_math) {
     APPROX(x[2], -1.0 / (1.0 + std::exp(1.0)), 1e-6); // silu(-1)
 }
 
+TEST(gelu_math) {
+    float x[4] = {0.f, 1.f, -1.f, 50.f};
+    gelu_inplace(x, 4);
+    APPROX(x[0], 0.0, 1e-6);          // gelu(0)=0
+    APPROX(x[1], 0.8411920, 1e-4);    // tanh-approx gelu(1)
+    APPROX(x[2], -0.1588080, 1e-4);   // gelu(-1)
+    APPROX(x[3], 50.0, 1e-3);         // saturates to x for large x
+}
+
+TEST(softcap_math) {
+    float v[4] = {0.f, 1.f, 100.f, -100.f};
+    softcap_inplace(v, 4, 5.f);
+    APPROX(v[0], 0.0, 1e-6);
+    APPROX(v[1], 5.0 * std::tanh(0.2), 1e-5);
+    APPROX(v[2], 5.0, 1e-3);          // saturates to +cap
+    APPROX(v[3], -5.0, 1e-3);         // saturates to -cap
+    float w[2] = {7.f, -3.f};
+    softcap_inplace(w, 2, 0.f);       // cap<=0 is a no-op
+    APPROX(w[0], 7.0, 0); APPROX(w[1], -3.0, 0);
+}
+
+TEST(rmsnorm_gemma_math) {
+    float x[4] = {3.f, 0.f, 0.f, 0.f};   // rms = sqrt(9/4) = 1.5
+    float out[4];
+    float wz[4] = {0.f, 0.f, 0.f, 0.f};
+    rmsnorm_gemma(out, x, wz, 4, 0.f);
+    APPROX(out[0], 2.0, 1e-4);           // 3/1.5 * (1+0)
+    float w1[4] = {1.f, 1.f, 1.f, 1.f};
+    rmsnorm_gemma(out, x, w1, 4, 0.f);
+    APPROX(out[0], 4.0, 1e-4);           // 3/1.5 * (1+1)
+}
+
 int main() {
     printf("== test_ops ==\n");
     return llmtest::run_all();

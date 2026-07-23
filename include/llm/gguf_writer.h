@@ -144,6 +144,9 @@ struct ToyGgufConfig {
     std::string arch = "llama";       // general.architecture + hparam key prefix
     bool attn_qkv_bias = false;       // emit q/k/v bias tensors (Qwen2)
     bool zero_bias = false;           // if biased, fill biases with zeros
+    bool post_norms = false;          // emit Gemma2 post-attention / post-ffn norms
+    float attn_softcap = 0.f;         // Gemma2 attn logit softcap (0 = none)
+    float final_softcap = 0.f;        // Gemma2 final logit softcap (0 = none)
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -164,6 +167,8 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     w.f32(a + "rope.freq_base", c.rope_theta);
     w.f32(a + "attention.layer_norm_rms_epsilon", c.rms_eps);
     w.u32("general.alignment", 32);
+    if (c.attn_softcap > 0.f)  w.f32(a + "attn_logit_softcapping", c.attn_softcap);
+    if (c.final_softcap > 0.f) w.f32(a + "final_logit_softcapping", c.final_softcap);
     if (c.with_tokenizer) {
         // Minimal byte-level vocab: one token per byte value 0..vocab-1.
         std::vector<std::string> toks; std::vector<int32_t> types;
@@ -204,10 +209,12 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
         emit(names::attn_k(i), {kv_dim, c.dim}, true);
         emit(names::attn_v(i), {kv_dim, c.dim}, true);
         emit(names::attn_out(i), {c.dim, q_dim}, true);
+        if (c.post_norms) ones(names::blk(i, "post_attention_norm.weight"), c.dim);
         ones(names::ffn_norm(i), c.dim);
         emit(names::ffn_gate(i), {c.ffn_dim, c.dim}, true);
         emit(names::ffn_up(i), {c.ffn_dim, c.dim}, true);
         emit(names::ffn_down(i), {c.dim, c.ffn_dim}, true);
+        if (c.post_norms) ones(names::blk(i, "post_ffw_norm.weight"), c.dim);
     }
     ones(names::output_norm, c.dim);
     emit(names::output, {c.vocab_size, c.dim}, true);

@@ -66,6 +66,7 @@ public:
 private:
     void block(int64_t layer, int64_t pos);        // arch dispatch on cfg_.arch_kind
     void block_llama(int64_t layer, int64_t pos);  // reference: RMSNorm+RoPE+GQA+SwiGLU
+    void block_gemma2(int64_t layer, int64_t pos); // GeGLU + pre/post (1+w) norms + softcap
 
     LayerLoader* loader_;
     KVCache*     kv_;

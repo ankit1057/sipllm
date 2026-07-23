@@ -19,6 +19,7 @@ enum class Arch {
     Llama,     // RMSNorm + RoPE + GQA + SwiGLU, no biases, no softcap (reference)
     Mistral,   // structurally identical to Llama (sliding-window attn not modeled)
     Qwen2,     // Llama-like + bias on q/k/v projections (Qwen2 / Qwen2.5)
+    Gemma2,    // GeGLU, (1+w) RMSNorm, pre+post norms, embd scale, logit softcap
     Unknown,   // recognized string but no dedicated block yet -> treated as Llama
 };
 
@@ -60,6 +61,13 @@ struct ModelConfig {
         return rope_scaling_type == "llama3" && rope_scale_factor > 0.f &&
                rope_high_freq_factor != rope_low_freq_factor && rope_orig_ctx_len > 0;
     }
+
+    // Gemma-family knobs (0 / 1.0 defaults => inert for every other arch).
+    bool    gemma_rmsnorm    = false;  // learned scale is (1 + weight)
+    float   embedding_scale  = 1.f;    // token embeddings *= scale (Gemma: sqrt(dim))
+    float   attn_logit_softcap  = 0.f; // cap on attention scores (Gemma2 ~50)
+    float   final_logit_softcap = 0.f; // cap on output logits (Gemma2 ~30)
+    float   query_pre_attn_scalar = 0.f; // attn scale denom; 0 => head_dim
 
     int64_t q_dim()  const { return n_heads * head_dim; }
     int64_t kv_dim() const { return n_kv_heads * head_dim; }
