@@ -45,6 +45,20 @@ struct ModelConfig {
     float   rms_eps    = 1e-5f;
     bool    tie_embeddings = false;   // output projection shares token_embd
 
+    // "llama3" RoPE frequency scaling (Llama-3.x). The trained short-context
+    // RoPE frequencies are stretched per-wavelength so the model generalizes to
+    // its long context. Empty type => plain RoPE (all pre-Llama3 models).
+    std::string rope_scaling_type;                 // "", "llama3", "linear", ...
+    float       rope_scale_factor     = 8.f;       // "factor"
+    float       rope_low_freq_factor  = 1.f;       // "low_freq_factor"
+    float       rope_high_freq_factor = 4.f;       // "high_freq_factor"
+    int64_t     rope_orig_ctx_len     = 0;         // "original_context_length"
+
+    bool use_llama3_rope() const {
+        return rope_scaling_type == "llama3" && rope_scale_factor > 0.f &&
+               rope_high_freq_factor != rope_low_freq_factor && rope_orig_ctx_len > 0;
+    }
+
     int64_t q_dim()  const { return n_heads * head_dim; }
     int64_t kv_dim() const { return n_kv_heads * head_dim; }
     int64_t gqa_group() const { return n_heads / n_kv_heads; }
