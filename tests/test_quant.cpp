@@ -128,6 +128,48 @@ TEST(matmul_quant_matches_dequant_then_matmul) {
     for (int o = 0; o < n_out; ++o) APPROX(y2[o], y1[o], 1e-4);
 }
 
+TEST(iq4_nl_hand_block) {
+    // One IQ4_NL block (32 elems): fp16 d, then 16 nibble-pairs indexing the
+    // fixed codebook. kvalues[0]=-127, kvalues[3]=-65, kvalues[8]=1.
+    std::vector<uint8_t> blk(18, 0);
+    float d = 0.5f;
+    uint16_t dh = fp32_to_fp16(d);
+    std::memcpy(&blk[0], &dh, 2);
+    blk[2] = (8 << 4) | 3;          // qs[0]: low nibble 3, high nibble 8
+    std::vector<float> y(32);
+    dequantize_row(DType::IQ4_NL, blk.data(), y.data(), 32);
+    APPROX(y[0],  0.5 * -65.0,  1e-3);   // low nibble -> position 0
+    APPROX(y[16], 0.5 *   1.0,  1e-3);   // high nibble -> position 16
+    APPROX(y[1],  0.5 * -127.0, 1e-3);   // untouched -> kvalues[0]
+    APPROX(y[17], 0.5 * -127.0, 1e-3);
+}
+
+TEST(matmul_quant_iq4_nl_matches_dequant) {
+    // No reference IQ4_NL quantizer exists; synthesize valid block bytes (fp16
+    // scale + random nibbles), then confirm the fused matmul equals
+    // dequantize-then-matmul for the same bytes.
+    std::mt19937 rng(77);
+    std::uniform_int_distribution<int> nib(0, 255);
+    const int n_out = 20, n_in = 64;                 // n_in multiple of 32
+    const int64_t rb = type_nbytes(DType::IQ4_NL, n_in);
+    std::vector<uint8_t> Wq((size_t)n_out * rb);
+    for (int o = 0; o < n_out; ++o)
+        for (int blk = 0; blk < n_in / 32; ++blk) {
+            uint8_t* p = Wq.data() + o * rb + blk * 18;
+            uint16_t dh = fp32_to_fp16(0.1f + 0.01f * blk);
+            std::memcpy(p, &dh, 2);
+            for (int j = 0; j < 16; ++j) p[2 + j] = (uint8_t)nib(rng);
+        }
+    std::vector<float> x(n_in), deq(n_out * n_in), y1(n_out), y2(n_out);
+    std::uniform_real_distribution<float> rf(-1.f, 1.f);
+    for (auto& v : x) v = rf(rng);
+    for (int o = 0; o < n_out; ++o)
+        dequantize_row(DType::IQ4_NL, Wq.data() + o * rb, deq.data() + o * n_in, n_in);
+    matmul(y1.data(), deq.data(), x.data(), n_out, n_in);
+    matmul_quant(y2.data(), Wq.data(), DType::IQ4_NL, x.data(), n_out, n_in);
+    for (int o = 0; o < n_out; ++o) APPROX(y2[o], y1[o], 1e-4);
+}
+
 int main() {
     printf("== test_quant ==\n");
     return llmtest::run_all();

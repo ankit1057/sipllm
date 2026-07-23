@@ -109,6 +109,25 @@ void dequant_q4_0(const uint8_t* p, float* y, int64_t n) {
     }
 }
 
+// IQ4_NL: non-linear 4-bit. Per 32-element block: fp16 scale d + 16 bytes of
+// 4-bit indices into a fixed 16-entry non-uniform codebook. Nibble j maps to
+// output j (low) and j+16 (high) — same interleave as ggml's IQ4_NL.
+static const int8_t kvalues_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+};
+void dequant_iq4_nl(const uint8_t* p, float* y, int64_t n) {
+    for (int64_t b = 0; b < n / QK; ++b) {
+        uint16_t dh; std::memcpy(&dh, p, 2);
+        float d = fp16_to_fp32(dh);
+        const uint8_t* qs = p + 2;
+        for (int j = 0; j < 16; ++j) {
+            y[b * QK + j]      = d * kvalues_iq4nl[qs[j] & 0x0F];
+            y[b * QK + j + 16] = d * kvalues_iq4nl[qs[j] >> 4];
+        }
+        p += 18;
+    }
+}
+
 void dequant_q4_1(const uint8_t* p, float* y, int64_t n) {
     for (int64_t b = 0; b < n / QK; ++b) {
         uint16_t dh, mh; std::memcpy(&dh, p, 2); std::memcpy(&mh, p + 2, 2);
@@ -319,6 +338,7 @@ void dequantize_row(DType t, const void* src, float* dst, int64_t n) {
         case DType::Q4_K: dequant_q4_K(p, dst, n); break;
         case DType::Q5_K: dequant_q5_K(p, dst, n); break;
         case DType::Q6_K: dequant_q6_K(p, dst, n); break;
+        case DType::IQ4_NL: dequant_iq4_nl(p, dst, n); break;
         default:
             throw Error(std::string("dequantize_row: unsupported type ") + dtype_name(t));
     }

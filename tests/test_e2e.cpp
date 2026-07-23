@@ -12,7 +12,9 @@
 #include "tests/ref_forward.h"
 #include "tests/test_util.h"
 
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace llm;
@@ -74,7 +76,36 @@ TEST(e2e_async_equals_sync) {
     auto ga = stream_forward(path, a, tokens, &sa);
     auto gb = stream_forward(path, b, tokens);
     for (size_t i = 0; i < ga.size(); ++i) APPROX(ga[i], gb[i], 1e-4);
-    CHECK_MSG(sa.prefetch_hits > 0, "expected prefetch hits > 0");
+    // Deterministic accounting: every loadLayer resolves to exactly one hit or
+    // miss, so over 5 tokens x 4 layers the pipeline recorded 20 lookups. (How
+    // many were *hits* is a compute-vs-IO race and is asserted separately in a
+    // way that does not depend on scheduling — see e2e_prefetch_scores_hits.)
+    CHECK(sa.prefetch_hits + sa.prefetch_misses == (uint64_t)tokens.size() * (uint64_t)tc.n_layers);
+}
+
+TEST(e2e_prefetch_scores_hits) {
+    // Deterministic proof that the async double-buffer actually prefetches the
+    // next block: load layer 0 (which enqueues layer 1), give the worker ample
+    // time to finish the few-KB load, then request layer 1 — it must already be
+    // Ready, i.e. a prefetch hit. The sleep dwarfs the load, so this never races.
+    ToyConfig tc; tc.n_layers = 4; tc.dim = 48; tc.n_heads = 4; tc.n_kv_heads = 4;
+    tc.ffn_dim = 96; tc.vocab_size = 40; tc.seed = 99;
+    std::string path = scratch("toy_prefetch.llmw");
+    write_toy_model(path, tc);
+
+    ModelFile f(path);
+    ModelConfig cfg = ModelConfig::from_source(f);
+    LayerLoader::Options opt; opt.async = true; opt.n_buffers = 2;
+    opt.residency = Residency::Quantized;
+    LayerLoader loader(&f, cfg, opt);
+
+    loader.loadLayer(0);                                   // enqueues prefetch of layer 1
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const uint64_t hits_before = loader.stats().prefetch_hits.load();
+    loader.loadLayer(1);                                   // already resident -> hit
+    loader.unloadLayer();
+    CHECK_MSG(loader.stats().prefetch_hits.load() == hits_before + 1,
+              "layer 1 must be a prefetch hit once the worker has run");
 }
 
 TEST(e2e_tied_embeddings) {

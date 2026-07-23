@@ -24,6 +24,11 @@ static const TypeTraits kTraits[] = {
     /* Q5_K */ {"Q5_K", 256, 176, true},
     /* Q6_K */ {"Q6_K", 256, 210, true},   // 128B ql + 64B qh + 16B sc + half d
     /* Q8_K */ {"Q8_K", 256, 292, true},
+    /* 16 IQ2_XXS */ {"?", 1, 0, false},
+    /* 17 IQ2_XS  */ {"?", 1, 0, false},
+    /* 18 IQ3_XXS */ {"?", 1, 0, false},
+    /* 19 IQ1_S   */ {"?", 1, 0, false},
+    /* IQ4_NL */ {"IQ4_NL", 32, 18, true},   // half d + 16B nibbles -> LUT
 };
 
 const TypeTraits& type_traits(DType t) {
