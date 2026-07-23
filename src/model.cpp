@@ -74,6 +74,23 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     // output tied to embeddings when there is no separate output.weight.
     c.tie_embeddings = (src.find(names::output) == nullptr);
 
+    // llama3 RoPE frequency scaling (Llama-3.x). Keys are namespaced under the
+    // architecture, e.g. "llama.rope.scaling.type" = "llama3" plus factor,
+    // low/high freq factors, and the original (pre-scaling) context length.
+    c.rope_scaling_type = src.meta_str(K("rope.scaling.type"),
+                          src.meta_str("llama.rope.scaling.type", ""));
+    if (first_float(src, {K("rope.scaling.factor"), "llama.rope.scaling.factor"}, f))
+        c.rope_scale_factor = (float)f;
+    if (first_float(src, {K("rope.scaling.low_freq_factor"),
+                          "llama.rope.scaling.low_freq_factor"}, f))
+        c.rope_low_freq_factor = (float)f;
+    if (first_float(src, {K("rope.scaling.high_freq_factor"),
+                          "llama.rope.scaling.high_freq_factor"}, f))
+        c.rope_high_freq_factor = (float)f;
+    if (first_int(src, {K("rope.scaling.original_context_length"),
+                        "llama.rope.scaling.original_context_length"}, v))
+        c.rope_orig_ctx_len = v;
+
     if (c.head_dim == 0 && c.n_heads > 0 && c.dim > 0) c.head_dim = c.dim / c.n_heads;
     return c;
 }

@@ -23,9 +23,28 @@ Transformer::Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool)
     logits_.assign(cfg_.vocab_size, 0.f);
 }
 
+// llama3 RoPE scaling: stretch a base angular frequency per its wavelength so
+// the trained short-context RoPE generalizes to the long context. Matches HF
+// transformers `_compute_llama3_parameters` / llama.cpp: high-frequency
+// components pass through, low-frequency ones are divided by `factor`, and the
+// band between is a smooth interpolation of the two.
+static inline float llama3_scale_freq(float freq, const Transformer::RopeScaling& rs) {
+    constexpr float kPi = 3.14159265358979323846f;
+    const float wavelen = 2.0f * kPi / freq;
+    const float low_wl  = rs.orig_ctx_len / rs.low_freq_factor;   // long wavelength bound
+    const float high_wl = rs.orig_ctx_len / rs.high_freq_factor;  // short wavelength bound
+    if (wavelen < high_wl) return freq;                           // high freq: unchanged
+    if (wavelen > low_wl)  return freq / rs.factor;               // low freq: /factor
+    const float smooth = (rs.orig_ctx_len / wavelen - rs.low_freq_factor) /
+                         (rs.high_freq_factor - rs.low_freq_factor);
+    return (1.0f - smooth) * (freq / rs.factor) + smooth * freq;  // medium: interpolate
+}
+
 // Rotary embedding on adjacent element pairs (ggml "rope_norm"). GGUF Llama
 // weights are permuted at conversion time so that this adjacent-pair rotation
-// reproduces HF's rotate_half — so we apply exactly this to both q and k.
+// reproduces HF's rotate_half — so we apply exactly this to both q and k. This
+// is the pristine plain-RoPE hot loop (pre-#9); the scaled variant is separate
+// so the common path carries no per-element scaling branch.
 void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                              int64_t pos, float theta_base) {
     const int64_t half = head_dim / 2;
@@ -33,6 +52,27 @@ void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
             float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
+            float angle = (float)pos * freq;
+            float c = std::cos(angle), s = std::sin(angle);
+            float x0 = p[2 * i], x1 = p[2 * i + 1];
+            p[2 * i]     = x0 * c - x1 * s;
+            p[2 * i + 1] = x0 * s + x1 * c;
+        }
+    }
+}
+
+// RoPE with optional llama3 frequency scaling. When scaling is off this defers
+// to the plain loop above (identical codegen on the common path); only Llama-3.x
+// models with rope.scaling.type=llama3 take the per-wavelength stretch branch.
+void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
+                             int64_t pos, float theta_base, const RopeScaling& rs) {
+    if (!rs.llama3) { apply_rope(vec, n_heads, head_dim, pos, theta_base); return; }
+    const int64_t half = head_dim / 2;
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* p = vec + h * head_dim;
+        for (int64_t i = 0; i < half; ++i) {
+            float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
+            freq = llama3_scale_freq(freq, rs);
             float angle = (float)pos * freq;
             float c = std::cos(angle), s = std::sin(angle);
             float x0 = p[2 * i], x1 = p[2 * i + 1];
@@ -72,8 +112,16 @@ void Transformer::block_llama(int64_t layer, int64_t pos) {
     linear(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), pool_);
     linear(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), pool_);
 
-    apply_rope(q_.data(), n_heads, hd, pos, cfg_.rope_theta);
-    apply_rope(k_.data(), n_kv,    hd, pos, cfg_.rope_theta);
+    RopeScaling rs;
+    if (cfg_.use_llama3_rope()) {
+        rs.llama3 = true;
+        rs.factor = cfg_.rope_scale_factor;
+        rs.low_freq_factor = cfg_.rope_low_freq_factor;
+        rs.high_freq_factor = cfg_.rope_high_freq_factor;
+        rs.orig_ctx_len = (float)cfg_.rope_orig_ctx_len;
+    }
+    apply_rope(q_.data(), n_heads, hd, pos, cfg_.rope_theta, rs);
+    apply_rope(k_.data(), n_kv,    hd, pos, cfg_.rope_theta, rs);
 
     // store K/V for this position
     std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));

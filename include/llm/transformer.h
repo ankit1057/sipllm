@@ -26,9 +26,20 @@ public:
     // Writes K/V for `pos` into the cache and attends over [0, pos].
     const float* forward(int64_t token, int64_t pos);
 
-    // RoPE is exposed for testing.
+    // RoPE is exposed for testing. Optional llama3 frequency scaling: when
+    // `rs.llama3` is set the per-wavelength stretch (issue #9) is applied;
+    // default-constructed => plain RoPE, identical to pre-#9 behavior.
+    struct RopeScaling {
+        bool  llama3 = false;
+        float factor = 8.f;
+        float low_freq_factor = 1.f;
+        float high_freq_factor = 4.f;
+        float orig_ctx_len = 8192.f;
+    };
     static void apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                            int64_t pos, float theta_base);
+    static void apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
+                           int64_t pos, float theta_base, const RopeScaling& rs);
 
     const ModelConfig& config() const { return cfg_; }
 
