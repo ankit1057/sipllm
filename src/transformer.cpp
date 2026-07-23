@@ -88,6 +88,7 @@ void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
 void Transformer::block(int64_t layer, int64_t pos) {
     switch (cfg_.arch_kind) {
         case Arch::Llama:
+        case Arch::Mistral:   // RMSNorm + RoPE + GQA + SwiGLU, same as Llama
         case Arch::Unknown:
         default:
             block_llama(layer, pos);
