@@ -1,20 +1,33 @@
 # sipllm
 
+[![Status: WIP](https://img.shields.io/badge/status-work_in_progress-orange.svg)](#status)
 [![CI](https://github.com/ankit1057/sipllm/actions/workflows/ci.yml/badge.svg)](https://github.com/ankit1057/sipllm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-**A dependency-free LLM inference engine in C++17 that *sips* model weights off
-disk — one transformer layer at a time — so peak RAM stays flat (~200–400 MB) no
-matter how big the model is. Numerically validated against
-[llama.cpp](https://github.com/ggml-org/llama.cpp), layer by layer, across four
-GGUF quantization formats.**
+**A dependency-free, CPU-first LLM inference engine in C++17 for edge devices. It
+*sips* model weights off disk — one transformer layer at a time — so peak RAM
+stays flat (~200–400 MB) no matter how big the model is. Numerically validated
+against [llama.cpp](https://github.com/ggml-org/llama.cpp), layer by layer,
+across four GGUF quantization formats.**
 
-No PyTorch. No ONNX. No ggml for inference. No BLAS. Just standard C++17 and
-`pthread` — plus hand-written ARM64 NEON kernels and an optional Vulkan matmul
-backend. Built to run real language models on a phone (Termux / Android on a
-Dimensity 8300) and portable to any Linux/macOS ARM or x86 host.
+> ### Status
+> **🚧 Work in progress.** sipllm is an actively developed research/engineering
+> project, not a finished product. The core is proven correct (see the
+> validation matrix below) and the API/CLI will keep evolving — expect rough
+> edges, breaking changes, and gaps. Contributions and issue reports are very
+> welcome.
+
+**Edge-first, and therefore CPU-first.** This engine targets phones, SBCs, and
+other edge hardware — where there's plenty of storage but very little RAM and,
+let's be honest, almost no usable VRAM. So the **CPU is the primary compute
+target**: everything runs correctly and is optimized on CPU (hand-written ARM64
+NEON kernels, scalar fallbacks elsewhere). The Vulkan backend is **experimental**
+and secondary — a GPU offload path for the rare edge device that has one, not a
+requirement. No PyTorch, no ONNX, no ggml for inference, no BLAS — just standard
+C++17 and `pthread`. Built and tested on a phone (Termux / Android, Dimensity
+8300) and portable to any Linux/macOS ARM or x86 host.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ankit1057/sipllm/main/install.sh | sh
