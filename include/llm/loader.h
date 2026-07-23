@@ -37,6 +37,9 @@ namespace llm {
 enum class Role {
     AttnNorm = 0, AttnQ, AttnK, AttnV, AttnOut,
     FfnNorm, FfnGate, FfnUp, FfnDown,
+    // Optional roles — absent in most architectures, loaded only when the
+    // tensor exists (see LayerLoader::is_optional). Qwen2 adds q/k/v biases.
+    AttnQBias, AttnKBias, AttnVBias,
     COUNT
 };
 

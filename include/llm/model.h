@@ -18,6 +18,7 @@ namespace llm {
 enum class Arch {
     Llama,     // RMSNorm + RoPE + GQA + SwiGLU, no biases, no softcap (reference)
     Mistral,   // structurally identical to Llama (sliding-window attn not modeled)
+    Qwen2,     // Llama-like + bias on q/k/v projections (Qwen2 / Qwen2.5)
     Unknown,   // recognized string but no dedicated block yet -> treated as Llama
 };
 

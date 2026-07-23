@@ -9,6 +9,7 @@ namespace llm {
 Arch arch_from_name(const std::string& name) {
     if (name == "llama")   return Arch::Llama;
     if (name == "mistral") return Arch::Mistral;
+    if (name == "qwen2")   return Arch::Qwen2;
     return Arch::Unknown;
 }
 
@@ -16,6 +17,7 @@ const char* arch_name(Arch a) {
     switch (a) {
         case Arch::Llama:   return "llama";
         case Arch::Mistral: return "mistral";
+        case Arch::Qwen2:   return "qwen2";
         case Arch::Unknown: return "unknown";
     }
     return "unknown";
