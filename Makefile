@@ -16,11 +16,14 @@ OPT      := -O3 -funroll-loops -fno-math-errno
 INCLUDE  := -Iinclude -I.
 LDLIBS   := -lpthread
 
-# ARM64 feature flags: enable dot-product + i8mm + bf16 when the compiler
-# supports them (Dimensity 8300 / Cortex-A715+A510 all advertise these).
+# Per-arch tuning. -march=native lets the compiler light up the host's SIMD:
+#   aarch64 -> asimddp/i8mm/sve2/bf16 (the NEON kernels in simd.h/neon.cpp)
+#   x86_64  -> AVX2+FMA when present, which enables the AVX2 path in simd.h
+#              (falls back to scalar on pre-AVX2 hosts, so it always builds).
 ARCH := $(shell uname -m)
 ifeq ($(ARCH),aarch64)
-  # -march=native picks up asimddp/i8mm/sve2/bf16 reported in /proc/cpuinfo.
+  CXXFLAGS_ARCH := -march=native
+else ifeq ($(ARCH),x86_64)
   CXXFLAGS_ARCH := -march=native
 else
   CXXFLAGS_ARCH :=
