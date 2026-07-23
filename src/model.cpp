@@ -125,6 +125,10 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     if (c.arch_kind == Arch::Phi3) { c.fused_qkv = true; c.fused_gate_up = true; }
     if (first_int(src, {K("rope.dimension_count")}, v)) c.rope_dim = v;
 
+    // Mixtral / MoE: expert counts (Mixtral ships as arch "llama" with these set).
+    if (first_int(src, {K("expert_count"), "llama.expert_count"}, v)) c.n_experts = v;
+    if (first_int(src, {K("expert_used_count"), "llama.expert_used_count"}, v)) c.n_experts_used = v;
+
     if (c.head_dim == 0 && c.n_heads > 0 && c.dim > 0) c.head_dim = c.dim / c.n_heads;
     return c;
 }

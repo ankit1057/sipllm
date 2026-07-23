@@ -26,6 +26,10 @@ const char* LayerLoader::role_suffix(Role r) {
         case Role::AttnQNorm:    return "attn_q_norm.weight";
         case Role::AttnKNorm:    return "attn_k_norm.weight";
         case Role::AttnQKV:      return "attn_qkv.weight";
+        case Role::FfnGateInp:   return "ffn_gate_inp.weight";
+        case Role::FfnGateExps:  return "ffn_gate_exps.weight";
+        case Role::FfnUpExps:    return "ffn_up_exps.weight";
+        case Role::FfnDownExps:  return "ffn_down_exps.weight";
         default:             return "?";
     }
 }
@@ -46,19 +50,25 @@ static bool is_norm(Role r) {
 static bool is_bias(Role r) {
     return r == Role::AttnQBias || r == Role::AttnKBias || r == Role::AttnVBias;
 }
-// Split projections that a fused-projection arch (Phi-3) replaces with one
-// tensor — absent there, so optional.
+// Dense projections that a fused-projection arch (Phi-3) or an MoE arch
+// (Mixtral) replaces with fused / packed expert tensors — absent there, so
+// optional. The active block only reads the ones its architecture uses.
 static bool is_split_proj(Role r) {
-    return r == Role::AttnQ || r == Role::AttnK || r == Role::AttnV || r == Role::FfnGate;
+    return r == Role::AttnQ || r == Role::AttnK || r == Role::AttnV ||
+           r == Role::FfnGate || r == Role::FfnUp || r == Role::FfnDown;
+}
+// Mixtral MoE tensors: router + the packed 3D expert projections.
+static bool is_moe_role(Role r) {
+    return r == Role::FfnGateInp || r == Role::FfnGateExps ||
+           r == Role::FfnUpExps || r == Role::FfnDownExps;
 }
 // 1-D fp32 weights (norms, biases): tiny, always dequantized on load.
 static bool is_1d_fp32(Role r) { return is_norm(r) || is_bias(r); }
 // Roles that may legitimately be absent (arch-dependent). Missing -> invalid ref.
 static bool is_optional(Role r) {
     return is_bias(r) || is_post_norm(r) || is_qk_norm(r) || is_split_proj(r) ||
-           r == Role::AttnQKV;
+           r == Role::AttnQKV || is_moe_role(r);
 }
-
 LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     : src_(src), cfg_(cfg), opt_(opt), n_layers_(cfg.n_layers) {
     LLM_CHECK(src_ != nullptr, "LayerLoader: null source");
@@ -122,8 +132,11 @@ void LayerLoader::load_weight_into(Slot& s, Role role, int layer) {
         return;
     }
 
-    const int64_t n_out = ti->shape[0];
-    const int64_t n_in  = ti->shape.size() > 1 ? ti->shape[1] : 1;
+    // Flatten packed 3D expert tensors [n_expert, a, b] to [n_expert*a, b]; the
+    // MoE block indexes each expert's [a, b] slice. Others are 1-D or 2-D.
+    const int64_t n_out = ti->shape.size() == 3 ? ti->shape[0] * ti->shape[1] : ti->shape[0];
+    const int64_t n_in  = ti->shape.size() == 3 ? ti->shape[2]
+                        : (ti->shape.size() > 1 ? ti->shape[1] : 1);
 
     double t0 = now_sec();
     const bool one_d = is_1d_fp32(role);

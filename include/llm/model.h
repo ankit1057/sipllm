@@ -80,6 +80,11 @@ struct ModelConfig {
     bool    fused_qkv = false;           // one attn_qkv.weight split into q,k,v
     bool    fused_gate_up = false;       // ffn_up packs [gate;up] (2*ffn rows)
     int64_t rope_dim = 0;                // rotary dims per head; 0 => full head_dim
+    // Mixtral / MoE: a router selects n_experts_used of n_experts FFNs per token.
+    // n_experts == 0 => a dense FFN (every non-MoE model).
+    int64_t n_experts = 0;               // total experts (expert_count)
+    int64_t n_experts_used = 0;          // experts per token (expert_used_count)
+    bool is_moe() const { return n_experts > 0 && n_experts_used > 0; }
 
     int64_t q_dim()  const { return n_heads * head_dim; }
     int64_t kv_dim() const { return n_kv_heads * head_dim; }
