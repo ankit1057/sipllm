@@ -82,6 +82,14 @@ void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
     }
 }
 
+// Add an optional bias vector to a projection output, in place. A no-op when
+// the weight is absent (invalid ref) — the common case for bias-free archs.
+static inline void add_bias(float* y, const WeightRef& b, int64_t n) {
+    if (!b.valid()) return;
+    const float* bv = static_cast<const float*>(b.data);
+    for (int64_t i = 0; i < n; ++i) y[i] += bv[i];
+}
+
 // Dispatch one block to the per-architecture implementation. Every arch except
 // the Llama reference is added as a new case here (issues #10-#16); Unknown
 // architectures fall through to the Llama path unchanged.
@@ -89,6 +97,7 @@ void Transformer::block(int64_t layer, int64_t pos) {
     switch (cfg_.arch_kind) {
         case Arch::Llama:
         case Arch::Mistral:   // RMSNorm + RoPE + GQA + SwiGLU, same as Llama
+        case Arch::Qwen2:     // Llama block + optional q/k/v biases (applied below)
         case Arch::Unknown:
         default:
             block_llama(layer, pos);
@@ -112,6 +121,12 @@ void Transformer::block_llama(int64_t layer, int64_t pos) {
     linear(q_.data(), loader_->getWeight(Role::AttnQ), xb_.data(), pool_);
     linear(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), pool_);
     linear(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), pool_);
+
+    // Optional attention biases (Qwen2). No-op when the tensors are absent
+    // (Llama / Mistral), so this path stays byte-identical for them.
+    add_bias(q_.data(), loader_->getWeight(Role::AttnQBias), cfg_.q_dim());
+    add_bias(k_.data(), loader_->getWeight(Role::AttnKBias), kv_dim);
+    add_bias(v_.data(), loader_->getWeight(Role::AttnVBias), kv_dim);
 
     RopeScaling rs;
     if (cfg_.use_llama3_rope()) {

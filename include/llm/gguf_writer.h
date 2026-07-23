@@ -142,6 +142,8 @@ struct ToyGgufConfig {
     uint32_t seed = 4321;
     bool with_tokenizer = false;      // emit a byte-level tokenizer vocab
     std::string arch = "llama";       // general.architecture + hparam key prefix
+    bool attn_qkv_bias = false;       // emit q/k/v bias tensors (Qwen2)
+    bool zero_bias = false;           // if biased, fill biases with zeros
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -209,6 +211,23 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     }
     ones(names::output_norm, c.dim);
     emit(names::output, {c.vocab_size, c.dim}, true);
+
+    // Optional q/k/v biases (Qwen2). Emitted AFTER all weights so the weight
+    // RNG stream is identical to a bias-free model with the same seed — that
+    // lets tests isolate the bias effect. Zero biases must reproduce the
+    // bias-free forward exactly.
+    if (c.attn_qkv_bias) {
+        auto vecf = [&](const std::string& name, int64_t n) {
+            std::vector<float> f(n);
+            for (auto& v : f) v = c.zero_bias ? 0.f : nd(rng);
+            w.add_tensor(name, DType::F32, {n}, f.data(), n * 4);
+        };
+        for (int64_t i = 0; i < c.n_layers; ++i) {
+            vecf(names::blk(i, "attn_q.bias"), q_dim);
+            vecf(names::blk(i, "attn_k.bias"), kv_dim);
+            vecf(names::blk(i, "attn_v.bias"), kv_dim);
+        }
+    }
     w.write(path);
 }
 

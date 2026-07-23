@@ -18,6 +18,9 @@ const char* LayerLoader::role_suffix(Role r) {
         case Role::FfnGate:  return "ffn_gate.weight";
         case Role::FfnUp:    return "ffn_up.weight";
         case Role::FfnDown:  return "ffn_down.weight";
+        case Role::AttnQBias: return "attn_q.bias";
+        case Role::AttnKBias: return "attn_k.bias";
+        case Role::AttnVBias: return "attn_v.bias";
         default:             return "?";
     }
 }
@@ -27,6 +30,13 @@ std::string LayerLoader::role_name(int layer, Role r) const {
 }
 
 static bool is_norm(Role r) { return r == Role::AttnNorm || r == Role::FfnNorm; }
+static bool is_bias(Role r) {
+    return r == Role::AttnQBias || r == Role::AttnKBias || r == Role::AttnVBias;
+}
+// 1-D fp32 weights (norms, biases): tiny, always dequantized on load.
+static bool is_1d_fp32(Role r) { return is_norm(r) || is_bias(r); }
+// Roles that may legitimately be absent (arch-dependent). Missing -> invalid ref.
+static bool is_optional(Role r) { return is_bias(r); }
 
 LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     : src_(src), cfg_(cfg), opt_(opt), n_layers_(cfg.n_layers) {
@@ -82,13 +92,21 @@ LayerLoader::~LayerLoader() {
 void LayerLoader::load_weight_into(Slot& s, Role role, int layer) {
     const std::string name = role_name(layer, role);
     const TensorInfo* ti = src_->find(name);
-    LLM_CHECK(ti != nullptr, "missing tensor: " + name);
+    if (ti == nullptr) {
+        // Optional roles (e.g. Qwen2 q/k/v biases) are simply absent in most
+        // architectures — leave an invalid ref and skip.
+        LLM_CHECK(is_optional(role), "missing tensor: " + name);
+        s.buf[(int)role].clear();
+        s.ref[(int)role] = WeightRef{};
+        return;
+    }
 
     const int64_t n_out = ti->shape[0];
     const int64_t n_in  = ti->shape.size() > 1 ? ti->shape[1] : 1;
 
     double t0 = now_sec();
-    const bool want_fp32 = is_norm(role) || opt_.residency == Residency::FP32;
+    const bool one_d = is_1d_fp32(role);
+    const bool want_fp32 = one_d || opt_.residency == Residency::FP32;
 
     auto& buf = s.buf[(int)role];
     if (want_fp32) {
@@ -103,8 +121,9 @@ void LayerLoader::load_weight_into(Slot& s, Role role, int layer) {
         dequantize_row(ti->dtype, raw.data(),
                        reinterpret_cast<float*>(buf.data()), ti->numel());
         stats_.dequant_us += (uint64_t)((now_sec() - t1) * 1e6);
-        s.ref[(int)role] = {buf.data(), DType::F32, is_norm(role) ? 1 : n_out,
-                            is_norm(role) ? n_out : n_in};
+        // 1-D vectors (norms, biases) are stored flat: n_out=1, n_in=length.
+        s.ref[(int)role] = {buf.data(), DType::F32, one_d ? 1 : n_out,
+                            one_d ? n_out : n_in};
     } else {
         // keep raw quantized bytes resident (dequant happens in matmul_quant)
         buf.resize(ti->nbytes);
