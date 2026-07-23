@@ -303,6 +303,49 @@ TEST(moe_expert_count_changes_output) {
     CHECK(maxdiff > 1e-4);
 }
 
+TEST(gpt2_config_discovery) {
+    ToyGgufConfig c; c.arch = "gpt2"; c.fused_qkv = true; c.gelu_ffn = true;
+    c.full_bias = true; c.pos_emb = true;
+    c.n_layers = 2; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 4;
+    c.ffn_dim = 64; c.vocab_size = 48; c.ctx_len = 64; c.seed = 71;
+    std::string p = scratch("gpt2_cfg.gguf"); write_toy_gguf(p, c);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    CHECK(cfg.arch_kind == Arch::GPT2 && cfg.use_layernorm && cfg.learned_pos_emb);
+    CHECK(g.find("position_embd.weight") != nullptr);
+    CHECK(g.find("blk.0.attn_qkv.weight") != nullptr);
+    CHECK(g.find("blk.0.attn_norm.bias") != nullptr);
+    CHECK(g.find("blk.0.ffn_gate.weight") == nullptr);   // non-gated MLP
+}
+
+TEST(gpt2_forward_finite_and_deterministic) {
+    ToyGgufConfig c; c.arch = "gpt2"; c.fused_qkv = true; c.gelu_ffn = true;
+    c.full_bias = true; c.pos_emb = true;
+    c.n_layers = 2; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 4;
+    c.ffn_dim = 64; c.vocab_size = 48; c.ctx_len = 64; c.seed = 71;
+    std::string p = scratch("gpt2_fwd.gguf"); write_toy_gguf(p, c);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(p, toks), b = forward_gguf(p, toks);
+    CHECK(a == b);
+    for (float v : a) CHECK(std::isfinite(v));
+}
+
+TEST(phi2_forward_finite_and_deterministic) {
+    // Phi-2 parallel LayerNorm block with partial-rotary RoPE.
+    ToyGgufConfig c; c.arch = "phi2"; c.fused_qkv = true; c.gelu_ffn = true;
+    c.full_bias = true; c.rope_dim = 4;
+    c.n_layers = 2; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 4;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = 73;
+    std::string p = scratch("phi2_fwd.gguf"); write_toy_gguf(p, c);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    CHECK(cfg.arch_kind == Arch::Phi2 && cfg.use_layernorm && cfg.parallel_residual);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(p, toks), b = forward_gguf(p, toks);
+    CHECK(a == b);
+    for (float v : a) CHECK(std::isfinite(v));
+}
+
 int main() {
     printf("== test_arch ==\n");
     return llmtest::run_all();

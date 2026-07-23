@@ -15,6 +15,7 @@ Arch arch_from_name(const std::string& name) {
     if (name == "gemma3")  return Arch::Gemma3;
     if (name == "phi3")    return Arch::Phi3;
     if (name == "phi2")    return Arch::Phi2;
+    if (name == "gpt2")    return Arch::GPT2;
     return Arch::Unknown;
 }
 
@@ -27,6 +28,7 @@ const char* arch_name(Arch a) {
         case Arch::Gemma3:  return "gemma3";
         case Arch::Phi3:    return "phi3";
         case Arch::Phi2:    return "phi2";
+        case Arch::GPT2:    return "gpt2";
         case Arch::Unknown: return "unknown";
     }
     return "unknown";
@@ -128,6 +130,18 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     // Mixtral / MoE: expert counts (Mixtral ships as arch "llama" with these set).
     if (first_int(src, {K("expert_count"), "llama.expert_count"}, v)) c.n_experts = v;
     if (first_int(src, {K("expert_used_count"), "llama.expert_used_count"}, v)) c.n_experts_used = v;
+
+    // GPT-2 / Phi-2: LayerNorm architectures. GPT-2 uses learned positional
+    // embeddings and no RoPE; Phi-2 is a parallel block with partial-rotary RoPE.
+    // Both fuse q/k/v and use a non-gated GELU MLP.
+    if (c.arch_kind == Arch::GPT2 || c.arch_kind == Arch::Phi2) {
+        c.use_layernorm = true;
+        c.ffn_gelu = true;
+        c.fused_qkv = true;
+    }
+    if (c.arch_kind == Arch::GPT2) c.learned_pos_emb = true;
+    if (c.arch_kind == Arch::Phi2) c.parallel_residual = true;
+    if (first_float(src, {K("attention.layer_norm_epsilon")}, f)) c.layernorm_eps = (float)f;
 
     if (c.head_dim == 0 && c.n_heads > 0 && c.dim > 0) c.head_dim = c.dim / c.n_heads;
     return c;

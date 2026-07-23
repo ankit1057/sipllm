@@ -48,6 +48,12 @@ void softcap_inplace(float* x, int64_t n, float cap);
 void rmsnorm_gemma(float* out, const float* x, const float* weight, int64_t n,
                    float eps = 1e-6f);
 
+// LayerNorm (GPT-2 / Phi-2): subtract the mean, divide by std, then scale and
+// shift: out[i] = (x[i]-mean)/sqrt(var+eps) * weight[i] + bias[i]. `bias` may
+// be null (weight-only). Distinct from RMSNorm, which skips the mean.
+void layernorm(float* out, const float* x, const float* weight, const float* bias,
+               int64_t n, float eps = 1e-5f);
+
 // ---- matmul ---------------------------------------------------------------
 
 // Single-vector (batch=1) linear: y = W @ x

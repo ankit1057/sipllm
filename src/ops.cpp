@@ -61,6 +61,21 @@ void rmsnorm_gemma(float* out, const float* x, const float* weight, int64_t n,
     for (int64_t i = 0; i < n; ++i) out[i] = x[i] * scale * (1.0f + weight[i]);
 }
 
+void layernorm(float* out, const float* x, const float* weight, const float* bias,
+               int64_t n, float eps) {
+    float mean = 0.f;
+    for (int64_t i = 0; i < n; ++i) mean += x[i];
+    mean /= static_cast<float>(n);
+    float var = 0.f;
+    for (int64_t i = 0; i < n; ++i) { float d = x[i] - mean; var += d * d; }
+    var /= static_cast<float>(n);
+    float inv = 1.0f / std::sqrt(var + eps);
+    for (int64_t i = 0; i < n; ++i) {
+        float v = (x[i] - mean) * inv * weight[i];
+        out[i] = bias ? v + bias[i] : v;
+    }
+}
+
 void matmul(float* y, const float* W, const float* x,
             int64_t n_out, int64_t n_in, ThreadPool* pool) {
     auto body = [&](int, int64_t begin, int64_t end) {

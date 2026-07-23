@@ -116,6 +116,12 @@ void Transformer::block(int64_t layer, int64_t pos) {
         case Arch::Phi3:
             block_phi3(layer, pos);
             return;
+        case Arch::GPT2:
+            block_gpt2(layer, pos);
+            return;
+        case Arch::Phi2:
+            block_phi2(layer, pos);
+            return;
         case Arch::Unknown:
         default:
             block_llama(layer, pos);
@@ -424,6 +430,121 @@ void Transformer::block_moe(int64_t layer, int64_t pos) {
     if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
 }
 
+// GPT-2 block: LayerNorm (with bias) around each sublayer, one fused attn_qkv
+// projection (with bias), *no* RoPE (learned positional embeddings are added at
+// the input in forward), a causal attention, and a non-gated GELU MLP. Every
+// linear carries a bias.
+void Transformer::block_gpt2(int64_t layer, int64_t pos) {
+    const int64_t dim = cfg_.dim;
+    const int64_t hd = cfg_.head_dim;
+    const int64_t n_heads = cfg_.n_heads;
+    const int64_t n_kv = cfg_.n_kv_heads;
+    const int64_t kv_dim = cfg_.kv_dim();
+    const int64_t q_dim = cfg_.q_dim();
+    const int64_t group = cfg_.gqa_group();
+    const float scale = 1.0f / std::sqrt((float)hd);
+    const float eps = cfg_.layernorm_eps;
+
+    // --- attention (LayerNorm pre-norm) ---
+    layernorm(xb_.data(), x_.data(),
+              static_cast<const float*>(loader_->getWeight(Role::AttnNorm).data),
+              static_cast<const float*>(loader_->getWeight(Role::AttnNormBias).data), dim, eps);
+    linear(fused_.data(), loader_->getWeight(Role::AttnQKV), xb_.data(), pool_);
+    add_bias(fused_.data(), loader_->getWeight(Role::AttnQKVBias), q_dim + 2 * kv_dim);
+    std::memcpy(q_.data(), fused_.data(),                  q_dim * sizeof(float));
+    std::memcpy(k_.data(), fused_.data() + q_dim,          kv_dim * sizeof(float));
+    std::memcpy(v_.data(), fused_.data() + q_dim + kv_dim, kv_dim * sizeof(float));
+
+    std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));   // no RoPE
+    std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
+
+    for (int64_t h = 0; h < n_heads; ++h) {
+        const float* qh = q_.data() + h * hd;
+        const int64_t kvh = h / group;
+        for (int64_t t = 0; t <= pos; ++t)
+            att_[t] = dot_f32(qh, kv_->k(layer, t) + kvh * hd, hd) * scale;
+        softmax(att_.data(), pos + 1);
+        float* out = attn_out_.data() + h * hd;
+        for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
+        for (int64_t t = 0; t <= pos; ++t)
+            axpy_f32(out, kv_->v(layer, t) + kvh * hd, att_[t], hd);
+    }
+    linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
+    add_bias(proj_.data(), loader_->getWeight(Role::AttnOutBias), dim);
+    vec_add_inplace(x_.data(), proj_.data(), dim);
+
+    // --- feed-forward (non-gated GELU MLP) ---
+    layernorm(xb_.data(), x_.data(),
+              static_cast<const float*>(loader_->getWeight(Role::FfnNorm).data),
+              static_cast<const float*>(loader_->getWeight(Role::FfnNormBias).data), dim, eps);
+    linear(hb_.data(), loader_->getWeight(Role::FfnUp), xb_.data(), pool_);
+    add_bias(hb_.data(), loader_->getWeight(Role::FfnUpBias), cfg_.ffn_dim);
+    gelu_inplace(hb_.data(), cfg_.ffn_dim);
+    linear(proj_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
+    add_bias(proj_.data(), loader_->getWeight(Role::FfnDownBias), dim);
+    vec_add_inplace(x_.data(), proj_.data(), dim);
+
+    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
+}
+
+// Phi-2 block: a *parallel* block — one shared LayerNorm feeds both the
+// attention and the FFN, and both outputs are added to the residual. Fused
+// attn_qkv (with bias), partial-rotary RoPE, non-gated GELU MLP, all biased.
+void Transformer::block_phi2(int64_t layer, int64_t pos) {
+    const int64_t dim = cfg_.dim;
+    const int64_t hd = cfg_.head_dim;
+    const int64_t n_heads = cfg_.n_heads;
+    const int64_t n_kv = cfg_.n_kv_heads;
+    const int64_t kv_dim = cfg_.kv_dim();
+    const int64_t q_dim = cfg_.q_dim();
+    const int64_t group = cfg_.gqa_group();
+    const int64_t rot = cfg_.rope_dim > 0 ? cfg_.rope_dim : hd;
+    const float scale = 1.0f / std::sqrt((float)hd);
+    const float eps = cfg_.layernorm_eps;
+
+    // Shared LayerNorm feeds both sublayers.
+    layernorm(xb_.data(), x_.data(),
+              static_cast<const float*>(loader_->getWeight(Role::AttnNorm).data),
+              static_cast<const float*>(loader_->getWeight(Role::AttnNormBias).data), dim, eps);
+
+    // Attention from xb_.
+    linear(fused_.data(), loader_->getWeight(Role::AttnQKV), xb_.data(), pool_);
+    add_bias(fused_.data(), loader_->getWeight(Role::AttnQKVBias), q_dim + 2 * kv_dim);
+    std::memcpy(q_.data(), fused_.data(),                  q_dim * sizeof(float));
+    std::memcpy(k_.data(), fused_.data() + q_dim,          kv_dim * sizeof(float));
+    std::memcpy(v_.data(), fused_.data() + q_dim + kv_dim, kv_dim * sizeof(float));
+    rope_rot(q_.data(), n_heads, hd, rot, pos, cfg_.rope_theta);
+    rope_rot(k_.data(), n_kv,    hd, rot, pos, cfg_.rope_theta);
+    std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));
+    std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
+    for (int64_t h = 0; h < n_heads; ++h) {
+        const float* qh = q_.data() + h * hd;
+        const int64_t kvh = h / group;
+        for (int64_t t = 0; t <= pos; ++t)
+            att_[t] = dot_f32(qh, kv_->k(layer, t) + kvh * hd, hd) * scale;
+        softmax(att_.data(), pos + 1);
+        float* out = attn_out_.data() + h * hd;
+        for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
+        for (int64_t t = 0; t <= pos; ++t)
+            axpy_f32(out, kv_->v(layer, t) + kvh * hd, att_[t], hd);
+    }
+    linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
+    add_bias(proj_.data(), loader_->getWeight(Role::AttnOutBias), dim);   // attn output
+
+    // FFN from the SAME xb_ (parallel), into moe_ as scratch.
+    linear(hb_.data(), loader_->getWeight(Role::FfnUp), xb_.data(), pool_);
+    add_bias(hb_.data(), loader_->getWeight(Role::FfnUpBias), cfg_.ffn_dim);
+    gelu_inplace(hb_.data(), cfg_.ffn_dim);
+    linear(moe_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
+    add_bias(moe_.data(), loader_->getWeight(Role::FfnDownBias), dim);    // ffn output
+
+    // Parallel residual: x += attn_out + ffn_out.
+    vec_add_inplace(x_.data(), proj_.data(), dim);
+    vec_add_inplace(x_.data(), moe_.data(), dim);
+
+    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
+}
+
 const float* Transformer::forward(int64_t token, int64_t pos) {
     LLM_CHECK(pos < kv_->max_ctx(), "forward: position exceeds context window");
 
@@ -431,6 +552,8 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
     loader_->embed_token(token, x_.data());
     // Gemma scales token embeddings by sqrt(dim); 1.0 elsewhere (no-op).
     if (cfg_.embedding_scale != 1.0f) scale_f32(x_.data(), cfg_.embedding_scale, cfg_.dim);
+    // GPT-2 adds learned absolute position embeddings at the input.
+    if (cfg_.learned_pos_emb) loader_->add_pos_embd(pos, x_.data());
 
     if (profiling_) { timings_.assign(cfg_.n_layers, LayerTiming{}); }
 
@@ -460,7 +583,11 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
 
     // final norm + output projection to logits
     WeightRef on = loader_->output_norm_weight();
-    if (cfg_.gemma_rmsnorm)
+    if (cfg_.use_layernorm)
+        layernorm(xb_.data(), x_.data(), static_cast<const float*>(on.data),
+                  static_cast<const float*>(loader_->output_norm_bias_weight().data),
+                  cfg_.dim, cfg_.layernorm_eps);
+    else if (cfg_.gemma_rmsnorm)
         rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
     else
         rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);

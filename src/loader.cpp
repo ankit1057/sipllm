@@ -30,6 +30,12 @@ const char* LayerLoader::role_suffix(Role r) {
         case Role::FfnGateExps:  return "ffn_gate_exps.weight";
         case Role::FfnUpExps:    return "ffn_up_exps.weight";
         case Role::FfnDownExps:  return "ffn_down_exps.weight";
+        case Role::AttnNormBias: return "attn_norm.bias";
+        case Role::FfnNormBias:  return "ffn_norm.bias";
+        case Role::AttnQKVBias:  return "attn_qkv.bias";
+        case Role::AttnOutBias:  return "attn_output.bias";
+        case Role::FfnUpBias:    return "ffn_up.bias";
+        case Role::FfnDownBias:  return "ffn_down.bias";
         default:             return "?";
     }
 }
@@ -48,7 +54,9 @@ static bool is_norm(Role r) {
     return r == Role::AttnNorm || r == Role::FfnNorm || is_post_norm(r) || is_qk_norm(r);
 }
 static bool is_bias(Role r) {
-    return r == Role::AttnQBias || r == Role::AttnKBias || r == Role::AttnVBias;
+    return r == Role::AttnQBias || r == Role::AttnKBias || r == Role::AttnVBias ||
+           r == Role::AttnNormBias || r == Role::FfnNormBias || r == Role::AttnQKVBias ||
+           r == Role::AttnOutBias || r == Role::FfnUpBias || r == Role::FfnDownBias;
 }
 // Dense projections that a fused-projection arch (Phi-3) or an MoE arch
 // (Mixtral) replaces with fused / packed expert tensors — absent there, so
@@ -105,6 +113,27 @@ LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
         out_weight_ref_ = {embd_resident_.data(), embd_info_->dtype,
                            embd_info_->shape[0],
                            embd_info_->shape.size() > 1 ? embd_info_->shape[1] : cfg_.dim};
+    }
+
+    // Optional output_norm bias (GPT-2 LayerNorm).
+    if (const TensorInfo* onb = src_->find("output_norm.bias")) {
+        out_norm_bias_.resize(onb->numel() * sizeof(float));
+        std::vector<uint8_t> raw(onb->nbytes);
+        src_->read_raw(*onb, raw.data());
+        dequantize_row(onb->dtype, raw.data(),
+                       reinterpret_cast<float*>(out_norm_bias_.data()), onb->numel());
+        out_norm_bias_present_ = true;
+    }
+
+    // Optional learned position embeddings (GPT-2): kept resident, fp32.
+    pos_embd_info_ = src_->find("position_embd.weight");
+    if (pos_embd_info_) {
+        pos_embd_.resize(pos_embd_info_->numel());
+        std::vector<uint8_t> raw(pos_embd_info_->nbytes);
+        src_->read_raw(*pos_embd_info_, raw.data());
+        dequantize_row(pos_embd_info_->dtype, raw.data(), pos_embd_.data(),
+                       pos_embd_info_->numel());
+        pos_embd_is_resident_ = true;
     }
 
     if (opt_.async && opt_.n_buffers > 1)
@@ -294,6 +323,18 @@ WeightRef LayerLoader::output_norm_weight() const {
     return {out_norm_.data(), DType::F32, 1, cfg_.dim};
 }
 WeightRef LayerLoader::output_weight() const { return out_weight_ref_; }
+
+WeightRef LayerLoader::output_norm_bias_weight() const {
+    if (!out_norm_bias_present_) return WeightRef{};
+    return {out_norm_bias_.data(), DType::F32, 1, cfg_.dim};
+}
+
+void LayerLoader::add_pos_embd(int64_t pos, float* dst) const {
+    if (!pos_embd_is_resident_) return;
+    const int64_t dim = cfg_.dim;
+    const float* row = pos_embd_.data() + pos * dim;
+    for (int64_t i = 0; i < dim; ++i) dst[i] += row[i];
+}
 
 size_t LayerLoader::resident_bytes() const {
     size_t total = out_norm_.size() + out_weight_.size() + embd_resident_.size();
