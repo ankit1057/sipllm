@@ -27,6 +27,7 @@ enum class DType : int32_t {
     Q5_K  = 13,
     Q6_K  = 14,   // Q4_K_M mixes Q4_K and Q6_K tensors
     Q8_K  = 15,
+    IQ4_NL = 20,  // non-linear 4-bit: fp16 scale + 16-entry lookup, 32/block
     BF16  = 30,
     COUNT = 39,
 };
