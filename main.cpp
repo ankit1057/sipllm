@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr,
             "usage: %s <model> [-p prompt] [-n tokens] [-t temp]\n"
+            "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
             "          [--residency fp32|quant] [--mmap] [--no-async]\n"
             "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy]\n",
             argv[0]);
@@ -37,6 +38,10 @@ int main(int argc, char** argv) {
         if (a == "-p") prompt = next("");
         else if (a == "-n") max_new = std::stoi(next("64"));
         else if (a == "-t") scfg.temperature = std::stof(next("0.8"));
+        else if (a == "--top-k") scfg.top_k = std::stoi(next("40"));
+        else if (a == "--top-p") scfg.top_p = std::stof(next("0.95"));
+        else if (a == "--repeat-penalty") scfg.repeat_penalty = std::stof(next("1.1"));
+        else if (a == "--repeat-last-n") scfg.repeat_last_n = std::stoi(next("64"));
         else if (a == "--seed") scfg.seed = std::stoull(next("1"));
         else if (a == "--greedy") scfg.temperature = 0.f;
         else if (a == "--residency") opt.residency = (next("quant") == "fp32") ? Residency::FP32 : Residency::Quantized;
