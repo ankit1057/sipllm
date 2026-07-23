@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest a new capability, format, or optimization
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      placeholder: "As a user on <device>, I want <capability> so that ..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should it do? Any thoughts on where it fits in the code?
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This does not add a third-party runtime dependency
+          required: true

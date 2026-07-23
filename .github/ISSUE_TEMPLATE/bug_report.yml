@@ -1,0 +1,36 @@
+name: Bug report
+description: Something produced wrong output, crashed, or won't build
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report! A minimal reproduction helps enormously.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Expected vs actual behavior.
+      placeholder: "I ran `sipllm run tinyllama` and it printed garbage / crashed / ..."
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s), model, and prompt.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model / quantization
+      placeholder: "TinyLlama-1.1B Q4_K_M"
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: "Output of `uname -a` and your compiler version (`c++ --version`)."
+      render: shell
+    validations:
+      required: true

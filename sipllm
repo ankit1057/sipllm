@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# sipllm — an Ollama-style front-end for the sipllm streaming inference engine.
+#
+#   sipllm run   tinyllama -p "The capital of France is"
+#   sipllm pull  tinyllama:q8_0
+#   sipllm serve tinyllama --port 8080
+#   sipllm list | registry | rm <name> | which <name>
+#
+# It resolves a short model name to a GGUF URL, downloads it on demand into
+# ~/.sipllm/models, and hands it to the engine binary (which STREAMS the weights
+# off disk — so even a model larger than RAM runs). Add your own models with a
+# line "name<TAB>url" in ~/.sipllm/registry.conf, or just pass a URL / path.
+set -euo pipefail
+
+SIPLLM_HOME="${SIPLLM_HOME:-$HOME/.sipllm}"
+MODELS_DIR="$SIPLLM_HOME/models"
+REGISTRY_FILE="$SIPLLM_HOME/registry.conf"
+VERSION="0.1.0"
+
+mkdir -p "$MODELS_DIR"
+
+# ---- locate the engine binary --------------------------------------------
+# Priority: $SIPLLM_ENGINE, alongside this script, ~/.sipllm/bin, then PATH.
+find_engine() {
+    local self_dir; self_dir="$(cd "$(dirname "$0")" && pwd)"
+    for cand in "${SIPLLM_ENGINE:-}" "$self_dir/llm-engine" "$self_dir/llm" \
+                "$SIPLLM_HOME/bin/llm-engine" "$(command -v llm-engine 2>/dev/null || true)"; do
+        [ -n "$cand" ] && [ -x "$cand" ] && { echo "$cand"; return 0; }
+    done
+    echo ""; return 1
+}
+find_server() {
+    local self_dir; self_dir="$(cd "$(dirname "$0")" && pwd)"
+    for cand in "${SIPLLM_SERVER:-}" "$self_dir/llm_server" "$SIPLLM_HOME/bin/llm_server" \
+                "$(command -v llm_server 2>/dev/null || true)"; do
+        [ -n "$cand" ] && [ -x "$cand" ] && { echo "$cand"; return 0; }
+    done
+    echo ""; return 1
+}
+
+die()  { echo "sipllm: $*" >&2; exit 1; }
+info() { echo ">> $*" >&2; }
+
+# ---- built-in model registry ----------------------------------------------
+# Short name -> GGUF URL. Tags select a quantization; the bare name is an alias
+# for a sensible default. All entries below are public, ungated GGUF files.
+builtin_url() {
+    case "$1" in
+        tinyllama|tinyllama:q4_k_m)
+            echo "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf" ;;
+        tinyllama:q5_k_m)
+            echo "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf" ;;
+        tinyllama:q8_0)
+            echo "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf" ;;
+        tinyllama:q2_k)
+            echo "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q2_K.gguf" ;;
+        *) echo "" ;;
+    esac
+}
+
+registry_names() {
+    printf '%s\n' tinyllama tinyllama:q4_k_m tinyllama:q5_k_m tinyllama:q8_0 tinyllama:q2_k
+    [ -f "$REGISTRY_FILE" ] && awk 'NF && $1!~/^#/ {print $1}' "$REGISTRY_FILE" || true
+}
+
+# Resolve a name to a URL: user registry.conf wins, then built-ins.
+resolve_url() {
+    local name="$1"
+    if [ -f "$REGISTRY_FILE" ]; then
+        local u; u="$(awk -v n="$name" 'NF && $1!~/^#/ && $1==n {print $2; exit}' "$REGISTRY_FILE")"
+        [ -n "$u" ] && { echo "$u"; return 0; }
+    fi
+    builtin_url "$name"
+}
+
+# Local filename for a model name (":" -> "-").
+local_path() { echo "$MODELS_DIR/$(echo "$1" | tr ':/' '--').gguf"; }
+
+download() {
+    local url="$1" dest="$2"
+    info "downloading $url"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 -C - -o "$dest.part" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -c -O "$dest.part" "$url"
+    else
+        die "need curl or wget to download models"
+    fi
+    mv "$dest.part" "$dest"
+}
+
+# Return a local model path for <name|url|path>, pulling it if needed.
+ensure_model() {
+    local ref="$1"
+    if [ -f "$ref" ]; then echo "$ref"; return 0; fi          # direct path
+    case "$ref" in
+        http://*|https://*)                                    # direct URL
+            local dest; dest="$MODELS_DIR/$(basename "${ref%%\?*}")"
+            [ -f "$dest" ] || download "$ref" "$dest"
+            echo "$dest"; return 0 ;;
+    esac
+    local dest; dest="$(local_path "$ref")"
+    if [ ! -f "$dest" ]; then
+        local url; url="$(resolve_url "$ref")"
+        [ -n "$url" ] || die "unknown model '$ref' (try: sipllm registry) — or pass a URL/path"
+        download "$url" "$dest"
+    fi
+    echo "$dest"
+}
+
+# ---- subcommands -----------------------------------------------------------
+cmd_pull() { [ $# -ge 1 ] || die "usage: sipllm pull <name|url>"; p="$(ensure_model "$1")"; info "ready: $p"; }
+
+cmd_run() {
+    [ $# -ge 1 ] || die "usage: sipllm run <name|url|path> [engine args...]"
+    local ref="$1"; shift
+    local engine; engine="$(find_engine)" || die "engine binary not found (set \$SIPLLM_ENGINE)"
+    local model; model="$(ensure_model "$ref")"
+    exec "$engine" "$model" "$@"
+}
+
+cmd_serve() {
+    [ $# -ge 1 ] || die "usage: sipllm serve <name|url|path> [server args...]"
+    local ref="$1"; shift
+    local server; server="$(find_server)" || die "server binary not found (set \$SIPLLM_SERVER; build with 'make server')"
+    local model; model="$(ensure_model "$ref")"
+    exec "$server" "$model" "$@"
+}
+
+cmd_list() {
+    printf '%-40s %10s\n' "MODEL (local)" "SIZE"
+    shopt -s nullglob
+    for f in "$MODELS_DIR"/*.gguf; do
+        local sz; sz=$(du -hL "$f" 2>/dev/null | cut -f1)
+        printf '%-40s %10s\n' "$(basename "$f")" "$sz"
+    done
+}
+
+cmd_registry() {
+    echo "Available model names (sipllm pull <name>):"
+    registry_names | sort -u | sed 's/^/  /'
+    echo
+    echo "Also accepted: any GGUF URL, or a local .gguf path."
+    echo "Add your own: echo 'myname<TAB>https://.../model.gguf' >> $REGISTRY_FILE"
+}
+
+cmd_rm() {
+    [ $# -ge 1 ] || die "usage: sipllm rm <name|file>"
+    local p; p="$(local_path "$1")"; [ -f "$p" ] || p="$MODELS_DIR/$1"
+    [ -f "$p" ] || die "no local model '$1'"
+    rm -f "$p"; info "removed $p"
+}
+
+cmd_which() { [ $# -ge 1 ] || die "usage: sipllm which <name>"; local_path "$1"; }
+
+usage() {
+    cat >&2 <<EOF
+sipllm $VERSION — streaming GGUF LLM inference, Ollama-style
+
+usage:
+  sipllm run   <name|url|path> [-p "prompt"] [-n tokens] [-t temp]
+  sipllm pull  <name|url>
+  sipllm serve <name> [--port 8080]
+  sipllm list
+  sipllm registry
+  sipllm rm    <name>
+  sipllm which <name>
+  sipllm version | help
+
+examples:
+  sipllm run tinyllama -p "The capital of France is" -n 40
+  sipllm run tinyllama:q8_0 -p "Once upon a time"
+  sipllm serve tinyllama --port 8080
+
+models live in $MODELS_DIR ; the engine STREAMS them off disk (flat RAM).
+EOF
+}
+
+main() {
+    [ $# -ge 1 ] || { usage; exit 2; }
+    local cmd="$1"; shift || true
+    case "$cmd" in
+        run)      cmd_run "$@" ;;
+        pull)     cmd_pull "$@" ;;
+        serve)    cmd_serve "$@" ;;
+        list|ls)  cmd_list "$@" ;;
+        registry) cmd_registry "$@" ;;
+        rm|remove) cmd_rm "$@" ;;
+        which)    cmd_which "$@" ;;
+        version|--version|-v) echo "sipllm $VERSION" ;;
+        help|--help|-h) usage ;;
+        *) die "unknown command '$cmd' (try: sipllm help)" ;;
+    esac
+}
+main "$@"
