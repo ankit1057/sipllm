@@ -198,6 +198,10 @@ Quantized weights are never bulk-expanded: `matmul_quant` walks one output row,
 dequantizes that row's blocks into a tiny buffer, dots with the input, and moves
 on — which is why peak RSS tracks *layer* size, not *model* size.
 
+For a step-by-step walkthrough of one forward pass — the `WeightSource` seam,
+the async double-buffer prefetch, and why peak RSS is flat — with a diagram, see
+[**docs/streaming-loader.md**](docs/streaming-loader.md).
+
 ## Contributing
 
 Contributions are very welcome — it's a small, readable codebase with a fast,
