@@ -14,6 +14,13 @@
 #include <string>
 #include <stdexcept>
 
+// Platform RSS query: mach task_info on Apple, /proc on Linux/Android.
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace llm {
 
 // ---- errors ---------------------------------------------------------------
@@ -80,10 +87,20 @@ inline size_t round_up(size_t n, size_t mult) {
 }
 
 // ---- resident set size (actual RAM) ---------------------------------------
-// Reads /proc/self/statm (Linux/Android). This is the number that proves the
-// streaming claim: it stays flat as layers rotate through, instead of climbing
-// to the full model size. Returns 0 if unavailable.
+// The number that proves the streaming claim: it stays flat as layers rotate
+// through instead of climbing to the full model size. Returns 0 if
+// unavailable.
+//   * macOS/iOS: mach task_info(MACH_TASK_BASIC_INFO).resident_size.
+//   * Linux/Android: /proc/self/statm resident pages * page size.
 inline size_t current_rss_bytes() {
+#if defined(__APPLE__)
+    mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
+        return 0;
+    return static_cast<size_t>(info.resident_size);
+#else
     FILE* f = std::fopen("/proc/self/statm", "r");
     if (!f) return 0;
     long total_pages = 0, resident_pages = 0;
@@ -91,8 +108,9 @@ inline size_t current_rss_bytes() {
         std::fclose(f); return 0;
     }
     std::fclose(f);
-    static const long page = 4096;  // sysconf(_SC_PAGESIZE) is 4096 here
+    const long page = sysconf(_SC_PAGESIZE);
     return static_cast<size_t>(resident_pages) * page;
+#endif
 }
 
 } // namespace llm
