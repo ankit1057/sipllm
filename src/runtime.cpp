@@ -3,6 +3,8 @@
 #include "llm/format.h"
 #include "llm/gguf.h"
 
+#include <algorithm>
+
 namespace llm {
 
 std::unique_ptr<WeightSource> open_model(const std::string& path, bool use_mmap) {
@@ -21,8 +23,16 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     cfg_ = ModelConfig::from_source(*src_);
     LLM_CHECK(cfg_.n_layers > 0 && cfg_.dim > 0, "runtime: invalid model config");
 
-    int ctx = max_ctx > 0 ? max_ctx : (int)cfg_.ctx_len;
-    if (ctx <= 0) ctx = 2048;
+    // Cap the DEFAULT context window. Modern models advertise huge windows
+    // (Llama 3.2 = 131072), and the KV cache is allocated for the full window up
+    // front — at 131072 that's multiple GB, an instant OOM on an edge device.
+    // So unless the caller asks for a specific --ctx, use the model's window
+    // clamped to a modest edge-friendly default. Power users raise it explicitly.
+    constexpr int64_t kDefaultMaxCtx = 4096;
+    int ctx;
+    if (max_ctx > 0)              ctx = max_ctx;                       // explicit --ctx
+    else if (cfg_.ctx_len > 0)    ctx = (int)std::min<int64_t>(cfg_.ctx_len, kDefaultMaxCtx);
+    else                          ctx = 2048;
 
     pool_ = std::make_unique<ThreadPool>(threads);
     opt_.dequant_pool = pool_.get();

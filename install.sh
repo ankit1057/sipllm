@@ -10,7 +10,7 @@
 set -eu
 
 REPO="ankit1057/sipllm"
-VERSION="0.1.0"
+VERSION="0.1.1"
 PREFIX="${SIPLLM_PREFIX:-$HOME/.sipllm}"
 BIN="$PREFIX/bin"
 FORCE_BUILD="${SIPLLM_BUILD:-0}"

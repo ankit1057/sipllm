@@ -73,18 +73,38 @@ make test       # 34 tests, all green
 ## Use it — Ollama-style
 
 ```bash
-sipllm run tinyllama -p "The capital of France is" -n 40   # pulls on first use
-sipllm run tinyllama:q8_0 -p "Once upon a time"            # pick a quantization
-sipllm serve tinyllama --port 8080                         # browser chat UI
-sipllm pull tinyllama:q5_k_m                               # just download
+sipllm run smollm2  -p "The capital of India is" -n 40     # pulls on first use
+sipllm run llama3.2 -p "Write a haiku about the sea"       # Llama-3.2-1B-Instruct
+sipllm run llama3.2:3b -p "Explain RoPE briefly"           # bigger, still streams
+sipllm serve smollm2 --port 8080                           # browser chat UI
+sipllm pull tinyllama:q8_0                                 # just download
 sipllm list                                                # local models
 sipllm registry                                            # what's available
 ```
+
+**Bundled models** (all public / ungated, all Llama-architecture — what the
+engine implements today): `smollm2` (SmolLM2-1.7B-Instruct — the recommended
+default, best quality/size here), `llama3.2` (Llama-3.2-1B/`:3b`-Instruct), and
+`tinyllama` (1.1B — tiny and prone to rambling; fine for smoke tests). Each takes
+quant tags, e.g. `smollm2:q8_0`, `tinyllama:q4_k_m`. Bigger *instruct* models
+hallucinate far less than TinyLlama.
 
 Model names resolve to public GGUF files and cache in `~/.sipllm/models`. You can
 also pass any GGUF **URL** or **local path** directly, or add your own names to
 `~/.sipllm/registry.conf` (`name<TAB>url`). Under the hood the engine streams the
 file, so `sipllm run` on a model bigger than your RAM just works.
+
+**Context window.** The engine defaults to a 4096-token window so the KV cache
+stays small on edge devices — models that advertise huge windows (Llama 3.2 =
+131072) would otherwise allocate multi-GB caches up front. Raise it explicitly
+with `./build/llm model.gguf --ctx 32768 ...` when you have the RAM.
+
+> **Architecture note.** Today the engine implements the **Llama** architecture
+> (RMSNorm + RoPE + GQA + SwiGLU). Models with a different architecture — Gemma,
+> Qwen2, Phi, Mixtral-MoE — won't load yet; support is tracked in the
+> [issues](https://github.com/ankit1057/sipllm/issues). Llama 3.x also uses a
+> "llama3" RoPE-scaling scheme not yet applied here — correct for short prompts,
+> may drift over long generations.
 
 Prefer the raw engine? It takes a model path directly:
 
