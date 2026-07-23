@@ -25,6 +25,7 @@ const char* LayerLoader::role_suffix(Role r) {
         case Role::FfnPostNorm:  return "post_ffw_norm.weight";
         case Role::AttnQNorm:    return "attn_q_norm.weight";
         case Role::AttnKNorm:    return "attn_k_norm.weight";
+        case Role::AttnQKV:      return "attn_qkv.weight";
         default:             return "?";
     }
 }
@@ -45,10 +46,18 @@ static bool is_norm(Role r) {
 static bool is_bias(Role r) {
     return r == Role::AttnQBias || r == Role::AttnKBias || r == Role::AttnVBias;
 }
+// Split projections that a fused-projection arch (Phi-3) replaces with one
+// tensor — absent there, so optional.
+static bool is_split_proj(Role r) {
+    return r == Role::AttnQ || r == Role::AttnK || r == Role::AttnV || r == Role::FfnGate;
+}
 // 1-D fp32 weights (norms, biases): tiny, always dequantized on load.
 static bool is_1d_fp32(Role r) { return is_norm(r) || is_bias(r); }
 // Roles that may legitimately be absent (arch-dependent). Missing -> invalid ref.
-static bool is_optional(Role r) { return is_bias(r) || is_post_norm(r) || is_qk_norm(r); }
+static bool is_optional(Role r) {
+    return is_bias(r) || is_post_norm(r) || is_qk_norm(r) || is_split_proj(r) ||
+           r == Role::AttnQKV;
+}
 
 LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     : src_(src), cfg_(cfg), opt_(opt), n_layers_(cfg.n_layers) {

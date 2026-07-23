@@ -4,7 +4,9 @@
 #include "llm/ops.h"
 #include "llm/simd.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace llm {
 
@@ -20,6 +22,8 @@ Transformer::Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool)
     proj_.assign(cfg_.dim, 0.f);
     hb_.assign(cfg_.ffn_dim, 0.f);
     hb2_.assign(cfg_.ffn_dim, 0.f);
+    // Phi-3 fused projections need q_dim+2*kv_dim (qkv) or 2*ffn_dim (gate+up).
+    fused_.assign(std::max(cfg_.q_dim() + 2 * cfg_.kv_dim(), 2 * cfg_.ffn_dim), 0.f);
     logits_.assign(cfg_.vocab_size, 0.f);
 }
 
@@ -103,6 +107,9 @@ void Transformer::block(int64_t layer, int64_t pos) {
         case Arch::Gemma2:
         case Arch::Gemma3:    // Gemma2 shape + QK-norm + per-layer RoPE (handled in-block)
             block_gemma2(layer, pos);
+            return;
+        case Arch::Phi3:
+            block_phi3(layer, pos);
             return;
         case Arch::Unknown:
         default:
@@ -274,6 +281,81 @@ void Transformer::block_gemma2(int64_t layer, int64_t pos) {
     WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
     if (fpn.valid())
         rmsnorm_gemma(proj_.data(), proj_.data(), static_cast<const float*>(fpn.data), dim, eps);
+    vec_add_inplace(x_.data(), proj_.data(), dim);
+
+    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
+}
+
+// Partial-rotary RoPE: rotate only the first `rot_dim` dims of each head (the
+// remaining head_dim - rot_dim pass through). rot_dim == head_dim is full RoPE.
+static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
+                     int64_t rot_dim, int64_t pos, float theta) {
+    const int64_t half = rot_dim / 2;
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* p = vec + h * head_dim;
+        for (int64_t i = 0; i < half; ++i) {
+            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+            float angle = (float)pos * freq;
+            float c = std::cos(angle), s = std::sin(angle);
+            float x0 = p[2 * i], x1 = p[2 * i + 1];
+            p[2 * i]     = x0 * c - x1 * s;
+            p[2 * i + 1] = x0 * s + x1 * c;
+        }
+    }
+}
+
+// Phi-3 block: RMSNorm + SwiGLU like Llama, but q/k/v come from one fused
+// attn_qkv projection, gate+up come from one fused ffn_up ([gate;up], 2*ffn
+// rows), and RoPE is partial (rope_dim rotary dims per head).
+void Transformer::block_phi3(int64_t layer, int64_t pos) {
+    const int64_t dim = cfg_.dim;
+    const int64_t hd = cfg_.head_dim;
+    const int64_t n_heads = cfg_.n_heads;
+    const int64_t n_kv = cfg_.n_kv_heads;
+    const int64_t kv_dim = cfg_.kv_dim();
+    const int64_t q_dim = cfg_.q_dim();
+    const int64_t group = cfg_.gqa_group();
+    const int64_t ff = cfg_.ffn_dim;
+    const int64_t rot = cfg_.rope_dim > 0 ? cfg_.rope_dim : hd;
+    const float scale = 1.0f / std::sqrt((float)hd);
+
+    // --- attention: one fused QKV projection, then split ---
+    WeightRef an = loader_->getWeight(Role::AttnNorm);
+    rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(an.data), dim, cfg_.rms_eps);
+    linear(fused_.data(), loader_->getWeight(Role::AttnQKV), xb_.data(), pool_);
+    std::memcpy(q_.data(), fused_.data(),                 q_dim * sizeof(float));
+    std::memcpy(k_.data(), fused_.data() + q_dim,         kv_dim * sizeof(float));
+    std::memcpy(v_.data(), fused_.data() + q_dim + kv_dim, kv_dim * sizeof(float));
+
+    rope_rot(q_.data(), n_heads, hd, rot, pos, cfg_.rope_theta);
+    rope_rot(k_.data(), n_kv,    hd, rot, pos, cfg_.rope_theta);
+
+    std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));
+    std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
+
+    for (int64_t h = 0; h < n_heads; ++h) {
+        const float* qh = q_.data() + h * hd;
+        const int64_t kvh = h / group;
+        for (int64_t t = 0; t <= pos; ++t)
+            att_[t] = dot_f32(qh, kv_->k(layer, t) + kvh * hd, hd) * scale;
+        softmax(att_.data(), pos + 1);
+        float* out = attn_out_.data() + h * hd;
+        for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
+        for (int64_t t = 0; t <= pos; ++t)
+            axpy_f32(out, kv_->v(layer, t) + kvh * hd, att_[t], hd);
+    }
+    linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
+    vec_add_inplace(x_.data(), proj_.data(), dim);
+
+    // --- feed-forward: one fused gate+up projection ([gate;up]) ---
+    WeightRef fn = loader_->getWeight(Role::FfnNorm);
+    rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(fn.data), dim, cfg_.rms_eps);
+    linear(fused_.data(), loader_->getWeight(Role::FfnUp), xb_.data(), pool_);   // [gate; up]
+    float* gate = fused_.data();
+    float* up   = fused_.data() + ff;
+    silu_inplace(gate, ff);
+    mul_f32(hb_.data(), gate, up, ff);                       // silu(gate) * up
+    linear(proj_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
     vec_add_inplace(x_.data(), proj_.data(), dim);
 
     if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);

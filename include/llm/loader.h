@@ -45,6 +45,8 @@ enum class Role {
     AttnPostNorm, FfnPostNorm,
     // Optional per-head query/key norms (Gemma 3), applied before RoPE.
     AttnQNorm, AttnKNorm,
+    // Optional fused projection (Phi-3): one attn_qkv.weight split into q/k/v.
+    AttnQKV,
     COUNT
 };
 

@@ -13,6 +13,8 @@ Arch arch_from_name(const std::string& name) {
     if (name == "qwen2")   return Arch::Qwen2;
     if (name == "gemma2")  return Arch::Gemma2;
     if (name == "gemma3")  return Arch::Gemma3;
+    if (name == "phi3")    return Arch::Phi3;
+    if (name == "phi2")    return Arch::Phi2;
     return Arch::Unknown;
 }
 
@@ -23,6 +25,8 @@ const char* arch_name(Arch a) {
         case Arch::Qwen2:   return "qwen2";
         case Arch::Gemma2:  return "gemma2";
         case Arch::Gemma3:  return "gemma3";
+        case Arch::Phi3:    return "phi3";
+        case Arch::Phi2:    return "phi2";
         case Arch::Unknown: return "unknown";
     }
     return "unknown";
@@ -115,6 +119,11 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     // the pattern that says which layers are global.
     if (first_float(src, {K("rope.local_freq_base")}, f)) c.rope_theta_local = (float)f;
     if (first_int(src, {K("attention.sliding_window_pattern")}, v)) c.sliding_window_pattern = v;
+
+    // Phi-3: fused q/k/v and fused gate+up projections, plus partial-rotary RoPE
+    // (rope.dimension_count rotary dims per head; the rest pass through).
+    if (c.arch_kind == Arch::Phi3) { c.fused_qkv = true; c.fused_gate_up = true; }
+    if (first_int(src, {K("rope.dimension_count")}, v)) c.rope_dim = v;
 
     if (c.head_dim == 0 && c.n_heads > 0 && c.dim > 0) c.head_dim = c.dim / c.n_heads;
     return c;
