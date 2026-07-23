@@ -1,0 +1,93 @@
+name: Release binaries
+
+# Builds prebuilt sipllm bundles for linux/macOS on x86_64 and aarch64 and
+# attaches them to the GitHub release. Asset names match what install.sh
+# expects: sipllm-<version>-<os>-<arch>.tar.gz  (os = linux|darwin,
+# arch = x86_64|aarch64). Triggered by pushing a version tag (v*), or manually.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string for the asset name (defaults to install.sh's)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,     os: linux,  arch: x86_64,  archflags: "-mavx2 -mfma" }
+          - { runner: ubuntu-24.04-arm,  os: linux,  arch: aarch64, archflags: "" }
+          - { runner: macos-13,          os: darwin, arch: x86_64,  archflags: "-mavx2 -mfma" }
+          - { runner: macos-14,          os: darwin, arch: aarch64, archflags: "" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Resolve version
+        id: ver
+        run: |
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ]; then
+            case "${GITHUB_REF_NAME:-}" in
+              v*) V="${GITHUB_REF_NAME#v}" ;;
+              *)  V="$(sed -n 's/^VERSION="\(.*\)"/\1/p' install.sh | head -1)" ;;
+            esac
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building version: $V"
+
+      - name: Build (portable ARCHFLAGS)
+        run: |
+          make -j"$(getconf _NPROCESSORS_ONLN)" ARCHFLAGS="${{ matrix.archflags }}" all
+          make ARCHFLAGS="${{ matrix.archflags }}" server
+
+      - name: Test
+        run: make ARCHFLAGS="${{ matrix.archflags }}" test
+
+      - name: Sanity — synthesize a toy GGUF and run it
+        run: |
+          ./build/make_toy_model /tmp/toy.gguf --gguf
+          ./build/llm /tmp/toy.gguf -p "hello" -n 4 --greedy
+
+      - name: Stage bundle
+        id: stage
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          DIST="sipllm-${V}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir "$DIST"
+          cp sipllm            "$DIST/sipllm"
+          cp build/llm         "$DIST/llm-engine"      # CLI looks for llm-engine
+          cp build/llm_server  "$DIST/llm_server"      2>/dev/null || true
+          for t in dump_logits bench inspect_gguf make_toy_model gguf_to_f16; do
+            cp "build/$t" "$DIST/$t" 2>/dev/null || true
+          done
+          cp LICENSE README.md "$DIST/" 2>/dev/null || true
+          chmod +x "$DIST"/sipllm "$DIST"/llm-engine
+          tar -czf "$DIST.tar.gz" "$DIST"
+          echo "asset=$DIST.tar.gz" >> "$GITHUB_OUTPUT"
+          ls -la "$DIST.tar.gz"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.asset }}
+          path: ${{ steps.stage.outputs.asset }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.stage.outputs.asset }}

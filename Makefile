@@ -16,10 +16,13 @@ OPT      := -O3 -funroll-loops -fno-math-errno
 INCLUDE  := -Iinclude -I.
 LDLIBS   := -lpthread
 
-# Per-arch tuning. -march=native lets the compiler light up the host's SIMD:
+# Per-arch tuning. By default -march=native lights up the host's SIMD:
 #   aarch64 -> asimddp/i8mm/sve2/bf16 (the NEON kernels in simd.h/neon.cpp)
 #   x86_64  -> AVX2+FMA when present, which enables the AVX2 path in simd.h
 #              (falls back to scalar on pre-AVX2 hosts, so it always builds).
+# Portable/release builds override this to avoid baking in the builder's exact
+# ISA (which could SIGILL on older download targets), e.g.
+#   make ARCHFLAGS="-mavx2 -mfma"   (AVX2 baseline)   or   make ARCHFLAGS=""
 ARCH := $(shell uname -m)
 ifeq ($(ARCH),aarch64)
   CXXFLAGS_ARCH := -march=native
@@ -28,8 +31,9 @@ else ifeq ($(ARCH),x86_64)
 else
   CXXFLAGS_ARCH :=
 endif
+ARCHFLAGS ?= $(CXXFLAGS_ARCH)
 
-CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(CXXFLAGS_ARCH) $(INCLUDE)
+CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(ARCHFLAGS) $(INCLUDE)
 
 BUILD := build
 SRC   := $(wildcard src/*.cpp)
