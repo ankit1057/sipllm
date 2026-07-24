@@ -65,6 +65,13 @@ public:
         bool      use_mmap     = false;  // pread by default (Phase 6 spec)
         bool      stream_lm_head = false; // stream non-tied LM head off disk (RAM<->speed knob)
         ThreadPool* dequant_pool = nullptr; // parallelize per-layer dequant
+        // Hard ceiling (bytes) on WEIGHT-resident RAM: globals + pinned hot
+        // layers + the streaming ring. 0 = unlimited (today's behavior, exact).
+        // When >0 the loader pins as many contiguous layers as fit under the
+        // ceiling and streams the rest, so peak weight RSS never exceeds it (the
+        // RAM<->speed dial, issue #37). Runtime derives this from a total
+        // peak-RSS target by subtracting the KV cache + a scratch reserve.
+        size_t    ram_budget_bytes = 0;
     };
 
     struct Stats {
@@ -114,6 +121,7 @@ public:
     const ModelConfig& config() const { return cfg_; }
     const Stats& stats() const { return stats_; }
     size_t resident_bytes() const;           // approx current RAM for weights
+    int    pinned_layers() const { return n_pinned_; } // resident hot layers (#37)
 
 private:
     struct Slot {
@@ -125,6 +133,8 @@ private:
     };
     struct Job { int slot = -1; int layer = -1; };
 
+    void   plan_and_pin_layers();            // #37: pin hot layers under budget
+    size_t estimate_layer_bytes(int layer) const; // predicted resident bytes
     void   fill_slot(Slot& s, int layer);    // no lock held; does I/O + dequant
     void   load_weight_into(Slot& s, Role role, int layer);
     int    other_slot(int s) const { return (s + 1) % (int)slots_.size(); }
@@ -141,6 +151,18 @@ private:
 
     std::vector<Slot> slots_;
     int current_ = -1;
+
+    // ---- ram-budget residency (issue #37) --------------------------------
+    // With Options.ram_budget_bytes > 0, layers [0, n_pinned_) are materialized
+    // once and kept resident in pinned_[l]; loadLayer serves them with no I/O.
+    // Remaining cold layers stream through slots_ as before. active_ is the slot
+    // getWeight reads from (a pinned slot or the current ring slot), set by every
+    // loadLayer path so budget==0 stays byte-for-byte identical to before.
+    std::vector<Slot>    pinned_;         // indexed by layer; filled iff pinned
+    std::vector<uint8_t> pinned_mask_;    // 1 iff layer is pinned resident
+    int                  n_pinned_ = 0;
+    size_t               pinned_bytes_ = 0;
+    const Slot*          active_ = nullptr;
     std::vector<LayerStat> layer_stats_;   // per-layer io/dequant accounting
 
     // global weights

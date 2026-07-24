@@ -32,6 +32,7 @@ struct GenStats {
     double prefill_tok_s = 0;   // prompt tokens / prefill_s
     double decode_tok_s = 0;    // gen tokens / decode_s
     size_t weights_resident_bytes = 0;
+    int    pinned_layers = 0;   // #37: layers pinned resident under --ram-budget
     size_t kv_bytes = 0;
     uint64_t bytes_read = 0;    // total streamed from disk
     uint64_t prefetch_hits = 0;
@@ -43,8 +44,10 @@ struct GenStats {
 class Runtime {
 public:
     // Takes ownership of the source. opt controls residency/prefetch/mmap.
+    // ram_budget_total (bytes, 0 = unlimited) is a TOTAL peak-RSS target; the
+    // ctor derives the loader's weight ceiling from it (subtracting KV + scratch).
     Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
-            int max_ctx = 0, int threads = 0);
+            int max_ctx = 0, int threads = 0, size_t ram_budget_total = 0);
 
     const ModelConfig& config() const { return cfg_; }
     const Tokenizer&   tokenizer() const { return tok_; }

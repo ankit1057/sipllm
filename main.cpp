@@ -10,9 +10,29 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <string>
 
 using namespace llm;
+
+// Parse a byte count with an optional K/M/G (or KB/MB/GB) suffix: "512M", "1.5G",
+// "268435456", "0". Used by --ram-budget (#37).
+static size_t parse_bytes(const std::string& in) {
+    if (in.empty()) return 0;
+    std::string t = in;
+    if (t.size() >= 2 && (t.back() == 'B' || t.back() == 'b')) t.pop_back();
+    size_t mult = 1;
+    if (!t.empty()) {
+        switch (std::toupper((unsigned char)t.back())) {
+            case 'K': mult = 1024ull; t.pop_back(); break;
+            case 'M': mult = 1024ull * 1024; t.pop_back(); break;
+            case 'G': mult = 1024ull * 1024 * 1024; t.pop_back(); break;
+            default: break;
+        }
+    }
+    if (t.empty()) return 0;
+    return (size_t)(std::stod(t) * (double)mult);
+}
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -20,13 +40,15 @@ int main(int argc, char** argv) {
             "usage: %s <model> [-p prompt] [-n tokens] [-t temp]\n"
             "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
             "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
-            "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy]\n",
+            "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy]\n"
+            "          [--ram-budget BYTES|N{K,M,G}]\n",
             argv[0]);
         return 2;
     }
     std::string model = argv[1];
     std::string prompt = "Hello";
     int max_new = 64, threads = 0, buffers = 2, ctx = 0;
+    size_t ram_budget = 0;   // #37: total peak-RSS target (0 = unlimited)
     SamplerConfig scfg;
     LayerLoader::Options opt;
 
@@ -49,6 +71,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-async") { opt.async = false; opt.n_buffers = 1; }
         else if (a == "--stream-lm-head") opt.stream_lm_head = true;
         else if (a == "--buffers") buffers = std::stoi(next("2"));
+        else if (a == "--ram-budget") ram_budget = parse_bytes(next("0"));
         else if (a == "--ctx") ctx = std::stoi(next("0"));
         else if (a == "--threads") threads = std::stoi(next("0"));
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 2; }
@@ -58,7 +81,7 @@ int main(int argc, char** argv) {
     try {
         double t0 = now_sec();
         auto src = open_model(model, opt.use_mmap);
-        Runtime rt(std::move(src), opt, ctx, threads);
+        Runtime rt(std::move(src), opt, ctx, threads, ram_budget);
         double load_s = now_sec() - t0;
 
         fprintf(stderr, "model: %s\nconfig: %s\ntokenizer: %s vocab=%lld\n",
@@ -88,13 +111,14 @@ int main(int argc, char** argv) {
             "prefill:         %.2f tok/s\n"
             "decode:          %.2f tok/s\n"
             "weights resident:%.1f MB\n"
+            "pinned layers:   %d\n"
             "kv cache:        %.1f MB\n"
             "streamed:        %.1f MB (from disk)\n"
             "prefetch:        %" PRIu64 " hits / %" PRIu64 " misses\n"
             "context:         %d / %d\n",
             st.load_s, st.prompt_tokens, st.gen_tokens, st.ttft_s,
             st.prefill_tok_s, st.decode_tok_s,
-            st.weights_resident_bytes / 1e6, st.kv_bytes / 1e6,
+            st.weights_resident_bytes / 1e6, st.pinned_layers, st.kv_bytes / 1e6,
             st.bytes_read / 1e6, st.prefetch_hits, st.prefetch_misses,
             st.ctx_used, st.ctx_max);
         return 0;

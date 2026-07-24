@@ -144,8 +144,77 @@ LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
         pos_embd_is_resident_ = true;
     }
 
-    if (opt_.async && opt_.n_buffers > 1)
+    // ---- #37: pin as many hot layers as fit under the RAM budget ---------
+    pinned_mask_.assign(n_layers_ > 0 ? (size_t)n_layers_ : 0, 0);
+    if (opt_.ram_budget_bytes > 0 && n_layers_ > 0)
+        plan_and_pin_layers();
+
+    // Start the prefetch worker only if cold layers remain to stream; with every
+    // layer pinned there is nothing left to prefetch.
+    if (opt_.async && opt_.n_buffers > 1 && n_pinned_ < n_layers_)
         worker_ = std::thread([this] { worker_loop(); });
+}
+
+// ---- #37: ram-budget residency planning ----------------------------------
+// Predicted resident bytes for one layer's weights, computed from the tensor
+// directory WITHOUT loading. Matches load_weight_into's buffer sizing exactly
+// (fp32 -> numel*4, quantized -> on-disk nbytes), so the plan is precise for a
+// homogeneous transformer stack (every block identical shape — the real case).
+size_t LayerLoader::estimate_layer_bytes(int layer) const {
+    size_t total = 0;
+    for (int r = 0; r < (int)Role::COUNT; ++r) {
+        const TensorInfo* ti = src_->find(role_name(layer, (Role)r));
+        if (!ti) continue;
+        const bool one_d    = is_1d_fp32((Role)r);
+        const bool want_fp32 = one_d || opt_.residency == Residency::FP32;
+        total += want_fp32 ? (size_t)ti->numel() * sizeof(float) : (size_t)ti->nbytes;
+    }
+    return total;
+}
+
+// Pin the leading run of layers [0, target) resident under the byte ceiling.
+// Two regimes: budget covers every layer -> pin all (zero per-token streaming,
+// decode goes compute-bound); otherwise reserve headroom for the cold-streaming
+// ring and pin as many contiguous layers as fit. A per-layer guard using the
+// ACTUAL materialized size keeps peak weight RSS <= budget even if a layer's
+// cost differs from the estimate.
+void LayerLoader::plan_and_pin_layers() {
+    const size_t budget  = opt_.ram_budget_bytes;
+    const size_t globals = out_norm_.size() + out_weight_.size() + embd_resident_.size();
+    const size_t per_layer = estimate_layer_bytes(0);
+    if (per_layer == 0) return;
+
+    const size_t all_weights = globals + (size_t)n_layers_ * per_layer;
+    size_t target;
+    if (budget >= all_weights) {
+        target = (size_t)n_layers_;                    // pin everything
+    } else {
+        const size_t ring = (size_t)opt_.n_buffers * per_layer;  // cold-stream headroom
+        const size_t base = globals + ring;
+        target = budget > base ? std::min<size_t>((budget - base) / per_layer,
+                                                  (size_t)n_layers_) : 0;
+    }
+    if (target == 0) return;
+
+    pinned_.resize(n_layers_);
+    // Reserve ring headroom while pinning unless we pin every layer (then nothing
+    // streams and the ring stays empty).
+    const size_t ring_reserve = (target < (size_t)n_layers_)
+                              ? (size_t)opt_.n_buffers * per_layer : 0;
+    for (size_t l = 0; l < target; ++l) {
+        fill_slot(pinned_[l], (int)l);
+        size_t sb = 0;
+        for (int r = 0; r < (int)Role::COUNT; ++r) sb += pinned_[l].buf[r].size();
+        if (globals + pinned_bytes_ + sb + ring_reserve > budget) {  // ceiling guard
+            for (int r = 0; r < (int)Role::COUNT; ++r) { pinned_[l].buf[r] = {}; pinned_[l].ref[r] = WeightRef{}; }
+            pinned_[l].layer = -1;
+            break;
+        }
+        pinned_[l].state = Slot::State::Ready;
+        pinned_mask_[l]  = 1;
+        pinned_bytes_   += sb;
+        ++n_pinned_;
+    }
 }
 
 LayerLoader::~LayerLoader() {
@@ -254,12 +323,21 @@ void LayerLoader::enqueue(int slot, int layer) {
 bool LayerLoader::loadLayer(int layer) {
     LLM_CHECK(layer >= 0 && layer < n_layers_, "loadLayer: out of range");
 
+    // #37: pinned hot layers are always resident — no I/O, no ring slot.
+    if (!pinned_mask_.empty() && pinned_mask_[layer]) {
+        active_ = &pinned_[layer];
+        current_ = -1;                 // the ring is not the active source
+        stats_.prefetch_hits += 1;
+        return true;
+    }
+
     if (!opt_.async || opt_.n_buffers == 1) {
         // Synchronous single-buffer path: strictly one block resident.
         Slot& s = slots_[0];
         if (s.layer != layer) { fill_slot(s, layer); stats_.layers_loaded += 1; s.state = Slot::State::Ready; stats_.prefetch_misses += 1; }
         else stats_.prefetch_hits += 1;
         current_ = 0;
+        active_ = &slots_[0];
         return true;
     }
 
@@ -291,6 +369,7 @@ bool LayerLoader::loadLayer(int layer) {
         return slots_[s].layer == layer && slots_[s].state == Slot::State::Ready;
     });
     current_ = s;
+    active_ = &slots_[current_];
 
     // Kick off prefetch of the next block into the other buffer.
     if (opt_.n_buffers > 1 && layer + 1 < n_layers_) {
@@ -308,8 +387,8 @@ void LayerLoader::unloadLayer() {
 }
 
 WeightRef LayerLoader::getWeight(Role role) const {
-    LLM_CHECK(current_ >= 0, "getWeight before loadLayer");
-    return slots_[current_].ref[(int)role];
+    LLM_CHECK(active_ != nullptr, "getWeight before loadLayer");
+    return active_->ref[(int)role];
 }
 
 void LayerLoader::embed_token(int64_t token, float* dst) const {
@@ -370,6 +449,7 @@ size_t LayerLoader::resident_bytes() const {
     size_t total = out_norm_.size() + out_weight_.size() + embd_resident_.size();
     for (const auto& s : slots_)
         for (int r = 0; r < (int)Role::COUNT; ++r) total += s.buf[r].size();
+    total += pinned_bytes_;   // #37: pinned hot layers
     return total;
 }
 

@@ -1,9 +1,12 @@
 name: Release binaries
 
-# Builds prebuilt sipllm bundles for linux/macOS on x86_64 and aarch64 and
-# attaches them to the GitHub release. Asset names match what install.sh
-# expects: sipllm-<version>-<os>-<arch>.tar.gz  (os = linux|darwin,
-# arch = x86_64|aarch64). Triggered by pushing a version tag (v*), or manually.
+# Builds prebuilt sipllm bundles for Linux on x86_64 and aarch64 and attaches
+# them to the GitHub release. Asset names match what install.sh expects:
+# sipllm-<version>-<os>-<arch>.tar.gz  (os = linux, arch = x86_64|aarch64).
+# Triggered by pushing a version tag (v*), or manually.
+#
+# macOS (darwin x86_64/aarch64) bundles are NOT built on CI — they are built and
+# uploaded manually from a local macOS machine via scripts/release-macos.sh.
 on:
   push:
     tags: ["v*"]
@@ -27,8 +30,6 @@ jobs:
         include:
           - { runner: ubuntu-latest,     os: linux,  arch: x86_64,  archflags: "-mavx2 -mfma" }
           - { runner: ubuntu-24.04-arm,  os: linux,  arch: aarch64, archflags: "" }
-          - { runner: macos-13,          os: darwin, arch: x86_64,  archflags: "-mavx2 -mfma" }
-          - { runner: macos-14,          os: darwin, arch: aarch64, archflags: "" }
     steps:
       - uses: actions/checkout@v4
 

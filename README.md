@@ -102,6 +102,17 @@ stays small on edge devices — models that advertise huge windows (Llama 3.2 =
 131072) would otherwise allocate multi-GB caches up front. Raise it explicitly
 with `./build/llm model.gguf --ctx 32768 ...` when you have the RAM.
 
+**RAM budget — the RAM/speed dial.** Pass `--ram-budget N` (raw bytes, or `256M`,
+`1G`) to cap peak resident memory at a hard ceiling: the engine pins as many hot
+transformer layers resident as fit under the budget and streams the rest, so the
+flag trades RAM for decode speed on a smooth continuum. A small budget keeps the
+tiny streaming footprint (the default); raise it and decode speeds up as fewer
+layers re-stream per token; set it above the model's weight size and every layer
+stays resident (fastest, still well below a whole-model load). Output is
+bit-for-bit identical at any budget — it only changes *where* the bytes live.
+`--ram-budget 0` (default) is unlimited streaming, exactly as before. Reproduce
+the decode-tok/s vs peak-RSS curve with `scripts/bench_ram_budget.sh`.
+
 > **Architecture note.** The engine dispatches on `general.architecture` and now
 > implements, besides the **Llama** reference (RMSNorm + RoPE + GQA + SwiGLU):
 > **Mistral**, **Qwen2/2.5** (q/k/v bias), **Gemma 2** (GeGLU, pre/post
@@ -119,6 +130,7 @@ Prefer the raw engine? It takes a model path directly:
 
 ```bash
 ./build/llm model.gguf -p "prompt" -n 40
+./build/llm model.gguf -p "prompt" --ram-budget 512M   # cap peak RSS: pin hot layers, stream the rest
 ./build/bench model.gguf -n 32          # per-layer profiler: I/O, dequant, RSS, tok/s
 ./build/inspect_gguf model.gguf         # metadata + tensor directory
 ```
@@ -225,7 +237,8 @@ must keep the golden matrix green. Be kind — see the
 ## Roadmap
 
 - Android JNI/NDK packaging (Termux-first, already the primary target).
-- Prebuilt x86_64 + macOS release binaries via CI.
+- Prebuilt Linux x86_64/aarch64 binaries via CI; macOS bundles released manually
+  from a local Mac (`scripts/release-macos.sh`).
 - Wider prefetch pipelining and NEON coverage of the K-quant dequant paths.
 - Maturing the Vulkan backend from matmul offload to full-layer offload.
 

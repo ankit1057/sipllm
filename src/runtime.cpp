@@ -2,6 +2,7 @@
 #include "llm/runtime.h"
 #include "llm/format.h"
 #include "llm/gguf.h"
+#include "llm/common.h"
 
 #include <algorithm>
 
@@ -17,8 +18,17 @@ std::unique_ptr<WeightSource> open_model(const std::string& path, bool use_mmap)
     throw Error("open_model: unrecognized file magic in " + path);
 }
 
+// #37: conservative RAM allowance for everything that is NOT streamed weights or
+// KV — transformer scratch (residual/qkv/ffn/logits), attention scores (~ctx),
+// plus code/allocator slop. Keeps the total peak-RSS ceiling honest.
+static size_t runtime_reserve_bytes(const ModelConfig& c, int ctx) {
+    const size_t scratch = (size_t)(c.dim * 8 + c.ffn_dim * 2 + c.q_dim()
+                         + 2 * c.kv_dim() + c.vocab_size + (int64_t)ctx) * sizeof(float);
+    return (size_t)24 * 1024 * 1024 + scratch;   // 24 MB base slop + scratch
+}
+
 Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
-                 int max_ctx, int threads)
+                 int max_ctx, int threads, size_t ram_budget_total)
     : src_(std::move(src)), opt_(opt) {
     cfg_ = ModelConfig::from_source(*src_);
     LLM_CHECK(cfg_.n_layers > 0 && cfg_.dim > 0, "runtime: invalid model config");
@@ -33,6 +43,20 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     if (max_ctx > 0)              ctx = max_ctx;                       // explicit --ctx
     else if (cfg_.ctx_len > 0)    ctx = (int)std::min<int64_t>(cfg_.ctx_len, kDefaultMaxCtx);
     else                          ctx = 2048;
+
+    // #37: translate the TOTAL peak-RSS target into the loader's WEIGHT ceiling
+    // by reserving the KV cache (allocated up to `ctx`) and a scratch allowance.
+    if (ram_budget_total > 0) {
+        const size_t kv_max  = (size_t)cfg_.n_layers * (size_t)cfg_.kv_dim()
+                             * (size_t)ctx * 2 * sizeof(float);
+        const size_t reserve = runtime_reserve_bytes(cfg_, ctx);
+        opt_.ram_budget_bytes = ram_budget_total > kv_max + reserve
+                              ? ram_budget_total - kv_max - reserve : 0;
+        if (opt_.ram_budget_bytes == 0)
+            LOG_WARN("ram-budget %.0f MB <= KV(%.0f MB)+reserve(%.0f MB): no layers "
+                     "pinned (pure streaming); lower --ctx for a tighter ceiling",
+                     ram_budget_total/1e6, kv_max/1e6, reserve/1e6);
+    }
 
     pool_ = std::make_unique<ThreadPool>(threads);
     opt_.dequant_pool = pool_.get();
@@ -102,6 +126,7 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     st.decode_tok_s = st.decode_s > 0 ? st.gen_tokens / st.decode_s : 0;
 
     st.weights_resident_bytes = loader_->resident_bytes();
+    st.pinned_layers = loader_->pinned_layers();
     st.kv_bytes = kv_->bytes();
     st.bytes_read = loader_->stats().bytes_read.load();
     st.prefetch_hits = loader_->stats().prefetch_hits.load();
