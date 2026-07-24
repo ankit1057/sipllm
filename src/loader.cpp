@@ -2,8 +2,10 @@
 #include "llm/loader.h"
 #include "llm/common.h"
 #include "llm/quant.h"
+#include "llm/linear.h"
 
 #include <cstring>
+#include <algorithm>
 
 namespace llm {
 
@@ -97,13 +99,19 @@ LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
                        reinterpret_cast<float*>(out_norm_.data()), on->numel());
     }
 
-    // output / lm_head: keep resident in native dtype (needed every token).
+    // output / lm_head. Default: resident (fastest — used every token). With
+    // Options.stream_lm_head, stream it row-blocked in project_output so the full
+    // vocab*dim head is not resident (the RAM<->speed knob for RAM-bound models).
     const TensorInfo* out = src_->find(names::output);
     if (out) {
-        out_weight_.resize(out->nbytes);
-        src_->read_raw(*out, out_weight_.data());
-        out_weight_ref_ = {out_weight_.data(), out->dtype,
-                           out->shape[0], out->shape.size() > 1 ? out->shape[1] : cfg_.dim};
+        if (opt_.stream_lm_head) {
+            out_weight_info_ = out;   // streamed per token in project_output()
+        } else {
+            out_weight_.resize(out->nbytes);           // resident (default)
+            src_->read_raw(*out, out_weight_.data());
+            out_weight_ref_ = {out_weight_.data(), out->dtype, out->shape[0],
+                               out->shape.size() > 1 ? out->shape[1] : cfg_.dim};
+        }
     } else {
         // Tied: lm_head == token_embd. Keep the embedding table resident so we
         // can both look up rows and run the final projection against it.
@@ -323,6 +331,28 @@ WeightRef LayerLoader::output_norm_weight() const {
     return {out_norm_.data(), DType::F32, 1, cfg_.dim};
 }
 WeightRef LayerLoader::output_weight() const { return out_weight_ref_; }
+
+void LayerLoader::project_output(const float* x, float* y, ThreadPool* pool) const {
+    if (out_weight_ref_.valid()) {          // tied (lm_head == resident embd) or FP32-resident
+        linear(y, out_weight_ref_, x, pool);
+        return;
+    }
+    // Non-tied: stream the LM head off disk in row blocks so only a small window
+    // is resident. Read-once-per-token, same pattern as a transformer layer.
+    const TensorInfo* ti = out_weight_info_;
+    const int64_t n_out = ti->shape[0];
+    const int64_t n_in  = ti->row_elems();
+    const int64_t row_bytes = type_nbytes(ti->dtype, n_in);
+    const int64_t BLK = 1024;                // rows per streamed chunk
+    std::vector<uint8_t> buf((size_t)std::min<int64_t>(BLK, n_out) * row_bytes);
+    for (int64_t r0 = 0; r0 < n_out; r0 += BLK) {
+        int64_t rows = std::min<int64_t>(BLK, n_out - r0);
+        src_->read_raw_at(ti->offset + (uint64_t)r0 * row_bytes, buf.data(),
+                          (uint64_t)rows * row_bytes);
+        WeightRef w{buf.data(), ti->dtype, rows, n_in};
+        linear(y + r0, w, x, pool);
+    }
+}
 
 WeightRef LayerLoader::output_norm_bias_weight() const {
     if (!out_norm_bias_present_) return WeightRef{};

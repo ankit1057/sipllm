@@ -124,6 +124,23 @@ TEST(e2e_tied_embeddings) {
     for (size_t i = 0; i < ref.size(); ++i) APPROX(got[i], ref[i], 1e-3);
 }
 
+TEST(e2e_streamed_lm_head_matches_resident) {
+    // Non-tied toy: streaming the LM head off disk (row-blocked, project_output)
+    // must produce identical logits to holding it resident. Guards --stream-lm-head.
+    ToyConfig tc; tc.n_layers = 3; tc.dim = 32; tc.n_heads = 4; tc.n_kv_heads = 2;
+    tc.ffn_dim = 64; tc.vocab_size = 48; tc.tied = false; tc.seed = 13;
+    std::string path = scratch("toy_lmhead.llmw");
+    write_toy_model(path, tc);
+    std::vector<int64_t> tokens = {5, 2, 9, 1, 7, 3};
+
+    LayerLoader::Options res; res.residency = Residency::Quantized; res.stream_lm_head = false;
+    LayerLoader::Options str; str.residency = Residency::Quantized; str.stream_lm_head = true;
+    auto a = stream_forward(path, res, tokens);
+    auto b = stream_forward(path, str, tokens);
+    CHECK(a.size() == b.size());
+    for (size_t i = 0; i < a.size(); ++i) APPROX(b[i], a[i], 1e-4);
+}
+
 int main() {
     printf("== test_e2e ==\n");
     return llmtest::run_all();
