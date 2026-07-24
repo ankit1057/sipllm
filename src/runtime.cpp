@@ -57,18 +57,21 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     std::string output;
     const int64_t vocab = cfg_.vocab_size;
 
-    // ---- prefill ----
+    // ---- prefill (RFC-007: single-pass batched) ----
+    // One batched sweep streams the whole model ONCE for the entire prompt,
+    // instead of the old loop that called tf_->forward() per token — which
+    // re-streamed every layer for every prompt token (P full-model streams).
     double t_start = now_sec();
     int64_t next = -1;
-    for (size_t i = 0; i < prompt_ids.size(); ++i) {
-        LLM_CHECK(pos_ < kv_->max_ctx(), "context window exceeded during prefill");
-        const float* logits = tf_->forward(prompt_ids[i], pos_);
-        ++pos_;
-        sampler.accept(prompt_ids[i]);   // seed repetition-penalty history
-        if (i + 1 == prompt_ids.size()) {
-            first_logits_.assign(logits, logits + vocab);
-            next = sampler.sample(logits, vocab);
-        }
+    if (!prompt_ids.empty()) {
+        LLM_CHECK(pos_ + (int64_t)prompt_ids.size() - 1 < kv_->max_ctx(),
+                  "context window exceeded during prefill");
+        const float* logits = tf_->prefill(prompt_ids.data(),
+                                            (int64_t)prompt_ids.size(), pos_);
+        pos_ += (int64_t)prompt_ids.size();
+        for (int64_t id : prompt_ids) sampler.accept(id);  // seed repetition history
+        first_logits_.assign(logits, logits + vocab);
+        next = sampler.sample(logits, vocab);
     }
     double t_prefill_done = now_sec();
     st.prefill_s = t_prefill_done - t_start;
