@@ -6,18 +6,21 @@
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-**A dependency-free, CPU-first LLM inference engine in C++17 for edge devices. It
-*sips* model weights off disk — one transformer layer at a time — so peak RAM
-stays flat (~200–400 MB) no matter how big the model is. Numerically validated
-against [llama.cpp](https://github.com/ggml-org/llama.cpp), layer by layer,
+**A dependency-free, CPU-first LLM inference engine in C++17 that runs models
+*larger than RAM*. It *sips* weights off disk — one transformer layer at a time —
+so peak RAM tracks a single resident layer, not the whole model: measured far
+below comparable runtimes (~120 MB vs ~1.35 GB for
+[llama.cpp](https://github.com/ggml-org/llama.cpp) on TinyLlama), and the gap
+widens with model size. Numerically validated against llama.cpp, layer by layer,
 across four GGUF quantization formats.**
 
 > ### Status
-> **🚧 Work in progress.** sipllm is an actively developed research/engineering
-> project, not a finished product. The core is proven correct (see the
-> validation matrix below) and the API/CLI will keep evolving — expect rough
-> edges, breaking changes, and gaps. Contributions and issue reports are very
-> welcome.
+> **Actively developed.** The runtime is crash-hardened — the whole
+> uninitialized-read class is eliminated at source, with valgrind, ASan/UBSan,
+> TSan, and a prompt/config fuzzer gating CI — and numerically validated against
+> llama.cpp (see the matrix below). Performance is measured, not guessed: a
+> reproducible harness (`scripts/bench.sh`) tracks peak RSS, TTFT, and decode
+> tok/s. Expect API/CLI evolution; contributions and issue reports are welcome.
 
 **Edge-first, and therefore CPU-first.** This engine targets phones, SBCs, and
 other edge hardware — where there's plenty of storage but very little RAM and,
@@ -99,12 +102,18 @@ stays small on edge devices — models that advertise huge windows (Llama 3.2 =
 131072) would otherwise allocate multi-GB caches up front. Raise it explicitly
 with `./build/llm model.gguf --ctx 32768 ...` when you have the RAM.
 
-> **Architecture note.** Today the engine implements the **Llama** architecture
-> (RMSNorm + RoPE + GQA + SwiGLU). Models with a different architecture — Gemma,
-> Qwen2, Phi, Mixtral-MoE — won't load yet; support is tracked in the
-> [issues](https://github.com/ankit1057/sipllm/issues). Llama 3.x also uses a
-> "llama3" RoPE-scaling scheme not yet applied here — correct for short prompts,
-> may drift over long generations.
+> **Architecture note.** The engine dispatches on `general.architecture` and now
+> implements, besides the **Llama** reference (RMSNorm + RoPE + GQA + SwiGLU):
+> **Mistral**, **Qwen2/2.5** (q/k/v bias), **Gemma 2** (GeGLU, pre/post
+> `(1+w)` norms, embedding scale, logit soft-capping), **Gemma 3 text** (QK-norm
+> + per-layer local/global RoPE), **Phi-3** (fused QKV / gate-up, partial-rotary
+> RoPE), **Phi-2** and **GPT-2** (LayerNorm, biases; GPT-2 with learned position
+> embeddings), and **Mixtral / MoE** (router + top-k experts, streamed). Llama
+> 3.x "llama3" RoPE scaling is applied. Cross-engine golden validation
+> (`golden/validate_matrix.py`) currently covers the Llama path; the newer
+> architectures are unit-tested here and validated against llama.cpp as models
+> are added. Vision/audio (Gemma 3n) and the GPT-NeoX/StableLM/Falcon variants
+> remain [tracked](https://github.com/ankit1057/sipllm/issues).
 
 Prefer the raw engine? It takes a model path directly:
 
