@@ -128,6 +128,70 @@ TEST(matmul_quant_matches_dequant_then_matmul) {
     for (int o = 0; o < n_out; ++o) APPROX(y2[o], y1[o], 1e-4);
 }
 
+// Guards the NEON Q4_K/Q6_K dequant paths against the scalar ggml spec: random
+// blocks dequantized via dequantize_row (NEON when built for ARM) must match the
+// reference formula recomputed here. fp16 scales are set to controlled values so
+// no inf/nan enters; quant/scale bytes are random for lane/mask coverage.
+TEST(kquant_dequant_matches_scalar_spec) {
+    std::mt19937 rng(1234);
+    auto rb = [&]{ return (uint8_t)std::uniform_int_distribution<int>(0, 255)(rng); };
+    std::uniform_real_distribution<float> rf(-1.f, 1.f);
+    auto gsmk4 = [](int j, const uint8_t* q, uint8_t& d, uint8_t& m) {
+        if (j < 4) { d = q[j] & 63; m = q[j + 4] & 63; }
+        else { d = (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4);
+               m = (q[j+4] >> 4) | ((q[j] >> 6) << 4); }
+    };
+    const int K = 256;
+    for (int t = 0; t < 4; ++t) {
+        // ---- Q4_K ----
+        {
+            std::vector<uint8_t> blk(144);
+            for (auto& b : blk) b = rb();
+            uint16_t dh = fp32_to_fp16(rf(rng)), mh = fp32_to_fp16(std::fabs(rf(rng)));
+            std::memcpy(&blk[0], &dh, 2); std::memcpy(&blk[2], &mh, 2);
+            float d = fp16_to_fp32(dh), dmin = fp16_to_fp32(mh);
+            const uint8_t* scales = blk.data() + 4; const uint8_t* q = blk.data() + 16;
+            std::vector<float> ref(K); float* yy = ref.data(); int is = 0; uint8_t sc, m;
+            for (int j = 0; j < K; j += 64) {
+                gsmk4(is + 0, scales, sc, m); float d1 = d * sc, m1 = dmin * m;
+                gsmk4(is + 1, scales, sc, m); float d2 = d * sc, m2 = dmin * m;
+                for (int l = 0; l < 32; ++l) *yy++ = d1 * (q[l] & 0xF) - m1;
+                for (int l = 0; l < 32; ++l) *yy++ = d2 * (q[l] >>  4) - m2;
+                q += 32; is += 2;
+            }
+            std::vector<float> got(K);
+            dequantize_row(DType::Q4_K, blk.data(), got.data(), K);
+            for (int i = 0; i < K; ++i) APPROX(got[i], ref[i], 1e-2);
+        }
+        // ---- Q6_K ----
+        {
+            std::vector<uint8_t> blk(210);
+            for (auto& b : blk) b = rb();
+            uint16_t dh = fp32_to_fp16(rf(rng));
+            std::memcpy(&blk[208], &dh, 2);
+            float d = fp16_to_fp32(dh);
+            const uint8_t* ql = blk.data(); const uint8_t* qh = blk.data() + 128;
+            const int8_t* sc = reinterpret_cast<const int8_t*>(blk.data() + 192);
+            std::vector<float> ref(K); float* yy = ref.data();
+            for (int k = 0; k < K; k += 128) {
+                for (int l = 0; l < 32; ++l) {
+                    int is = l / 16;
+                    int q1 = (int)((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                    int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                    int q3 = (int)((ql[l +  0] >>  4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                    int q4 = (int)((ql[l + 32] >>  4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                    yy[l +  0] = d * sc[is + 0] * q1; yy[l + 32] = d * sc[is + 2] * q2;
+                    yy[l + 64] = d * sc[is + 4] * q3; yy[l + 96] = d * sc[is + 6] * q4;
+                }
+                yy += 128; ql += 64; qh += 32; sc += 8;
+            }
+            std::vector<float> got(K);
+            dequantize_row(DType::Q6_K, blk.data(), got.data(), K);
+            for (int i = 0; i < K; ++i) APPROX(got[i], ref[i], 1e-2);
+        }
+    }
+}
+
 TEST(iq4_nl_hand_block) {
     // One IQ4_NL block (32 elems): fp16 d, then 16 nibble-pairs indexing the
     // fixed codebook. kvalues[0]=-127, kvalues[3]=-65, kvalues[8]=1.

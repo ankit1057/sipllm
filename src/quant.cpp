@@ -192,8 +192,33 @@ void dequant_q4_K(const uint8_t* p, float* y, int64_t n) {
             float d1 = d * sc, m1 = dmin * m;
             get_scale_min_k4(is + 1, scales, sc, m);
             float d2 = d * sc, m2 = dmin * m;
-            for (int l = 0; l < 32; ++l) *yy++ = d1 * (q[l] & 0xF) - m1;
-            for (int l = 0; l < 32; ++l) *yy++ = d2 * (q[l] >>  4) - m2;
+#if LLM_HAVE_NEON
+            // 32 low nibbles -> yy[0..31] (d1*x - m1); 32 high -> yy[32..63] (d2*x - m2).
+            const uint8x16_t lomask = vdupq_n_u8(0x0F);
+            const float32x4_t nm1 = vdupq_n_f32(-m1), nm2 = vdupq_n_f32(-m2);
+            for (int h = 0; h < 2; ++h) {              // q[0..15], q[16..31]
+                uint8x16_t qv = vld1q_u8(q + h * 16);
+                uint8x16_t lo = vandq_u8(qv, lomask);
+                uint8x16_t hi = vshrq_n_u8(qv, 4);
+                uint16x8_t lol = vmovl_u8(vget_low_u8(lo)),  loh = vmovl_u8(vget_high_u8(lo));
+                uint16x8_t hil = vmovl_u8(vget_low_u8(hi)),  hih = vmovl_u8(vget_high_u8(hi));
+                float* yl = yy + h * 16;
+                float* yh = yy + 32 + h * 16;
+                vst1q_f32(yl + 0,  vfmaq_n_f32(nm1, vcvtq_f32_u32(vmovl_u16(vget_low_u16(lol))),  d1));
+                vst1q_f32(yl + 4,  vfmaq_n_f32(nm1, vcvtq_f32_u32(vmovl_u16(vget_high_u16(lol))), d1));
+                vst1q_f32(yl + 8,  vfmaq_n_f32(nm1, vcvtq_f32_u32(vmovl_u16(vget_low_u16(loh))),  d1));
+                vst1q_f32(yl + 12, vfmaq_n_f32(nm1, vcvtq_f32_u32(vmovl_u16(vget_high_u16(loh))), d1));
+                vst1q_f32(yh + 0,  vfmaq_n_f32(nm2, vcvtq_f32_u32(vmovl_u16(vget_low_u16(hil))),  d2));
+                vst1q_f32(yh + 4,  vfmaq_n_f32(nm2, vcvtq_f32_u32(vmovl_u16(vget_high_u16(hil))), d2));
+                vst1q_f32(yh + 8,  vfmaq_n_f32(nm2, vcvtq_f32_u32(vmovl_u16(vget_low_u16(hih))),  d2));
+                vst1q_f32(yh + 12, vfmaq_n_f32(nm2, vcvtq_f32_u32(vmovl_u16(vget_high_u16(hih))), d2));
+            }
+            yy += 64;
+#else
+            for (int l = 0; l < 32; ++l) yy[l]      = d1 * (q[l] & 0xF) - m1;
+            for (int l = 0; l < 32; ++l) yy[l + 32] = d2 * (q[l] >>  4) - m2;
+            yy += 64;
+#endif
             q += 32; is += 2;
         }
         p += 144;
@@ -232,6 +257,40 @@ void dequant_q6_K(const uint8_t* p, float* y, int64_t n) {
         uint16_t dh; std::memcpy(&dh, p + 208, 2);
         float d = fp16_to_fp32(dh);
         float* yy = y + b * QK_K;
+#if LLM_HAVE_NEON
+        // Widen an int8x16 of dequantized 6-bit values, scale, and store 16 fp32.
+        auto st16 = [](float* dst, int8x16_t qi, float sg) {
+            int16x8_t lo = vmovl_s8(vget_low_s8(qi));
+            int16x8_t hi = vmovl_s8(vget_high_s8(qi));
+            vst1q_f32(dst + 0,  vmulq_n_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))),  sg));
+            vst1q_f32(dst + 4,  vmulq_n_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), sg));
+            vst1q_f32(dst + 8,  vmulq_n_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))),  sg));
+            vst1q_f32(dst + 12, vmulq_n_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), sg));
+        };
+        const uint8x16_t m0f = vdupq_n_u8(0x0F), m03 = vdupq_n_u8(0x03);
+        const int8x16_t v32 = vdupq_n_s8(32);
+        for (int k = 0; k < QK_K; k += 128) {
+            for (int off = 0; off < 32; off += 16) {     // is = off/16 (0, 1)
+                int is = off / 16;
+                uint8x16_t qlv  = vld1q_u8(ql + off);
+                uint8x16_t qlv2 = vld1q_u8(ql + off + 32);
+                uint8x16_t qhv  = vld1q_u8(qh + off);
+                uint8x16_t q1u = vorrq_u8(vandq_u8(qlv,  m0f), vshlq_n_u8(vandq_u8(qhv, m03), 4));
+                uint8x16_t q2u = vorrq_u8(vandq_u8(qlv2, m0f), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 2), m03), 4));
+                uint8x16_t q3u = vorrq_u8(vshrq_n_u8(qlv,  4), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 4), m03), 4));
+                uint8x16_t q4u = vorrq_u8(vshrq_n_u8(qlv2, 4), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 6), m03), 4));
+                int8x16_t q1 = vsubq_s8(vreinterpretq_s8_u8(q1u), v32);
+                int8x16_t q2 = vsubq_s8(vreinterpretq_s8_u8(q2u), v32);
+                int8x16_t q3 = vsubq_s8(vreinterpretq_s8_u8(q3u), v32);
+                int8x16_t q4 = vsubq_s8(vreinterpretq_s8_u8(q4u), v32);
+                st16(yy + off +  0, q1, d * sc[is + 0]);
+                st16(yy + off + 32, q2, d * sc[is + 2]);
+                st16(yy + off + 64, q3, d * sc[is + 4]);
+                st16(yy + off + 96, q4, d * sc[is + 6]);
+            }
+            yy += 128; ql += 64; qh += 32; sc += 8;
+        }
+#else
         for (int k = 0; k < QK_K; k += 128) {
             for (int l = 0; l < 32; ++l) {
                 int is = l / 16;
@@ -246,6 +305,7 @@ void dequant_q6_K(const uint8_t* p, float* y, int64_t n) {
             }
             yy += 128; ql += 64; qh += 32; sc += 8;
         }
+#endif
         p += 210;
     }
 }
