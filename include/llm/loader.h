@@ -63,6 +63,7 @@ public:
         int       n_buffers    = 2;      // 1 = strict single block, 2 = double buffer
         bool      async        = true;   // run the background prefetch thread
         bool      use_mmap     = false;  // pread by default (Phase 6 spec)
+        bool      stream_lm_head = false; // stream non-tied LM head off disk (RAM<->speed knob)
         ThreadPool* dequant_pool = nullptr; // parallelize per-layer dequant
     };
 
@@ -102,6 +103,9 @@ public:
     void embed_token(int64_t token, float* dst) const;
     WeightRef output_norm_weight() const;   // fp32, [dim]
     WeightRef output_weight() const;         // native dtype, [vocab, dim]
+    // y = lm_head @ x -> logits. Streams the LM head off disk (row-blocked) when
+    // non-tied so the full vocab*dim head is never resident; tied path is resident.
+    void project_output(const float* x, float* y, ThreadPool* pool) const;
     // Optional globals (GPT-2). output_norm_bias: fp32 [dim] or invalid.
     WeightRef output_norm_bias_weight() const;
     bool has_pos_embd() const { return pos_embd_is_resident_; }
@@ -146,6 +150,7 @@ private:
     std::vector<uint8_t> out_norm_;            // fp32
     std::vector<uint8_t> out_weight_;          // native dtype
     WeightRef out_weight_ref_;
+    const TensorInfo* out_weight_info_ = nullptr; // non-tied LM head (streamed)
     std::vector<uint8_t> out_norm_bias_;        // fp32, optional (GPT-2)
     bool out_norm_bias_present_ = false;
     const TensorInfo* pos_embd_info_ = nullptr; // position_embd (GPT-2)

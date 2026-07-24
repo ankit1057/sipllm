@@ -591,7 +591,7 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
         rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
     else
         rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
-    linear(logits_.data(), loader_->output_weight(), xb_.data(), pool_);
+    loader_->project_output(xb_.data(), logits_.data(), pool_);
     // Gemma 2 caps the final logits (no-op when the cap is 0).
     softcap_inplace(logits_.data(), cfg_.vocab_size, cfg_.final_logit_softcap);
     return logits_.data();
@@ -654,7 +654,7 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
         rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
     else
         rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
-    linear(logits_.data(), loader_->output_weight(), xb_.data(), pool_);
+    loader_->project_output(xb_.data(), logits_.data(), pool_);
     softcap_inplace(logits_.data(), cfg_.vocab_size, cfg_.final_logit_softcap);
     return logits_.data();
 }

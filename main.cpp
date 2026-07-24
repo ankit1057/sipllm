@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
         fprintf(stderr,
             "usage: %s <model> [-p prompt] [-n tokens] [-t temp]\n"
             "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
-            "          [--residency fp32|quant] [--mmap] [--no-async]\n"
+            "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
             "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy]\n",
             argv[0]);
         return 2;
@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
         else if (a == "--residency") opt.residency = (next("quant") == "fp32") ? Residency::FP32 : Residency::Quantized;
         else if (a == "--mmap") opt.use_mmap = true;
         else if (a == "--no-async") { opt.async = false; opt.n_buffers = 1; }
+        else if (a == "--stream-lm-head") opt.stream_lm_head = true;
         else if (a == "--buffers") buffers = std::stoi(next("2"));
         else if (a == "--ctx") ctx = std::stoi(next("0"));
         else if (a == "--threads") threads = std::stoi(next("0"));
