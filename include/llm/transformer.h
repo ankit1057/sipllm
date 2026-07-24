@@ -26,6 +26,22 @@ public:
     // Writes K/V for `pos` into the cache and attends over [0, pos].
     const float* forward(int64_t token, int64_t pos);
 
+    // Single-pass batched prefill (RFC-007). Runs the whole prompt through the
+    // model streaming every layer EXACTLY ONCE (vs `forward` which streams all
+    // layers once PER token, i.e. P full-model streams for a P-token prompt).
+    // For each layer: project/attend/FFN all `n` positions [start_pos,
+    // start_pos+n) while the block is resident, then unload. Positions are swept
+    // in ascending order so position t's K/V is written before any later
+    // position attends to it -> causality (and the resulting KV cache + logits)
+    // is IDENTICAL to calling forward() for each token in turn. Returns the
+    // logits of the LAST position (the only ones decode needs), owned by the
+    // Transformer and valid until the next forward/prefill call.
+    //
+    // Every architecture on the shared block() path is batched safely: no block
+    // carries cross-position state beyond the residual stream (member `x_`) and
+    // the KV cache, so there is no per-arch fallback.
+    const float* prefill(const int64_t* tokens, int64_t n, int64_t start_pos);
+
     // RoPE is exposed for testing. Optional llama3 frequency scaling: when
     // `rs.llama3` is set the per-wavelength stretch (issue #9) is applied;
     // default-constructed => plain RoPE, identical to pre-#9 behavior.
@@ -93,6 +109,10 @@ private:
     std::vector<float> router_;  // n_experts (MoE gating scores)
     std::vector<float> moe_;     // dim (MoE weighted expert accumulator)
     std::vector<float> logits_;  // vocab
+    // Prefill-only: P residual streams (n x dim), the sole per-position state
+    // that must survive the layer sweep. Sized on demand in prefill(); the only
+    // buffer that grows with prompt length (tiny vs weights/KV — see RFC-007).
+    std::vector<float> resid_;   // n*dim (batched prefill)
 
     bool profiling_ = false;
     std::vector<LayerTiming> timings_;

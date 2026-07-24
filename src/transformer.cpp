@@ -597,4 +597,66 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
     return logits_.data();
 }
 
+// Single-pass batched prefill (see transformer.h / RFC-007).
+//
+// `forward` streams the whole model once PER token, so a P-token prompt reads
+// the entire model P times before decode starts. Here we stream each layer
+// ONCE and push all P prompt positions through it while resident. The only
+// per-position state carried between layers is the residual stream, so we keep
+// P residual vectors (`resid_`) and shuttle each into/out of the existing
+// single-position scratch `x_` around a normal `block()` call. Because every
+// block() invocation is byte-for-byte the same computation as in `forward`
+// (same kernels, same scratch, same reduction order), and positions are visited
+// in ascending order so each position's K/V is committed before any later
+// position attends to it, the resulting KV cache and final logits are IDENTICAL
+// to running forward() token-by-token — only the redundant re-streaming is gone.
+const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t start_pos) {
+    if (n <= 0) return logits_.data();
+    LLM_CHECK(start_pos + n - 1 < kv_->max_ctx(),
+              "prefill: position exceeds context window");
+
+    const int64_t dim = cfg_.dim;
+
+    // Materialize P residual streams: token embedding (+ Gemma scale, + GPT-2
+    // learned position embeddings), exactly as forward() seeds x_.
+    resid_.assign((size_t)n * dim, 0.f);
+    for (int64_t i = 0; i < n; ++i) {
+        float* xi = resid_.data() + (size_t)i * dim;
+        loader_->embed_token(tokens[i], xi);
+        if (cfg_.embedding_scale != 1.0f) scale_f32(xi, cfg_.embedding_scale, dim);
+        if (cfg_.learned_pos_emb) loader_->add_pos_embd(start_pos + i, xi);
+    }
+
+    // Stream every layer once; run all positions through it (ascending => the
+    // causal history each position needs is already in the KV cache).
+    for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        loader_->loadLayer((int)l);
+        for (int64_t i = 0; i < n; ++i) {
+            float* xi = resid_.data() + (size_t)i * dim;
+            std::memcpy(x_.data(), xi, dim * sizeof(float));
+            block(l, start_pos + i);
+            std::memcpy(xi, x_.data(), dim * sizeof(float));
+        }
+        loader_->unloadLayer();
+    }
+    kv_->set_seq_len(start_pos + n);
+
+    // Only the LAST position's logits are needed to begin decode (intermediate
+    // logits are discarded by the caller). Run the final norm + output
+    // projection once, on the last position's residual.
+    std::memcpy(x_.data(), resid_.data() + (size_t)(n - 1) * dim, dim * sizeof(float));
+    WeightRef on = loader_->output_norm_weight();
+    if (cfg_.use_layernorm)
+        layernorm(xb_.data(), x_.data(), static_cast<const float*>(on.data),
+                  static_cast<const float*>(loader_->output_norm_bias_weight().data),
+                  dim, cfg_.layernorm_eps);
+    else if (cfg_.gemma_rmsnorm)
+        rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+    else
+        rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+    linear(logits_.data(), loader_->output_weight(), xb_.data(), pool_);
+    softcap_inplace(logits_.data(), cfg_.vocab_size, cfg_.final_logit_softcap);
+    return logits_.data();
+}
+
 } // namespace llm
