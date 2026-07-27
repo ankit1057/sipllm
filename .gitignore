@@ -7,7 +7,7 @@ build/
 shaders/matmul_spv.h
 
 # Models (fetch or generate locally — see README)
-models/
+/models/
 *.gguf
 
 # Vendored / third-party trees (see golden/README.md to build llama.cpp)

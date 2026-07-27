@@ -38,8 +38,22 @@ static std::vector<float> forward_gguf(const std::string& path,
 TEST(arch_name_resolution) {
     CHECK(arch_from_name("llama") == Arch::Llama);
     CHECK(arch_from_name("mistral") == Arch::Mistral);
+    CHECK(arch_from_name("qwen2") == Arch::Qwen2);
+    CHECK(arch_from_name("gemma2") == Arch::Gemma2);
+    CHECK(arch_from_name("gemma3") == Arch::Gemma3);
+    CHECK(arch_from_name("gemma4") == Arch::Gemma4);
+    CHECK(arch_from_name("kimi") == Arch::Kimi);
+    CHECK(arch_from_name("moonshot") == Arch::Kimi);
+    CHECK(arch_from_name("deepseek") == Arch::DeepSeek);
+    CHECK(arch_from_name("yi") == Arch::Yi);
+    CHECK(arch_from_name("baichuan") == Arch::Baichuan);
+    CHECK(arch_from_name("internlm2") == Arch::InternLM2);
+    CHECK(arch_from_name("glm4") == Arch::GLM4);
+    CHECK(arch_from_name("phi4") == Arch::Phi4);
     CHECK(arch_from_name("totally-made-up") == Arch::Unknown);
-    CHECK(std::string(arch_name(Arch::Mistral)) == "mistral");
+    CHECK(std::string(arch_name(Arch::Kimi)) == "kimi");
+    CHECK(std::string(arch_name(Arch::Gemma4)) == "gemma4");
+    CHECK(std::string(arch_name(Arch::DeepSeek)) == "deepseek");
 }
 
 TEST(mistral_config_discovery) {
@@ -344,6 +358,61 @@ TEST(phi2_forward_finite_and_deterministic) {
     auto a = forward_gguf(p, toks), b = forward_gguf(p, toks);
     CHECK(a == b);
     for (float v : a) CHECK(std::isfinite(v));
+}
+
+TEST(kimi_and_chinese_arch_discovery) {
+    ToyGgufConfig ck; ck.arch = "kimi";
+    ck.n_layers = 2; ck.dim = 32; ck.n_heads = 4; ck.n_kv_heads = 2;
+    ck.ffn_dim = 64; ck.vocab_size = 48; ck.seed = 81;
+    std::string pk = scratch("kimi_cfg.gguf"); write_toy_gguf(pk, ck);
+    GgufFile gk(pk);
+    ModelConfig cfgk = ModelConfig::from_source(gk);
+    CHECK(cfgk.arch == "kimi" && cfgk.arch_kind == Arch::Kimi);
+
+    ToyGgufConfig cd; cd.arch = "deepseek";
+    cd.n_layers = 2; cd.dim = 32; cd.n_heads = 4; cd.n_kv_heads = 2;
+    cd.ffn_dim = 64; cd.vocab_size = 48; cd.seed = 82;
+    std::string pd = scratch("deepseek_cfg.gguf"); write_toy_gguf(pd, cd);
+    GgufFile gd(pd);
+    ModelConfig cfgd = ModelConfig::from_source(gd);
+    CHECK(cfgd.arch_kind == Arch::DeepSeek);
+}
+
+TEST(gemma4_and_phi4_discovery) {
+    ToyGgufConfig cg; cg.arch = "gemma4"; cg.post_norms = true;
+    cg.n_layers = 2; cg.dim = 32; cg.n_heads = 4; cg.n_kv_heads = 2;
+    cg.ffn_dim = 64; cg.vocab_size = 48; cg.seed = 83;
+    std::string pg = scratch("gemma4_cfg.gguf"); write_toy_gguf(pg, cg);
+    GgufFile gg(pg);
+    ModelConfig cfgg = ModelConfig::from_source(gg);
+    CHECK(cfgg.arch_kind == Arch::Gemma4 && cfgg.gemma_rmsnorm);
+
+    ToyGgufConfig cp; cp.arch = "phi4";
+    cp.n_layers = 2; cp.dim = 32; cp.n_heads = 4; cp.n_kv_heads = 2;
+    cp.ffn_dim = 64; cp.vocab_size = 48; cp.seed = 84;
+    std::string pp = scratch("phi4_cfg.gguf"); write_toy_gguf(pp, cp);
+    GgufFile gp(pp);
+    ModelConfig cfgp = ModelConfig::from_source(gp);
+    CHECK(cfgp.arch_kind == Arch::Phi4 && cfgp.fused_qkv && cfgp.fused_gate_up);
+}
+
+TEST(kimi_and_gemma4_forward_pass) {
+    ToyGgufConfig ck; ck.arch = "kimi";
+    ck.n_layers = 2; ck.dim = 32; ck.n_heads = 4; ck.n_kv_heads = 2;
+    ck.ffn_dim = 64; ck.vocab_size = 48; ck.seed = 85;
+    std::string pk = scratch("kimi_fwd.gguf"); write_toy_gguf(pk, ck);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto ak = forward_gguf(pk, toks), bk = forward_gguf(pk, toks);
+    CHECK(ak == bk);
+    for (float v : ak) CHECK(std::isfinite(v));
+
+    ToyGgufConfig cg; cg.arch = "gemma4"; cg.post_norms = true;
+    cg.n_layers = 2; cg.dim = 32; cg.n_heads = 4; cg.n_kv_heads = 2;
+    cg.ffn_dim = 64; cg.vocab_size = 48; cg.seed = 86;
+    std::string pg = scratch("gemma4_fwd.gguf"); write_toy_gguf(pg, cg);
+    auto ag = forward_gguf(pg, toks), bg = forward_gguf(pg, toks);
+    CHECK(ag == bg);
+    for (float v : ag) CHECK(std::isfinite(v));
 }
 
 int main() {

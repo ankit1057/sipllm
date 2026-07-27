@@ -8,28 +8,44 @@
 namespace llm {
 
 Arch arch_from_name(const std::string& name) {
-    if (name == "llama")   return Arch::Llama;
-    if (name == "mistral") return Arch::Mistral;
-    if (name == "qwen2")   return Arch::Qwen2;
-    if (name == "gemma2")  return Arch::Gemma2;
-    if (name == "gemma3")  return Arch::Gemma3;
-    if (name == "phi3")    return Arch::Phi3;
-    if (name == "phi2")    return Arch::Phi2;
-    if (name == "gpt2")    return Arch::GPT2;
+    if (name == "llama")       return Arch::Llama;
+    if (name == "mistral")     return Arch::Mistral;
+    if (name == "qwen2" || name == "qwen2.5" || name == "qwen") return Arch::Qwen2;
+    if (name == "gemma2")      return Arch::Gemma2;
+    if (name == "gemma3")      return Arch::Gemma3;
+    if (name == "gemma4" || name == "gemma") return Arch::Gemma4;
+    if (name == "kimi" || name == "moonshot") return Arch::Kimi;
+    if (name == "deepseek" || name == "deepseek2" || name == "deepseek3") return Arch::DeepSeek;
+    if (name == "yi")          return Arch::Yi;
+    if (name == "baichuan")    return Arch::Baichuan;
+    if (name == "internlm2" || name == "internlm") return Arch::InternLM2;
+    if (name == "glm4" || name == "chatglm") return Arch::GLM4;
+    if (name == "phi3")        return Arch::Phi3;
+    if (name == "phi4" || name == "phi") return Arch::Phi4;
+    if (name == "phi2")        return Arch::Phi2;
+    if (name == "gpt2")        return Arch::GPT2;
     return Arch::Unknown;
 }
 
 const char* arch_name(Arch a) {
     switch (a) {
-        case Arch::Llama:   return "llama";
-        case Arch::Mistral: return "mistral";
-        case Arch::Qwen2:   return "qwen2";
-        case Arch::Gemma2:  return "gemma2";
-        case Arch::Gemma3:  return "gemma3";
-        case Arch::Phi3:    return "phi3";
-        case Arch::Phi2:    return "phi2";
-        case Arch::GPT2:    return "gpt2";
-        case Arch::Unknown: return "unknown";
+        case Arch::Llama:     return "llama";
+        case Arch::Mistral:   return "mistral";
+        case Arch::Qwen2:     return "qwen2";
+        case Arch::Gemma2:    return "gemma2";
+        case Arch::Gemma3:    return "gemma3";
+        case Arch::Gemma4:    return "gemma4";
+        case Arch::Kimi:      return "kimi";
+        case Arch::DeepSeek:  return "deepseek";
+        case Arch::Yi:        return "yi";
+        case Arch::Baichuan:  return "baichuan";
+        case Arch::InternLM2: return "internlm2";
+        case Arch::GLM4:      return "glm4";
+        case Arch::Phi3:      return "phi3";
+        case Arch::Phi4:      return "phi4";
+        case Arch::Phi2:      return "phi2";
+        case Arch::GPT2:      return "gpt2";
+        case Arch::Unknown:   return "unknown";
     }
     return "unknown";
 }
@@ -112,19 +128,19 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     if (first_float(src, {K("attn_logit_softcapping")}, f))  c.attn_logit_softcap = (float)f;
     if (first_float(src, {K("final_logit_softcapping")}, f))  c.final_logit_softcap = (float)f;
     if (first_float(src, {K("attention.query_pre_attn_scalar")}, f)) c.query_pre_attn_scalar = (float)f;
-    if (c.arch_kind == Arch::Gemma2 || c.arch_kind == Arch::Gemma3) {
+    if (c.arch_kind == Arch::Gemma2 || c.arch_kind == Arch::Gemma3 || c.arch_kind == Arch::Gemma4) {
         c.gemma_rmsnorm = true;
         if (c.dim > 0) c.embedding_scale = std::sqrt((float)c.dim);
         if (c.rms_eps == 1e-5f) c.rms_eps = 1e-6f;   // Gemma default eps
     }
-    // Gemma 3 local/global RoPE: separate base for sliding-window layers, and
+    // Gemma 3/4 local/global RoPE: separate base for sliding-window layers, and
     // the pattern that says which layers are global.
     if (first_float(src, {K("rope.local_freq_base")}, f)) c.rope_theta_local = (float)f;
     if (first_int(src, {K("attention.sliding_window_pattern")}, v)) c.sliding_window_pattern = v;
 
-    // Phi-3: fused q/k/v and fused gate+up projections, plus partial-rotary RoPE
+    // Phi-3 / Phi-4: fused q/k/v and fused gate+up projections, plus partial-rotary RoPE
     // (rope.dimension_count rotary dims per head; the rest pass through).
-    if (c.arch_kind == Arch::Phi3) { c.fused_qkv = true; c.fused_gate_up = true; }
+    if (c.arch_kind == Arch::Phi3 || c.arch_kind == Arch::Phi4) { c.fused_qkv = true; c.fused_gate_up = true; }
     if (first_int(src, {K("rope.dimension_count")}, v)) c.rope_dim = v;
 
     // Mixtral / MoE: expert counts (Mixtral ships as arch "llama" with these set).

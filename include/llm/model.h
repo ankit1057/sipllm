@@ -21,7 +21,15 @@ enum class Arch {
     Qwen2,     // Llama-like + bias on q/k/v projections (Qwen2 / Qwen2.5)
     Gemma2,    // GeGLU, (1+w) RMSNorm, pre+post norms, embd scale, logit softcap
     Gemma3,    // Gemma2 shape + QK-norm + per-layer local/global RoPE, no softcap
+    Gemma4,    // Gemma 4 arch (Gemma2/3 evolution with adaptive RMSNorm & scaling)
+    Kimi,      // Moonshot Kimi / Kimi-k1.5 (SwiGLU + GQA + RMSNorm / ChatML)
+    DeepSeek,  // DeepSeek V2 / V3 / R1 (MLA / SwiGLU / MoE or dense)
+    Yi,        // 01.AI Yi / Yi-1.5 (Llama-like SwiGLU + RMSNorm)
+    Baichuan,  // Baichuan 2 (Alibi/RoPE + SwiGLU)
+    InternLM2, // InternLM 2 / 2.5 (Llama-like + custom QKV layout)
+    GLM4,      // Zhipu GLM-4 / ChatGLM (LayerNorm/RMSNorm + SwiGLU)
     Phi3,      // Llama-like + fused QKV, fused gate/up, partial-rotary RoPE
+    Phi4,      // Microsoft Phi-4 (Llama-like + fused QKV / gate+up)
     Phi2,      // parallel block + LayerNorm + partial-rotary RoPE + GELU MLP
     GPT2,      // LayerNorm + learned positional embeddings + GELU MLP, no RoPE
     Unknown,   // recognized string but no dedicated block yet -> treated as Llama

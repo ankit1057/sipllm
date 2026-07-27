@@ -107,13 +107,21 @@ void Transformer::block(int64_t layer, int64_t pos) {
         case Arch::Llama:
         case Arch::Mistral:   // RMSNorm + RoPE + GQA + SwiGLU, same as Llama
         case Arch::Qwen2:     // Llama block + optional q/k/v biases (applied below)
+        case Arch::Kimi:      // Moonshot Kimi (SwiGLU + GQA + RMSNorm)
+        case Arch::DeepSeek:  // DeepSeek dense / GQA variant
+        case Arch::Yi:        // 01.AI Yi 1.5
+        case Arch::Baichuan:  // Baichuan 2
+        case Arch::InternLM2: // InternLM 2 / 2.5
+        case Arch::GLM4:      // Zhipu GLM-4
             block_llama(layer, pos);
             return;
         case Arch::Gemma2:
         case Arch::Gemma3:    // Gemma2 shape + QK-norm + per-layer RoPE (handled in-block)
+        case Arch::Gemma4:    // Gemma 4 arch
             block_gemma2(layer, pos);
             return;
         case Arch::Phi3:
+        case Arch::Phi4:
             block_phi3(layer, pos);
             return;
         case Arch::GPT2:

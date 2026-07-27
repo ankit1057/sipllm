@@ -157,12 +157,11 @@ sipllm list                                                # local models
 sipllm registry                                            # what's available
 ```
 
-**Bundled models** (all public / ungated, all Llama-architecture — what the
-engine implements today): `llama3.2` (Llama-3.2-1B/`:3b`-Instruct — verified
-end-to-end here), `smollm2` (SmolLM2-1.7B-Instruct / `:360m` — standard Llama
-arch, strong for its size), and `tinyllama` (1.1B — tiny and prone to rambling;
-fine for smoke tests). Each takes quant tags, e.g. `smollm2:q8_0`,
-`tinyllama:q4_k_m`. Bigger *instruct* models hallucinate far less than TinyLlama.
+**Supported Model Architectures.** SipLLM natively supports a comprehensive set of decoder architectures across US & Chinese model families:
+- **US / Global Architectures:** Llama (Llama 2 / 3 / 3.1 / 3.2 / 3.3), Gemma (Gemma 2 / Gemma 3 / Gemma 4), Mistral / Mixtral, Phi (Phi 2 / Phi 3 / Phi 4), GPT-2, StarCoder 2.
+- **Chinese Model Architectures:** Kimi / Moonshot (Kimi K1.5), Qwen (Qwen 2 / Qwen 2.5), DeepSeek (DeepSeek V2 / V3 / R1 Distill), Yi (Yi 1.5), Baichuan 2, InternLM 2.5, GLM-4 / ChatGLM.
+
+**Bundled models:** `llama3.2` (Llama-3.2-1B/`:3b`-Instruct), `smollm2` (SmolLM2-1.7B-Instruct / `:360m`), `gemma4` (Gemma 4 9B), `kimi` (Kimi K1.5 7B), `deepseek-r1` (DeepSeek R1 Distill Qwen 7B), and `tinyllama` (1.1B). Each takes quant tags, e.g. `smollm2:q8_0`, `tinyllama:q4_k_m`.
 
 Model names resolve to public GGUF files and cache in `~/.sipllm/models`. You can
 also pass any GGUF **URL** or **local path** directly, or add your own names to
