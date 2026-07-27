@@ -6,13 +6,8 @@
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-**A dependency-free, CPU-first LLM inference engine in C++17 that runs models
-*larger than RAM*. It *sips* weights off disk — one transformer layer at a time —
-so peak RAM tracks a single resident layer, not the whole model: measured far
-below comparable runtimes (~120 MB vs ~1.35 GB for
-[llama.cpp](https://github.com/ggml-org/llama.cpp) on TinyLlama), and the gap
-widens with model size. Numerically validated against llama.cpp, layer by layer,
-across four GGUF quantization formats.**
+**A bounded-memory AI runtime that enables models larger than available RAM to execute efficiently on edge devices.**
+SipLLM *sips* weights off storage — one transformer layer at a time — so peak RAM tracks a single resident layer, not the whole model: measured far below comparable runtimes (~120 MB vs ~1.35 GB for llama.cpp on TinyLlama), and the gap widens with model size. Numerically validated across four GGUF quantization formats and 16 model architectures.
 
 > ### Status
 > **Actively developed.** The runtime is crash-hardened — the whole
