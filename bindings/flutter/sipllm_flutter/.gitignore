@@ -17,6 +17,9 @@ example/.flutter-plugins-dependencies
 example/build/
 example/android/.gradle/
 example/android/app/.cxx/
+example/android/.cxx/
+android/.cxx/
+.cxx/
 example/android/local.properties
 example/ios/Pods/
 example/ios/.symlinks/

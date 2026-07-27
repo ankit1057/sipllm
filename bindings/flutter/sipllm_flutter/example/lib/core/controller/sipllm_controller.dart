@@ -114,12 +114,9 @@ class SipllmController extends ChangeNotifier {
   Future<String> _resolveDownloadsSipLlmDir() async {
     Directory? base;
     if (Platform.isAndroid) {
-      base = Directory('/storage/emulated/0/Download');
-      if (!base.existsSync()) {
-        try {
-          base = await getDownloadsDirectory();
-        } catch (_) {}
-      }
+      try {
+        base = await getExternalStorageDirectory();
+      } catch (_) {}
     } else {
       try {
         base = await getDownloadsDirectory();

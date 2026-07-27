@@ -586,7 +586,7 @@ class DownloadTask {
     });
     final tmp = File('$_sidecarPath.tmp');
     await tmp.writeAsString(payload, flush: true);
-    await tmp.rename(_sidecarPath);
+    await _safeRename(tmp, _sidecarPath);
   }
 
   void _emit({bool force = false}) {
@@ -667,6 +667,17 @@ class DownloadTask {
       await raf.truncate(length);
     } finally {
       await raf.close();
+    }
+  }
+
+  Future<void> _safeRename(File source, String destPath) async {
+    try {
+      await source.rename(destPath);
+    } catch (_) {
+      try {
+        await source.copy(destPath);
+        await source.delete();
+      } catch (_) {}
     }
   }
 
