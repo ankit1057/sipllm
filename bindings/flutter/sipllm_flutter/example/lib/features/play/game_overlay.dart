@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -35,10 +36,21 @@ class _GameBottomSheetOverlayState extends State<GameBottomSheetOverlay> {
       ..setBackgroundColor(const Color(0xFF0D0F17));
   }
 
-  void _ensureLoaded(String gameName) {
+  Future<void> _ensureLoaded(String gameName) async {
     if (_loadedGame != gameName) {
       _loadedGame = gameName;
-      _webViewController.loadFlutterAsset(_gameAssets[gameName]!);
+      final assetPath = _gameAssets[gameName];
+      if (assetPath != null) {
+        try {
+          final htmlContent = await rootBundle.loadString(assetPath);
+          await _webViewController.loadHtmlString(
+            htmlContent,
+            baseUrl: 'about:blank',
+          );
+        } catch (e) {
+          debugPrint('Failed to load game HTML asset $assetPath: $e');
+        }
+      }
     }
   }
 

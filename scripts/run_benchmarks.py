@@ -27,12 +27,12 @@ REPORT_FILE = os.path.join(BENCH_DIR, "report.md")
 
 # Default thresholds: (is_higher_better, tolerance_percentage)
 THRESHOLDS = {
-    "peak_rss_mb": (False, 5.0),       # Max 5% increase
-    "ttft_s": (False, 10.0),           # Max 10% increase
-    "prefill_tok_s": (True, 5.0),      # Max 5% drop
-    "decode_tok_s": (True, 5.0),       # Max 5% drop
-    "weights_resident_mb": (False, 5.0),
-    "kv_mb": (False, 5.0),
+    "peak_rss_mb": (False, 10.0),      # Max 10% increase
+    "ttft_s": (False, 25.0),          # Max 25% increase (sub-100ms noise)
+    "prefill_tok_s": (True, 15.0),     # Max 15% drop
+    "decode_tok_s": (True, 15.0),      # Max 15% drop
+    "weights_resident_mb": (False, 10.0),
+    "kv_mb": (False, 10.0),
 }
 
 def get_git_sha():

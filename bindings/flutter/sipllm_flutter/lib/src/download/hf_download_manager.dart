@@ -78,6 +78,8 @@ class DownloadManager {
       // Byte-exact ranges require the wire bytes untouched: never let the
       // client transparently gunzip a segment, and ask origins for identity.
       ..autoUncompress = false
+      ..idleTimeout = const Duration(minutes: 10)
+      ..connectionTimeout = const Duration(seconds: 30)
       ..maxConnectionsPerHost = (maxConnections < 1 ? 1 : maxConnections) + 4;
     _permits = _maxConnections;
   }

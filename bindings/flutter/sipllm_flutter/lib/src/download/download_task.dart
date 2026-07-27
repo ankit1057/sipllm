@@ -105,6 +105,9 @@ class DownloadTask {
   int? _total;
   int _received = 0;
   int _active = 0;
+  String _resolvedUrl = '';
+
+  String get targetUrl => _resolvedUrl.isNotEmpty ? _resolvedUrl : url;
 
   bool _stopRequested = false;
   bool _cancelRequested = false;
@@ -242,10 +245,13 @@ class DownloadTask {
   // --- Probing ---------------------------------------------------------------
 
   Future<void> _probe() async {
+    _resolvedUrl = await _resolveDirectUrl(url);
+    final reqUrl = targetUrl;
+
     // Prefer a bodyless HEAD; most CDNs (and our tests) disclose Content-Length
     // and Accept-Ranges without shipping a byte.
     try {
-      final request = await _client.openUrl('HEAD', Uri.parse(url));
+      final request = await _client.openUrl('HEAD', Uri.parse(reqUrl));
       _applyHeaders(request);
       request.followRedirects = true;
       final response = await request.close();
@@ -268,7 +274,7 @@ class DownloadTask {
     }
 
     // Fallback: a one-byte ranged GET reveals both support and total size.
-    final request = await _client.openUrl('GET', Uri.parse(url));
+    final request = await _client.openUrl('GET', Uri.parse(reqUrl));
     _applyHeaders(request);
     request.followRedirects = true;
     request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
@@ -290,6 +296,32 @@ class DownloadTask {
       if (response.contentLength >= 0) _total = response.contentLength;
     }
     await response.drain<void>();
+  }
+
+  Future<String> _resolveDirectUrl(String initialUrl) async {
+    var current = initialUrl;
+    for (var i = 0; i < 5; i++) {
+      try {
+        final req = await _client.openUrl('HEAD', Uri.parse(current));
+        _applyHeaders(req);
+        req.followRedirects = false;
+        final res = await req.close();
+        await res.drain<void>();
+        if (res.statusCode == HttpStatus.movedPermanently ||
+            res.statusCode == HttpStatus.found ||
+            res.statusCode == HttpStatus.seeOther ||
+            res.statusCode == HttpStatus.temporaryRedirect ||
+            res.statusCode == 308) {
+          final loc = res.headers.value(HttpHeaders.locationHeader);
+          if (loc != null && loc.isNotEmpty) {
+            current = Uri.parse(current).resolve(loc).toString();
+            continue;
+          }
+        }
+      } catch (_) {}
+      break;
+    }
+    return current;
   }
 
   // --- Segment preparation (fresh vs resume) ---------------------------------
@@ -370,7 +402,7 @@ class DownloadTask {
       }
 
       raf = await _openPartAppend(segment.index, segment.written);
-      final request = await _client.openUrl('GET', Uri.parse(url));
+      final request = await _client.openUrl('GET', Uri.parse(targetUrl));
       _applyHeaders(request);
       request.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-$to');
       request.followRedirects = true;
@@ -379,7 +411,7 @@ class DownloadTask {
           response.statusCode != HttpStatus.ok) {
         throw HttpException(
           'Unexpected status ${response.statusCode} for range $from-$to',
-          uri: Uri.parse(url),
+          uri: Uri.parse(targetUrl),
         );
       }
 
@@ -444,7 +476,7 @@ class DownloadTask {
       segment.written = 0;
       _received = 0;
       raf = await _openPartTruncate(segment.index);
-      final request = await _client.openUrl('GET', Uri.parse(url));
+      final request = await _client.openUrl('GET', Uri.parse(targetUrl));
       _applyHeaders(request);
       request.followRedirects = true;
       final response = await request.close();
@@ -452,7 +484,7 @@ class DownloadTask {
           response.statusCode != HttpStatus.partialContent) {
         throw HttpException(
           'Unexpected status ${response.statusCode}',
-          uri: Uri.parse(url),
+          uri: Uri.parse(targetUrl),
         );
       }
       if (_total == null && response.contentLength >= 0) {
