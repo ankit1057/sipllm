@@ -31,7 +31,7 @@ class ChatBubble extends StatelessWidget {
               decoration: BoxDecoration(
                 color: AppTheme.surface,
                 shape: BoxShape.circle,
-                border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
+                border: Border.all(color: AppTheme.primary.withValues(alpha: 0.3)),
               ),
               child: const Icon(Icons.smart_toy_outlined, size: 18, color: AppTheme.primary),
             ),
@@ -43,7 +43,7 @@ class ChatBubble extends StatelessWidget {
               padding: const EdgeInsets.only(left: 14, right: 14, top: 12, bottom: 8),
               constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
               decoration: BoxDecoration(
-                color: isUser ? AppTheme.primary.withOpacity(0.15) : AppTheme.surface,
+                color: isUser ? AppTheme.primary.withValues(alpha: 0.15) : AppTheme.surface,
                 borderRadius: BorderRadius.only(
                   topLeft: const Radius.circular(18),
                   topRight: const Radius.circular(18),
@@ -51,7 +51,7 @@ class ChatBubble extends StatelessWidget {
                   bottomRight: isUser ? Radius.zero : const Radius.circular(18),
                 ),
                 border: Border.all(
-                  color: isUser ? AppTheme.primary.withOpacity(0.3) : Colors.white.withOpacity(0.05),
+                  color: isUser ? AppTheme.primary.withValues(alpha: 0.3) : Colors.white.withValues(alpha: 0.05),
                 ),
               ),
               child: IntrinsicWidth(
@@ -77,7 +77,7 @@ class ChatBubble extends StatelessWidget {
                         timeString,
                         style: TextStyle(
                           fontSize: 10,
-                          color: AppTheme.textSec.withOpacity(0.7),
+                          color: AppTheme.textSec.withValues(alpha: 0.7),
                         ),
                       ),
                     ),

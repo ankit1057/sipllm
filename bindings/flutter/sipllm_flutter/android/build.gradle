@@ -32,7 +32,7 @@ apply plugin: "kotlin-android"
 android {
     namespace = "com.sipllm.flutter"
     compileSdk = 35
-    ndkVersion = "27.0.12077973"
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -48,21 +48,26 @@ android {
     }
 
     defaultConfig {
-        minSdk = 23
+        // API 24 is the Vulkan floor (libvulkan.so ships from Android 7.0); our
+        // targets (POCO X6 Pro / OnePlus Watch 2) are API 34.
+        minSdk = 24
 
         // The engine .so is C++; c++_shared is required because more than one
         // native library in the final APK may link the STL, and a single shared
         // runtime avoids the "multiple c++ runtimes" ODR hazard.
         externalNativeBuild {
             cmake {
-                arguments += ["-DANDROID_STL=c++_shared"]
+                arguments += ["-DANDROID_STL=c++_shared", "-DSIPLLM_VULKAN=ON"]
             }
         }
 
-        // Ship only the ABIs the SipLLM SIMD kernels target. x86_64 is kept for
-        // the emulator; 32-bit x86 is intentionally dropped.
+        // arm64-v8a covers all targets (POCO X6 Pro, OnePlus Watch 2 / Snapdragon
+        // W5, and the arm64 emulator); x86_64 for x86 emulators. 32-bit armeabi-v7a
+        // is dropped for now: simd.h's fp32 NEON path uses the AArch64-only
+        // vaddvq_f32 horizontal reduce, so armv7 needs a portable reduce first
+        // (tracked follow-up — none of the M6.5 target devices are 32-bit).
         ndk {
-            abiFilters "arm64-v8a", "armeabi-v7a", "x86_64"
+            abiFilters "arm64-v8a", "x86_64"
         }
     }
 

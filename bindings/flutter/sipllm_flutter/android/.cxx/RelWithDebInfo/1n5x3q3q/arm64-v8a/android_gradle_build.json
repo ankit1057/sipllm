@@ -1,0 +1,38 @@
+{
+  "buildFiles": [
+    "/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/src/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/Users/mobile/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/RelWithDebInfo/1n5x3q3q/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/Users/mobile/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/RelWithDebInfo/1n5x3q3q/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "sipllm_ffi::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "sipllm_ffi",
+      "output": "/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/example/build/sipllm_flutter/intermediates/cxx/RelWithDebInfo/1n5x3q3q/obj/arm64-v8a/libsipllm_ffi.so",
+      "runtimeFiles": []
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "/Users/mobile/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang.lld",
+      "cppCompilerExecutable": "/Users/mobile/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++.lld"
+    }
+  },
+  "cFileExtensions": [],
+  "cppFileExtensions": [
+    "cpp"
+  ]
+}

@@ -20,9 +20,14 @@ dependencies:
   provider: ^6.1.2
   path: ^1.9.0
   path_provider: ^2.1.4
+  file_picker: ^8.1.6
+  share_plus: ^10.1.4
+  webview_flutter: ^4.10.0
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
   flutter_lints: ^5.0.0
 
@@ -31,3 +36,8 @@ flutter:
   assets:
     - assets/icons/
     - assets/images/
+    - assets/models/
+    - assets/games/2048/
+    - assets/games/snake/
+    - assets/games/sudoku/
+    - assets/games/minesweeper/

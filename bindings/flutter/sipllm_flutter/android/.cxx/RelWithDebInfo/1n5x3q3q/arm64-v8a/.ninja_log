@@ -1,0 +1,20 @@
+# ninja log v5
+1	19	0	/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/RelWithDebInfo/1n5x3q3q/arm64-v8a/CMakeFiles/cmake.verify_globs	5769ca105feb11d8
+3	1079	1785185710839326902	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/dtype.cpp.o	44abe106d595c4d8
+8	1672	1785185711434554012	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/model.cpp.o	12ea69eb73654476
+9	1715	1785185711475672038	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/neon.cpp.o	865bd860ecff5484
+0	1818	1785185711560440331	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/device_profile.cpp.o	559602f443e03dba
+14	1937	1785185711701420634	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/ops.cpp.o	19f25630a17e99bd
+0	2129	1785185711866899625	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/auto_tuner.cpp.o	beb8c2dafcc4b6fb
+6	2421	1785185712177894977	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/mem_plan.cpp.o	a39ab9022b899aa1
+4	2687	1785185712447177711	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/gguf.cpp.o	d63be38b2c2b6528
+5	3094	1785185712852337559	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/loader.cpp.o	cbc3d9564cbae340
+2130	3236	1785185712998602555	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/vulkan.cpp.o	c67bc1459e439083
+4	3295	1785185713051529190	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/format.cpp.o	958b52773e18e6d2
+1083	3354	1785185713110525236	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/quant.cpp.o	bd96deb96fc8bbab
+1672	3919	1785185713669588093	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/runtime.cpp.o	ffd3e3db768e419a
+2421	3974	1785185713735245766	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/ffi/sipllm_ffi.cpp.o	a07e28d3301b905f
+1937	3983	1785185713740635043	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/transformer.cpp.o	9a2e4f5c9738a7a1
+1818	4286	1785185714038981233	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/tokenizer.cpp.o	4ab7d5f1989c8fbc
+1715	7037	1785185716782517857	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/selftest.cpp.o	d5985d15ae6b9180
+7038	7195	1785185716948233768	/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/example/build/sipllm_flutter/intermediates/cxx/RelWithDebInfo/1n5x3q3q/obj/arm64-v8a/libsipllm_ffi.so	e52871cc9bea1da3

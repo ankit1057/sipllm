@@ -1,0 +1,10 @@
+# ninja log v5
+1	19	0	/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/armeabi-v7a/CMakeFiles/cmake.verify_globs	1092ec37cd83e7ca
+1	1191	1785181737207075755	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/dtype.cpp.o	5e0da3bb541ed184
+1	1843	1785181737850495272	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/device_profile.cpp.o	ff705f738d511ed2
+2	1866	1785181737880998657	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/model.cpp.o	a4650fddd8b67f57
+0	1997	1785181738013201784	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/auto_tuner.cpp.o	7b1d2476d57d1b75
+2	2424	1785181738432981102	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/mem_plan.cpp.o	a9330d72cbabf06f
+2	2640	1785181738649938479	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/gguf.cpp.o	35c13a15cad8de84
+2	2958	1785181738966685507	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/loader.cpp.o	cb3baba64257bf24
+1	3081	1785181739095887329	CMakeFiles/sipllm_ffi.dir/Users/mobile/Desktop/Dev/sipllm/src/format.cpp.o	d283a2d87b8b155c

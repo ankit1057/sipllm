@@ -7,7 +7,8 @@
 #include "sipllm_ffi.h"
 
 #include "llm/runtime.h"
-#include "llm/profile.h"
+#include "llm/auto_tuner.h"
+#include "llm/device_profile.h"
 #include "llm/vulkan_backend.h"
 #include "llm/threadpool.h"
 
@@ -111,20 +112,25 @@ sipllm_ctx* sipllm_open(const char* model_path, const sipllm_params* p,
     LayerLoader::Options opt = options_from(params);
 
     int threads = params.threads;
+    int tuned_policy = -1;  // >=0 => override schedule policy from the auto-tuner
     if (threads < 0) {
-      // Auto-tune: benchmarks 1..hw and caches to the device profile. Opt-in,
-      // because it costs a few seconds on first open and needs a writable HOME.
-      threads = get_optimal_threads(model_path, opt, params.ram_budget_bytes);
-    } else if (threads == 0) {
-      threads = 0;  // Runtime -> ThreadPool(0) -> hardware_concurrency
+      // Auto-tune: device micro-benchmarks pick both the thread count and the
+      // schedule policy, cached under the device profile. Opt-in (costs time on
+      // first open and needs a writable HOME), so it never runs for threads >= 0.
+      const RuntimeProfile prof =
+          tune_if_needed(get_hardware_info(), AutoTunerOptions{});
+      threads = prof.threads;
+      tuned_policy = prof.schedule_policy;
     }
+    // threads == 0 -> Runtime/ThreadPool selects hardware_concurrency.
 
     auto src = open_model(model_path, opt.use_mmap);
     auto ctx = std::unique_ptr<sipllm_ctx>(new sipllm_ctx());
     ctx->rt = std::make_unique<Runtime>(std::move(src), opt, params.max_ctx, threads,
                                         params.ram_budget_bytes, params.force_budget != 0);
     if (ctx->rt->thread_pool()) {
-      ctx->rt->thread_pool()->set_policy(to_policy(params.schedule_policy));
+      ctx->rt->thread_pool()->set_policy(
+          to_policy(tuned_policy >= 0 ? tuned_policy : params.schedule_policy));
       ctx->threads = ctx->rt->thread_pool()->size();
     }
     return ctx.release();
@@ -308,10 +314,12 @@ int32_t sipllm_hardware_concurrency(void) {
 }
 
 int32_t sipllm_optimal_threads(const char* model_path, uint64_t ram_budget) {
-  if (!model_path) return -1;
+  // model_path / ram_budget are retained for ABI stability; the auto-tuner now
+  // profiles the device (model-independent) and caches the result to disk.
+  (void)model_path;
+  (void)ram_budget;
   try {
-    LayerLoader::Options opt;
-    return get_optimal_threads(model_path, opt, static_cast<size_t>(ram_budget));
+    return tune_if_needed(get_hardware_info(), AutoTunerOptions{}).threads;
   } catch (...) {
     return -1;
   }

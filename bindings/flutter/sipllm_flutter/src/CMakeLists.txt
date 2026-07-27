@@ -57,12 +57,38 @@ if(ANDROID)
   endif()
 endif()
 
-# Optional Vulkan matmul backend (-DSIPLLM_VULKAN=ON). Requires a prebuilt
-# shaders/matmul_spv.h in the engine tree; falls back to CPU when the device or
-# shader is unavailable, so the engine never depends on the GPU for correctness.
+# Optional Vulkan matmul backend (-DSIPLLM_VULKAN=ON). The engine falls back to
+# CPU when the device or the compiled shader is unavailable, so it never depends
+# on the GPU for correctness. When glslc is present we (re)generate the embedded
+# SPIR-V header the same way the Makefile does, so a fresh checkout still gets
+# GPU offload without a manual `make shader`.
 option(SIPLLM_VULKAN "Compile the experimental Vulkan matmul backend" OFF)
 if(SIPLLM_VULKAN)
   target_compile_definitions(sipllm_ffi PRIVATE LLM_HAVE_VULKAN=1)
+
+  set(_spv_header "${SIPLLM_ENGINE_ROOT}/shaders/matmul_spv.h")
+  find_program(GLSLC_EXE glslc)
+  if(GLSLC_EXE AND NOT EXISTS "${_spv_header}"
+     AND EXISTS "${SIPLLM_ENGINE_ROOT}/shaders/matmul.comp" AND UNIX)
+    message(STATUS "sipllm_ffi: generating ${_spv_header} via ${GLSLC_EXE}")
+    execute_process(
+      COMMAND ${GLSLC_EXE} -O -o "${CMAKE_CURRENT_BINARY_DIR}/matmul.spv"
+              "${SIPLLM_ENGINE_ROOT}/shaders/matmul.comp"
+      RESULT_VARIABLE _glslc_rc)
+    if(_glslc_rc EQUAL 0)
+      execute_process(COMMAND bash -c
+        "{ echo '// auto-generated from shaders/matmul.comp'; \
+           echo 'static const unsigned char matmul_spv[] = {'; \
+           od -An -v -tu1 '${CMAKE_CURRENT_BINARY_DIR}/matmul.spv' | sed 's/[0-9]\\{1,\\}/&,/g'; \
+           echo '};'; \
+           echo 'static const unsigned int matmul_spv_len = sizeof(matmul_spv);'; } > '${_spv_header}'")
+    endif()
+  endif()
+  if(NOT EXISTS "${_spv_header}")
+    message(STATUS "sipllm_ffi: no SPIR-V shader (glslc absent); Vulkan device "
+                   "enumeration only, matmul stays on CPU.")
+  endif()
+
   if(ANDROID)
     target_link_libraries(sipllm_ffi vulkan)
   else()

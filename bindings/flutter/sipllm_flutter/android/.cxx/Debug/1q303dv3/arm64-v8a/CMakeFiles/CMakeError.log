@@ -1,0 +1,60 @@
+Performing C++ SOURCE FILE Test CMAKE_HAVE_LIBC_PTHREAD failed with the following output:
+Change Dir: /Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/arm64-v8a/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/Users/mobile/Library/Android/sdk/cmake/3.22.1/bin/ninja cmTC_5661f && [1/2] Building CXX object CMakeFiles/cmTC_5661f.dir/src.cxx.o
+FAILED: CMakeFiles/cmTC_5661f.dir/src.cxx.o 
+/Users/mobile/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android24 --sysroot=/Users/mobile/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -DCMAKE_HAVE_LIBC_PTHREAD  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security    -fPIE -std=gnu++17 -MD -MT CMakeFiles/cmTC_5661f.dir/src.cxx.o -MF CMakeFiles/cmTC_5661f.dir/src.cxx.o.d -o CMakeFiles/cmTC_5661f.dir/src.cxx.o -c /Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/arm64-v8a/CMakeFiles/CMakeTmp/src.cxx
+/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/arm64-v8a/CMakeFiles/CMakeTmp/src.cxx:13:3: error: use of undeclared identifier 'pthread_cancel'
+   13 |   pthread_cancel(thread);
+      |   ^
+1 error generated.
+ninja: build stopped: subcommand failed.
+
+
+Source file was:
+#include <pthread.h>
+
+static void* test_func(void* data)
+{
+  return data;
+}
+
+int main(void)
+{
+  pthread_t thread;
+  pthread_create(&thread, NULL, test_func, NULL);
+  pthread_detach(thread);
+  pthread_cancel(thread);
+  pthread_join(thread, NULL);
+  pthread_atfork(NULL, NULL, NULL);
+  pthread_exit(NULL);
+
+  return 0;
+}
+
+Determining if the function pthread_create exists in the pthreads failed with the following output:
+Change Dir: /Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/arm64-v8a/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/Users/mobile/Library/Android/sdk/cmake/3.22.1/bin/ninja cmTC_52d87 && [1/2] Building CXX object CMakeFiles/cmTC_52d87.dir/CheckFunctionExists.cxx.o
+[2/2] Linking CXX executable cmTC_52d87
+FAILED: cmTC_52d87 
+: && /Users/mobile/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android24 --sysroot=/Users/mobile/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -DCHECK_FUNCTION_EXISTS=pthread_create -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_52d87.dir/CheckFunctionExists.cxx.o -o cmTC_52d87  -lpthreads  -latomic -lm && :
+ld.lld: error: unable to find library -lpthreads
+clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+ninja: build stopped: subcommand failed.
+
+
+
+Determining if the function pthread_create exists in the pthread failed with the following output:
+Change Dir: /Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/arm64-v8a/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/Users/mobile/Library/Android/sdk/cmake/3.22.1/bin/ninja cmTC_4b1b6 && [1/2] Building CXX object CMakeFiles/cmTC_4b1b6.dir/CheckFunctionExists.cxx.o
+[2/2] Linking CXX executable cmTC_4b1b6
+FAILED: cmTC_4b1b6 
+: && /Users/mobile/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android24 --sysroot=/Users/mobile/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -DCHECK_FUNCTION_EXISTS=pthread_create -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_4b1b6.dir/CheckFunctionExists.cxx.o -o cmTC_4b1b6  -lpthread  -latomic -lm && :
+ld.lld: error: unable to find library -lpthread
+clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+ninja: build stopped: subcommand failed.
+
+
+

@@ -9,7 +9,7 @@ android {
     compileSdk = flutter.compileSdkVersion
 
     // ИСПРАВЛЕНИЕ 1: Жестко задаем версию NDK
-    ndkVersion = "27.0.12077973"
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -22,8 +22,8 @@ android {
 
     defaultConfig {
         applicationId = "com.example.local_llm_chat"
-        // ИСПРАВЛЕНИЕ 2: Поднимаем minSdk до 23 (требование многих плагинов)
-        minSdk = 23
+        // minSdk 24: Vulkan (libvulkan) floor and the sipllm_flutter plugin's minimum.
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

@@ -1,0 +1,20 @@
+                        -H/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/src
+-DCMAKE_SYSTEM_NAME=Android
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+-DCMAKE_SYSTEM_VERSION=24
+-DANDROID_PLATFORM=android-24
+-DANDROID_ABI=arm64-v8a
+-DCMAKE_ANDROID_ARCH_ABI=arm64-v8a
+-DANDROID_NDK=/Users/mobile/Library/Android/sdk/ndk/28.2.13676358
+-DCMAKE_ANDROID_NDK=/Users/mobile/Library/Android/sdk/ndk/28.2.13676358
+-DCMAKE_TOOLCHAIN_FILE=/Users/mobile/Library/Android/sdk/ndk/28.2.13676358/build/cmake/android.toolchain.cmake
+-DCMAKE_MAKE_PROGRAM=/Users/mobile/Library/Android/sdk/cmake/3.22.1/bin/ninja
+-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/example/build/sipllm_flutter/intermediates/cxx/RelWithDebInfo/1n5x3q3q/obj/arm64-v8a
+-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/example/build/sipllm_flutter/intermediates/cxx/RelWithDebInfo/1n5x3q3q/obj/arm64-v8a
+-DCMAKE_BUILD_TYPE=RelWithDebInfo
+-B/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/RelWithDebInfo/1n5x3q3q/arm64-v8a
+-GNinja
+-DANDROID_STL=c++_shared
+-DSIPLLM_VULKAN=ON
+                        Build command args: []
+                        Version: 2

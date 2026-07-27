@@ -1,0 +1,3 @@
+/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/arm64-v8a/CMakeFiles/sipllm_ffi.dir
+/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/arm64-v8a/CMakeFiles/edit_cache.dir
+/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/arm64-v8a/CMakeFiles/rebuild_cache.dir

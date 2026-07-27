@@ -1,0 +1,27 @@
+{
+  "buildFiles": [
+    "/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/src/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/Users/mobile/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/x86_64",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/Users/mobile/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/android/.cxx/Debug/1q303dv3/x86_64",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "sipllm_ffi::@6890427a1f51a3e7e1df": {
+      "artifactName": "sipllm_ffi",
+      "abi": "x86_64",
+      "output": "/Users/mobile/Desktop/Dev/sipllm/bindings/flutter/sipllm_flutter/example/build/sipllm_flutter/intermediates/cxx/Debug/1q303dv3/obj/x86_64/libsipllm_ffi.so",
+      "runtimeFiles": []
+    }
+  }
+}
