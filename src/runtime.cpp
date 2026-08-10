@@ -1,7 +1,7 @@
-// runtime.cpp — see runtime.h.
 #include "llm/runtime.h"
 #include "llm/format.h"
 #include "llm/gguf.h"
+#include "llm/sip_ir_reader.h"
 #include "llm/common.h"
 #include "llm/neon.h"
 #include "llm/mem_plan.h"
@@ -17,6 +17,7 @@ std::unique_ptr<WeightSource> open_model(const std::string& path, bool use_mmap)
     probe.pread_exact(0, &magic, 4);
     if (magic == kGGUFMagic) return std::make_unique<GgufFile>(path, use_mmap);
     if (magic == kLLMWMagic) return std::make_unique<ModelFile>(path, use_mmap);
+    if (magic == kSipIRMagic) return std::make_unique<SipIRReader>(path, use_mmap);
     throw Error("open_model: unrecognized file magic in " + path);
 }
 
