@@ -1,0 +1,68 @@
+[
+  {
+    "timestamp": "2026-07-28T02:57:53.043461",
+    "git_sha": "ac54e1c",
+    "results": {
+      "smollm2-135m.gguf/Auto": {
+        "peak_rss_mb": 54.0,
+        "ttft_s": 0.084,
+        "prefill_tok_s": 47.45,
+        "decode_tok_s": 56.93,
+        "weights_resident_mb": 37.6,
+        "kv_mb": 2.9,
+        "sched_idle_ms": 2873.86,
+        "sched_barrier_ms": 105.16
+      },
+      "smollm2-135m.gguf/Best Manual": {
+        "peak_rss_mb": 54.0,
+        "ttft_s": 0.055,
+        "prefill_tok_s": 73.17,
+        "decode_tok_s": 58.12,
+        "weights_resident_mb": 37.6,
+        "kv_mb": 2.9,
+        "sched_idle_ms": 430.35,
+        "sched_barrier_ms": 54.71
+      },
+      "smollm2-135m.gguf/RAM Budget 150M": {
+        "peak_rss_mb": 54.0,
+        "ttft_s": 0.063,
+        "prefill_tok_s": 63.68,
+        "decode_tok_s": 44.05,
+        "weights_resident_mb": 37.6,
+        "kv_mb": 2.9,
+        "sched_idle_ms": 3711.29,
+        "sched_barrier_ms": 93.42
+      },
+      "tinyllama-q4_k_m.gguf/Auto": {
+        "peak_rss_mb": 122.0,
+        "ttft_s": 0.243,
+        "prefill_tok_s": 16.49,
+        "decode_tok_s": 11.63,
+        "weights_resident_mb": 106.5,
+        "kv_mb": 2.9,
+        "sched_idle_ms": 13982.13,
+        "sched_barrier_ms": 144.53
+      },
+      "tinyllama-q4_k_m.gguf/Best Manual": {
+        "peak_rss_mb": 122.0,
+        "ttft_s": 0.16,
+        "prefill_tok_s": 24.94,
+        "decode_tok_s": 11.76,
+        "weights_resident_mb": 106.5,
+        "kv_mb": 2.9,
+        "sched_idle_ms": 12820.56,
+        "sched_barrier_ms": 93.05
+      },
+      "tinyllama-q4_k_m.gguf/RAM Budget 150M": {
+        "peak_rss_mb": 42.0,
+        "ttft_s": 0.21,
+        "prefill_tok_s": 19.09,
+        "decode_tok_s": 8.68,
+        "weights_resident_mb": 24.8,
+        "kv_mb": 2.9,
+        "sched_idle_ms": 20138.67,
+        "sched_barrier_ms": 104.36
+      }
+    }
+  }
+]

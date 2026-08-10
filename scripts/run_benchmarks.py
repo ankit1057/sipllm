@@ -25,15 +25,20 @@ BENCH_DIR = os.path.join(ROOT, "bench")
 BASELINE_FILE = os.path.join(BENCH_DIR, "baseline.json")
 REPORT_FILE = os.path.join(BENCH_DIR, "report.md")
 
-# Default thresholds: (is_higher_better, tolerance_percentage)
-THRESHOLDS = {
+# CI noise thresholds: (is_higher_better, tolerance_percentage)
+# These prevent flaky CI failures from OS scheduling noise on shared machines.
+# They are NOT the project's performance baselines — those are preserved per
+# release in bench/performance_history.json for strict historical comparison.
+CI_THRESHOLDS = {
     "peak_rss_mb": (False, 10.0),      # Max 10% increase
-    "ttft_s": (False, 25.0),          # Max 25% increase (sub-100ms noise)
+    "ttft_s": (False, 25.0),           # Max 25% increase (sub-100ms noise)
     "prefill_tok_s": (True, 15.0),     # Max 15% drop
     "decode_tok_s": (True, 15.0),      # Max 15% drop
     "weights_resident_mb": (False, 10.0),
     "kv_mb": (False, 10.0),
 }
+
+PERF_HISTORY_FILE = os.path.join(BENCH_DIR, "performance_history.json")
 
 def get_git_sha():
     try:
@@ -124,6 +129,43 @@ def run_matrix(models_to_test):
         results.append(b_res)
         
     return results
+
+def record_performance_history(current_results, sha):
+    """Append exact measured numbers to performance history.
+    
+    Unlike the rolling CI baseline (which gets overwritten every run),
+    this file is append-only and preserves the exact numbers for every
+    commit that was benchmarked. This prevents slow regressions from
+    being normalized over time.
+    """
+    history = []
+    if os.path.exists(PERF_HISTORY_FILE):
+        try:
+            with open(PERF_HISTORY_FILE, "r") as f:
+                history = json.load(f)
+        except Exception:
+            history = []
+    
+    entry = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "git_sha": sha,
+        "results": {}
+    }
+    
+    for run in current_results:
+        model = run["model"]
+        config = run["config"]
+        key = f"{model}/{config}"
+        entry["results"][key] = {
+            k: run[k] for k in METRICS.keys() if k in run
+        }
+    
+    history.append(entry)
+    
+    with open(PERF_HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+    
+    print(f"Performance history updated: {len(history)} entries in {PERF_HISTORY_FILE}")
 
 def check_regression(current, baseline, thresholds):
     passed = True
@@ -264,13 +306,16 @@ def main():
             print(f"Failed to load baseline: {e}")
             
     # 4. Check regression
-    passed, details = check_regression(current_results, baseline_results, THRESHOLDS)
+    passed, details = check_regression(current_results, baseline_results, CI_THRESHOLDS)
     
     # 5. Generate Markdown
     sha = get_git_sha()
     generate_markdown(current_results, baseline_results, details, sha)
     
-    # 6. Save new baseline
+    # 6. Archive to performance history (strict baselines per commit)
+    record_performance_history(current_results, sha)
+    
+    # 7. Save new baseline (rolling for CI comparison)
     with open(BASELINE_FILE, "w") as f:
         json.dump(current_results, f, indent=2)
         
