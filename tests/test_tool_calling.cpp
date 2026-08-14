@@ -1,9 +1,9 @@
-// test_tool_calling.cpp — RTK tool-calling + chat templates (self-contained).
+// test_tool_calling.cpp — tool-calling + chat templates (self-contained).
 //
 // Exercises the zero-dependency tool-call parser, the tool registry / schema
 // rendering, and chat-template rendering — none of which touch the language
 // model, so this links and runs independently of the rest of the engine.
-#include "llm/rtk.h"
+#include "llm/tools.h"
 #include "tests/test_util.h"
 
 #include <string>

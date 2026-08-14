@@ -1,16 +1,10 @@
-// rtk_tools.cpp — RTK tool-calling + chat-template implementation.
+// tools.cpp — tool-calling + chat-template implementation (see tools.h).
 //
-// Implements the SELF-CONTAINED, zero-dependency half of rtk.h: tool registry,
-// the incremental tool-call JSON parser (hand-written state machine, no JSON
-// library), tool-schema rendering, chat-template rendering for every supported
-// model family, and template auto-detection. Pure C++17 + the standard library.
-//
-// Ownership note (see AGENTS.md): this file owns the ToolRegistry / ToolParser /
-// ToolDef / ToolCall / render_chat / style_from_model symbols declared in rtk.h.
-// The `RTK` orchestrator class and the vision types (VisionEncoder /
-// MultimodalProjector) are implemented elsewhere (src/rtk.cpp / vision) — this
-// file deliberately does NOT define them, to avoid an ODR clash.
-#include "llm/rtk.h"
+// The self-contained, zero-dependency tool registry, incremental tool-call
+// JSON parser (hand-written state machine, no JSON library), tool-schema
+// rendering, and chat-template rendering for every supported model family.
+// Pure C++17 + the standard library.
+#include "llm/tools.h"
 
 #include <cctype>
 #include <sstream>
@@ -20,8 +14,8 @@ namespace llm {
 // ============================================================================
 // ToolCall accessors
 // ============================================================================
-const std::string& ToolCall::get(const std::string& key,
-                                 const std::string& fallback) const {
+std::string ToolCall::get(const std::string& key,
+                          const std::string& fallback) const {
     for (const ToolCallArg& a : args)
         if (a.key == key) return a.value;
     return fallback;
