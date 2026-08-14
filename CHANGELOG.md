@@ -189,6 +189,41 @@ byte-identical greedy output for 24 tokens).
 
 ## [Unreleased]
 
+### Architecture — data-driven BlockSpec unification (PR #49 merged)
+
+Replaces the per-architecture `Transformer::block_*()` dispatch with a single
+data-driven `block()` driven by `ModelConfig::block_spec` (a `BlockSpec` recipe).
+The eight architectures added on main (Kimi, DeepSeek, Yi, Baichuan, InternLM2,
+GLM4, Gemma4, Phi4) were reconciled onto BlockSpec: the llama-family arches ride
+the default RMSNorm+SwiGLU spec, Gemma4 → RMSNormGemma, Phi4 → fused QKV + fused
+gate/up. Verified with a differential first-token-logits oracle (FNV-1a over raw
+logit bytes, single-threaded): every one of 19 architectures produces a
+BIT-IDENTICAL checksum before and after the refactor — reordering the same ops
+into a BlockSpec changes no number in the forward pass.
+
+### Nishachar Path A — autonomous goal→plan→act→verify loop (Phase 9, #58)
+
+The first slice of Nishachar (the runtime's reference autonomous consumer): a
+model-agnostic C++ agent loop over the tool-calling core (`tools.h`).
+- `include/llm/nishachar.h` / `src/nishachar.cpp`: `Nishachar` registers tools
+  (advertised schema + C++ handler), then `run(goal, generator)` renders a chat,
+  asks the generator to act, parses a `<tool_call>` via `ToolParser`, dispatches
+  to the handler, feeds the result back, and repeats until the model answers
+  without a tool call or a step bound is hit. Returns a structured `AgentResult`
+  (per-step trace + stop reason + `report()`). The generator is an abstraction
+  (`AgentGenerator`) — bound to `Runtime::generate` in production, driven by a
+  scripted generator in tests, so the loop links without the engine.
+- `tests/test_nishachar.cpp` (9 tests): the loop state machine — immediate final,
+  single/multi tool steps, max-steps bound, unknown-tool→final (the parser rejects
+  unregistered tools), tool-error continue vs. stop, empty generation, report.
+- `tools/nishachar_demo.cpp`: `nishachar_demo <model> "<goal>" [--max-steps N]` —
+  loads a SipLLM model, registers demo tools (calc/echo/upper), drives the loop
+  with greedy sampling, prints the structured report.
+
+Scope: Path A is the loop mechanism + tool dispatch + structured report. The
+compile/test/benchmark verification and the fs/shell/git/compiler capability
+layer are the Plugin phase (#51) and later.
+
 ### Bigger-than-RAM demonstration (real models, measured)
 
 The defining-capability proof: SipLLM streams models whose weights far exceed
