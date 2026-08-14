@@ -8,19 +8,27 @@
 //   GET  /api/model       -> JSON model/config/tokenizer/backend info
 //   GET  /api/generate    -> SSE stream: tokens + per-token per-layer profile + final stats
 //   GET  /api/selftest    -> JSON results of the 11-task self-test
+//   POST /v1/chat/completions -> OpenAI-compatible chat: passthrough returns
+//                               OpenAI tool_calls for the client; "agent":true
+//                               runs the Nishachar loop server-side.
 //
 // One model, one generation at a time (guarded by a mutex).
 #include "llm/runtime.h"
 #include "llm/neon.h"
 #include "llm/vulkan_backend.h"
 #include "llm/selftest.h"
+#include "llm/openai_api.h"
+#include "llm/nishachar.h"
 #include "server/http.h"
 
 #include <cstdio>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <cctype>
+#include <ctime>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 using namespace llm;
@@ -183,6 +191,155 @@ int main(int argc, char** argv) {
             (unsigned long long)st.prefetch_hits, (unsigned long long)st.prefetch_misses,
             st.ctx_used, st.ctx_max, rt->peak_rss() / 1e6);
         res.sse_event(b, "done");
+    });
+
+    srv.post("/v1/chat/completions", [&](http::Request& req, http::Response& res) {
+        std::lock_guard<std::mutex> lk(gen_mutex);
+        if (!rt) {
+            res.send(503, "application/json",
+                     "{\"error\":{\"message\":\"model not loaded: " +
+                     json_escape(model_err) + "\",\"type\":\"server_error\"}}");
+            return;
+        }
+        ChatCompletionRequest cr;
+        std::string err;
+        if (!parse_chat_request(req.body, cr, err)) {
+            res.send(400, "application/json",
+                     "{\"error\":{\"message\":\"" + json_escape(err) +
+                     "\",\"type\":\"invalid_request_error\"}}");
+            return;
+        }
+
+        // temperature <= 0 => greedy/argmax (Sampler picks argmax when temp<=0).
+        SamplerConfig scfg;
+        scfg.temperature = cr.temperature <= 0.f ? 0.f : cr.temperature;
+
+        ChatTemplateStyle style = style_from_model(rt->config());
+
+        // Accumulate prompt/gen token counts across every generation this
+        // request drives (one turn for passthrough, N for the agent loop).
+        GenStats acc;
+        auto gen = [&](const std::string& prompt) -> std::string {
+            GenStats st;
+            rt->reset();
+            std::string out = rt->generate(prompt, cr.max_tokens, scfg, nullptr, &st);
+            acc.prompt_tokens += st.prompt_tokens;
+            acc.gen_tokens += st.gen_tokens;
+            return out;
+        };
+
+        ChatCompletionResponse response;
+
+        if (cr.agent) {
+            // Agent mode: run the Nishachar loop with server-side demo tools.
+            Nishachar nish;
+            {
+                ToolDef d;
+                d.name = "calc";
+                d.description =
+                    "Evaluate an integer expression of the form "
+                    "'<int> <op> <int>' where op is one of + - * /.";
+                ToolParam pm;
+                pm.name = "expr";
+                pm.type = ToolParamType::String;
+                pm.required = true;
+                pm.description = "the expression, e.g. \"2 + 3\"";
+                d.params.push_back(pm);
+                nish.add_tool(std::move(d), [](const ToolCall& c) -> std::string {
+                    std::istringstream ss(c.get("expr"));
+                    long a = 0, b = 0;
+                    std::string op;
+                    if (!(ss >> a >> op >> b))
+                        throw std::runtime_error("malformed expression");
+                    long r = 0;
+                    if (op == "+") r = a + b;
+                    else if (op == "-") r = a - b;
+                    else if (op == "*") r = a * b;
+                    else if (op == "/") {
+                        if (b == 0) throw std::runtime_error("division by zero");
+                        r = a / b;
+                    } else {
+                        throw std::runtime_error("unknown operator: " + op);
+                    }
+                    return std::to_string(r);
+                });
+            }
+            {
+                ToolDef d;
+                d.name = "echo";
+                d.description = "Return the given text verbatim.";
+                ToolParam pm;
+                pm.name = "text";
+                pm.type = ToolParamType::String;
+                pm.required = true;
+                pm.description = "the text to echo back";
+                d.params.push_back(pm);
+                nish.add_tool(std::move(d), [](const ToolCall& c) -> std::string {
+                    return c.get("text");
+                });
+            }
+            {
+                ToolDef d;
+                d.name = "upper";
+                d.description = "Uppercase the ASCII letters of the given text.";
+                ToolParam pm;
+                pm.name = "text";
+                pm.type = ToolParamType::String;
+                pm.required = true;
+                pm.description = "the text to uppercase";
+                d.params.push_back(pm);
+                nish.add_tool(std::move(d), [](const ToolCall& c) -> std::string {
+                    std::string s = c.get("text");
+                    for (char& ch : s) ch = (char)std::toupper((unsigned char)ch);
+                    return s;
+                });
+            }
+            AgentConfig cfg;
+            cfg.max_steps = 6;
+            cfg.max_new_tokens = cr.max_tokens;
+            cfg.style = style;
+            AgentResult ar = nish.run(last_user_message(cr.messages), gen, cfg);
+            response.content = ar.final_text;
+            response.finish_reason =
+                ar.stop == AgentStop::MaxSteps ? "length" : "stop";
+        } else {
+            // Passthrough mode: one model turn. A completed tool call is handed
+            // back to the client in OpenAI format for it to execute.
+            ToolRegistry registry;
+            for (const auto& t : cr.tools) registry.register_tool(t);
+            std::string prompt = render_chat(cr.messages, registry, style, true);
+            std::string out = gen(prompt);
+            ToolParser parser(registry);
+            parser.feed(out);
+            if (parser.state() == ToolParser::State::Done) {
+                const ToolCall& call = parser.parsed_call();
+                std::string args = "{";
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    if (i) args += ",";
+                    args += "\"" + json_escape(call.args[i].key) + "\":\"" +
+                            json_escape(call.args[i].value) + "\"";
+                }
+                args += "}";
+                ResponseToolCall rc;
+                rc.id = "call_1";
+                rc.name = call.name;
+                rc.arguments = args;
+                response.tool_calls.push_back(rc);
+            } else {
+                response.content = out;
+                response.finish_reason =
+                    acc.gen_tokens >= cr.max_tokens ? "length" : "stop";
+            }
+        }
+
+        static int chat_counter = 0;
+        response.id = "chatcmpl-" + std::to_string(++chat_counter);
+        response.created = (long)time(nullptr);
+        response.model = cr.model.empty() ? rt->config().arch : cr.model;
+        response.prompt_tokens = acc.prompt_tokens;
+        response.completion_tokens = acc.gen_tokens;
+
+        res.send(200, "application/json", build_chat_response(response));
     });
 
     return srv.run();

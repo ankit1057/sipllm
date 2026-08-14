@@ -224,6 +224,25 @@ Scope: Path A is the loop mechanism + tool dispatch + structured report. The
 compile/test/benchmark verification and the fs/shell/git/compiler capability
 layer are the Plugin phase (#51) and later.
 
+### Nishachar Path B — OpenAI-compatible /v1/chat/completions (Phase 9, #58)
+
+Exposes the runtime over an OpenAI-compatible chat endpoint on the built-in
+dependency-free HTTP server (`make server` → `llm_server`), in two modes:
+- **passthrough (default):** one model turn per request; if the model calls a
+  client-provided tool, the response returns OpenAI-format `tool_calls` for the
+  client to execute (standard OpenAI tool protocol). Plain chat returns content.
+- **agent (`"agent": true`):** the server runs the Nishachar loop with its own
+  tools (calc/echo/upper) and returns the finished answer.
+
+`include/llm/openai_api.h` / `src/openai_api.cpp`: a zero-dependency mapping
+between the OpenAI wire format and the internal types — `parse_chat_request`
+(messages, tools, params, agent flag) and `build_chat_response` (content or
+`tool_calls`, usage). `tests/test_openai_api.cpp` (10 tests) covers request
+parsing (roles, tool typing, malformed/empty → error, strings with braces) and
+response building (content + tool_calls shapes, escaping). The route is `POST
+/v1/chat/completions` in `server/server.cpp`, guarded by the existing
+single-generation mutex.
+
 ### Bigger-than-RAM demonstration (real models, measured)
 
 The defining-capability proof: SipLLM streams models whose weights far exceed
