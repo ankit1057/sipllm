@@ -22,9 +22,8 @@ Transformer::Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool)
     proj_.assign(cfg_.dim, 0.f);
     hb_.assign(cfg_.ffn_dim, 0.f);
     hb2_.assign(cfg_.ffn_dim, 0.f);
-    // Phi-3 fused projections need q_dim+2*kv_dim (qkv) or 2*ffn_dim (gate+up).
     fused_.assign(std::max(cfg_.q_dim() + 2 * cfg_.kv_dim(), 2 * cfg_.ffn_dim), 0.f);
-    router_.assign(cfg_.n_experts > 0 ? cfg_.n_experts : 0, 0.f);
+    router_.assign(cfg_.block_spec.n_experts > 0 ? cfg_.block_spec.n_experts : 0, 0.f);
     moe_.assign(cfg_.dim, 0.f);
     logits_.assign(cfg_.vocab_size, 0.f);
 }
@@ -96,216 +95,6 @@ static inline void add_bias(float* y, const WeightRef& b, int64_t n) {
     for (int64_t i = 0; i < n; ++i) y[i] += bv[i];
 }
 
-// Dispatch one block to the per-architecture implementation. Every arch except
-// the Llama reference is added as a new case here (issues #10-#16); Unknown
-// architectures fall through to the Llama path unchanged.
-void Transformer::block(int64_t layer, int64_t pos) {
-    // Mixtral and other MoE models ship as arch "llama" with expert_count>0;
-    // dispatch on that before the per-arch switch.
-    if (cfg_.is_moe()) { block_moe(layer, pos); return; }
-    switch (cfg_.arch_kind) {
-        case Arch::Llama:
-        case Arch::Mistral:   // RMSNorm + RoPE + GQA + SwiGLU, same as Llama
-        case Arch::Qwen2:     // Llama block + optional q/k/v biases (applied below)
-        case Arch::Kimi:      // Moonshot Kimi (SwiGLU + GQA + RMSNorm)
-        case Arch::DeepSeek:  // DeepSeek dense / GQA variant
-        case Arch::Yi:        // 01.AI Yi 1.5
-        case Arch::Baichuan:  // Baichuan 2
-        case Arch::InternLM2: // InternLM 2 / 2.5
-        case Arch::GLM4:      // Zhipu GLM-4
-            block_llama(layer, pos);
-            return;
-        case Arch::Gemma2:
-        case Arch::Gemma3:    // Gemma2 shape + QK-norm + per-layer RoPE (handled in-block)
-        case Arch::Gemma4:    // Gemma 4 arch
-            block_gemma2(layer, pos);
-            return;
-        case Arch::Phi3:
-        case Arch::Phi4:
-            block_phi3(layer, pos);
-            return;
-        case Arch::GPT2:
-            block_gpt2(layer, pos);
-            return;
-        case Arch::Phi2:
-            block_phi2(layer, pos);
-            return;
-        case Arch::Unknown:
-        default:
-            block_llama(layer, pos);
-            return;
-    }
-}
-
-// Shared Llama-style attention sublayer: RMSNorm -> QKV (+optional bias) ->
-// RoPE -> causal GQA -> output projection -> residual. Used by the dense Llama
-// block and the Mixtral MoE block (whose only difference is the FFN).
-void Transformer::attention_llama(int64_t layer, int64_t pos) {
-    const int64_t dim = cfg_.dim;
-    const int64_t hd = cfg_.head_dim;
-    const int64_t n_heads = cfg_.n_heads;
-    const int64_t n_kv = cfg_.n_kv_heads;
-    const int64_t kv_dim = cfg_.kv_dim();
-    const int64_t group = cfg_.gqa_group();
-    const float scale = 1.0f / std::sqrt((float)hd);
-
-    WeightRef an = loader_->getWeight(Role::AttnNorm);
-    rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(an.data), dim, cfg_.rms_eps);
-
-    linear(q_.data(), loader_->getWeight(Role::AttnQ), xb_.data(), pool_);
-    linear(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), pool_);
-    linear(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), pool_);
-
-    // Optional attention biases (Qwen2). No-op when the tensors are absent.
-    add_bias(q_.data(), loader_->getWeight(Role::AttnQBias), cfg_.q_dim());
-    add_bias(k_.data(), loader_->getWeight(Role::AttnKBias), kv_dim);
-    add_bias(v_.data(), loader_->getWeight(Role::AttnVBias), kv_dim);
-
-    RopeScaling rs;
-    if (cfg_.use_llama3_rope()) {
-        rs.llama3 = true;
-        rs.factor = cfg_.rope_scale_factor;
-        rs.low_freq_factor = cfg_.rope_low_freq_factor;
-        rs.high_freq_factor = cfg_.rope_high_freq_factor;
-        rs.orig_ctx_len = (float)cfg_.rope_orig_ctx_len;
-    }
-    apply_rope(q_.data(), n_heads, hd, pos, cfg_.rope_theta, rs);
-    apply_rope(k_.data(), n_kv,    hd, pos, cfg_.rope_theta, rs);
-
-    std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));
-    std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
-
-    for (int64_t h = 0; h < n_heads; ++h) {
-        const float* qh = q_.data() + h * hd;
-        const int64_t kvh = h / group;                 // GQA: shared kv head
-        for (int64_t t = 0; t <= pos; ++t) {
-            const float* kt = kv_->k(layer, t) + kvh * hd;
-            att_[t] = dot_f32(qh, kt, hd) * scale;
-        }
-        softmax(att_.data(), pos + 1);
-        float* out = attn_out_.data() + h * hd;
-        for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
-        for (int64_t t = 0; t <= pos; ++t) {
-            const float* vt = kv_->v(layer, t) + kvh * hd;
-            axpy_f32(out, vt, att_[t], hd);
-        }
-    }
-
-    linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
-    vec_add_inplace(x_.data(), proj_.data(), dim);
-}
-
-void Transformer::block_llama(int64_t layer, int64_t pos) {
-    attention_llama(layer, pos);
-
-    // --- feed-forward (SwiGLU) ---
-    const int64_t dim = cfg_.dim;
-    WeightRef fn = loader_->getWeight(Role::FfnNorm);
-    rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(fn.data), dim, cfg_.rms_eps);
-
-    linear(hb_.data(),  loader_->getWeight(Role::FfnGate), xb_.data(), pool_);
-    linear(hb2_.data(), loader_->getWeight(Role::FfnUp),   xb_.data(), pool_);
-    silu_inplace(hb_.data(), cfg_.ffn_dim);
-    mul_f32(hb_.data(), hb_.data(), hb2_.data(), cfg_.ffn_dim);   // gate*up
-    linear(proj_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
-    vec_add_inplace(x_.data(), proj_.data(), dim);
-
-    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
-}
-
-// Gemma 2 block: (1+w) RMSNorm, pre + post norms around each sublayer, GeGLU
-// FFN, optional attention-logit soft-capping, and a head_dim that is
-// independent of the model dim. No q/k/v biases. See ops.h for the primitives.
-void Transformer::block_gemma2(int64_t layer, int64_t pos) {
-    const int64_t dim = cfg_.dim;
-    const int64_t hd = cfg_.head_dim;
-    const int64_t n_heads = cfg_.n_heads;
-    const int64_t n_kv = cfg_.n_kv_heads;
-    const int64_t kv_dim = cfg_.kv_dim();
-    const int64_t group = cfg_.gqa_group();
-    // Attention scale: 1/sqrt(query_pre_attn_scalar) if given, else 1/sqrt(head_dim).
-    const float qs = cfg_.query_pre_attn_scalar > 0.f ? cfg_.query_pre_attn_scalar : (float)hd;
-    const float scale = 1.0f / std::sqrt(qs);
-    const float eps = cfg_.rms_eps;
-
-    // --- attention (pre-norm) ---
-    WeightRef an = loader_->getWeight(Role::AttnNorm);
-    rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(an.data), dim, eps);
-
-    linear(q_.data(), loader_->getWeight(Role::AttnQ), xb_.data(), pool_);
-    linear(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), pool_);
-    linear(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), pool_);
-
-    // Gemma 3 QK-norm: (1+w) RMSNorm per head over head_dim, applied to q/k
-    // before RoPE. Absent in Gemma 2 (invalid refs) => skipped.
-    WeightRef qn = loader_->getWeight(Role::AttnQNorm);
-    WeightRef kn = loader_->getWeight(Role::AttnKNorm);
-    if (qn.valid())
-        for (int64_t h = 0; h < n_heads; ++h)
-            rmsnorm_gemma(q_.data() + h * hd, q_.data() + h * hd,
-                          static_cast<const float*>(qn.data), hd, eps);
-    if (kn.valid())
-        for (int64_t h = 0; h < n_kv; ++h)
-            rmsnorm_gemma(k_.data() + h * hd, k_.data() + h * hd,
-                          static_cast<const float*>(kn.data), hd, eps);
-
-    // Gemma 3 uses a smaller RoPE base on sliding-window (local) layers; the
-    // pattern marks every Nth layer global. 0 pattern / 0 local base => the
-    // single rope_theta (Gemma 2 and everything else).
-    float theta = cfg_.rope_theta;
-    if (cfg_.rope_theta_local > 0.f && cfg_.sliding_window_pattern > 0 &&
-        ((layer + 1) % cfg_.sliding_window_pattern) != 0)
-        theta = cfg_.rope_theta_local;   // local (sliding-window) layer
-    apply_rope(q_.data(), n_heads, hd, pos, theta);
-    apply_rope(k_.data(), n_kv,    hd, pos, theta);
-
-    std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));
-    std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
-
-    for (int64_t h = 0; h < n_heads; ++h) {
-        const float* qh = q_.data() + h * hd;
-        const int64_t kvh = h / group;
-        for (int64_t t = 0; t <= pos; ++t) {
-            const float* kt = kv_->k(layer, t) + kvh * hd;
-            att_[t] = dot_f32(qh, kt, hd) * scale;
-        }
-        // Gemma 2 caps attention logits before the softmax.
-        softcap_inplace(att_.data(), pos + 1, cfg_.attn_logit_softcap);
-        softmax(att_.data(), pos + 1);
-        float* out = attn_out_.data() + h * hd;
-        for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
-        for (int64_t t = 0; t <= pos; ++t) {
-            const float* vt = kv_->v(layer, t) + kvh * hd;
-            axpy_f32(out, vt, att_[t], hd);
-        }
-    }
-
-    // output projection -> post-attention norm -> residual
-    linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
-    WeightRef apn = loader_->getWeight(Role::AttnPostNorm);
-    if (apn.valid())
-        rmsnorm_gemma(proj_.data(), proj_.data(), static_cast<const float*>(apn.data), dim, eps);
-    vec_add_inplace(x_.data(), proj_.data(), dim);
-
-    // --- feed-forward (GeGLU, pre-norm) ---
-    WeightRef fn = loader_->getWeight(Role::FfnNorm);
-    rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(fn.data), dim, eps);
-
-    linear(hb_.data(),  loader_->getWeight(Role::FfnGate), xb_.data(), pool_);
-    linear(hb2_.data(), loader_->getWeight(Role::FfnUp),   xb_.data(), pool_);
-    gelu_inplace(hb_.data(), cfg_.ffn_dim);                       // GELU, not SiLU
-    mul_f32(hb_.data(), hb_.data(), hb2_.data(), cfg_.ffn_dim);   // gate*up
-    linear(proj_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
-
-    // post-FFN norm -> residual
-    WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
-    if (fpn.valid())
-        rmsnorm_gemma(proj_.data(), proj_.data(), static_cast<const float*>(fpn.data), dim, eps);
-    vec_add_inplace(x_.data(), proj_.data(), dim);
-
-    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
-}
-
 // Partial-rotary RoPE: rotate only the first `rot_dim` dims of each head (the
 // remaining head_dim - rot_dim pass through). rot_dim == head_dim is full RoPE.
 static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
@@ -324,10 +113,9 @@ static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
     }
 }
 
-// Phi-3 block: RMSNorm + SwiGLU like Llama, but q/k/v come from one fused
-// attn_qkv projection, gate+up come from one fused ffn_up ([gate;up], 2*ffn
-// rows), and RoPE is partial (rope_dim rotary dims per head).
-void Transformer::block_phi3(int64_t layer, int64_t pos) {
+// Single data-driven transformer block pipeline (Issue #44).
+// Conditionally applies all per-architecture features based on cfg_.block_spec.
+void Transformer::block(int64_t layer, int64_t pos) {
     const int64_t dim = cfg_.dim;
     const int64_t hd = cfg_.head_dim;
     const int64_t n_heads = cfg_.n_heads;
@@ -335,219 +123,213 @@ void Transformer::block_phi3(int64_t layer, int64_t pos) {
     const int64_t kv_dim = cfg_.kv_dim();
     const int64_t q_dim = cfg_.q_dim();
     const int64_t group = cfg_.gqa_group();
-    const int64_t ff = cfg_.ffn_dim;
-    const int64_t rot = cfg_.rope_dim > 0 ? cfg_.rope_dim : hd;
-    const float scale = 1.0f / std::sqrt((float)hd);
+    const BlockSpec& b = cfg_.block_spec;
 
-    // --- attention: one fused QKV projection, then split ---
+    // --- 1. Pre-Attention Norm ---
     WeightRef an = loader_->getWeight(Role::AttnNorm);
-    rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(an.data), dim, cfg_.rms_eps);
-    linear(fused_.data(), loader_->getWeight(Role::AttnQKV), xb_.data(), pool_);
-    std::memcpy(q_.data(), fused_.data(),                 q_dim * sizeof(float));
-    std::memcpy(k_.data(), fused_.data() + q_dim,         kv_dim * sizeof(float));
-    std::memcpy(v_.data(), fused_.data() + q_dim + kv_dim, kv_dim * sizeof(float));
+    switch (b.norm) {
+        case NormKind::LayerNorm:
+            layernorm(xb_.data(), x_.data(), static_cast<const float*>(an.data),
+                      static_cast<const float*>(loader_->getWeight(Role::AttnNormBias).data), dim, cfg_.layernorm_eps);
+            break;
+        case NormKind::RMSNormGemma:
+            rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(an.data), dim, cfg_.rms_eps);
+            break;
+        case NormKind::RMSNorm:
+            rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(an.data), dim, cfg_.rms_eps);
+            break;
+    }
 
-    rope_rot(q_.data(), n_heads, hd, rot, pos, cfg_.rope_theta);
-    rope_rot(k_.data(), n_kv,    hd, rot, pos, cfg_.rope_theta);
+    // --- 2. QKV Projection ---
+    if (b.qkv_fused) {
+        linear(fused_.data(), loader_->getWeight(Role::AttnQKV), xb_.data(), pool_);
+        add_bias(fused_.data(), loader_->getWeight(Role::AttnQKVBias), q_dim + 2 * kv_dim);
+        std::memcpy(q_.data(), fused_.data(),                  q_dim * sizeof(float));
+        std::memcpy(k_.data(), fused_.data() + q_dim,          kv_dim * sizeof(float));
+        std::memcpy(v_.data(), fused_.data() + q_dim + kv_dim, kv_dim * sizeof(float));
+    } else {
+        linear(q_.data(), loader_->getWeight(Role::AttnQ), xb_.data(), pool_);
+        linear(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), pool_);
+        linear(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), pool_);
+        add_bias(q_.data(), loader_->getWeight(Role::AttnQBias), q_dim);
+        add_bias(k_.data(), loader_->getWeight(Role::AttnKBias), kv_dim);
+        add_bias(v_.data(), loader_->getWeight(Role::AttnVBias), kv_dim);
+    }
 
+    // --- 3. Q/K Norm ---
+    if (b.qk_norm) {
+        WeightRef qn = loader_->getWeight(Role::AttnQNorm);
+        WeightRef kn = loader_->getWeight(Role::AttnKNorm);
+        if (qn.valid())
+            for (int64_t h = 0; h < n_heads; ++h)
+                rmsnorm_gemma(q_.data() + h * hd, q_.data() + h * hd, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
+        if (kn.valid())
+            for (int64_t h = 0; h < n_kv; ++h)
+                rmsnorm_gemma(k_.data() + h * hd, k_.data() + h * hd, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
+    }
+
+    // --- 4. RoPE ---
+    if (b.rope != RopeKind::None) {
+        float theta = cfg_.rope_theta;
+        if (b.rope_dual_base && ((layer + 1) % cfg_.sliding_window_pattern) != 0)
+            theta = cfg_.rope_theta_local;
+            
+        switch (b.rope) {
+            case RopeKind::None: break;  // guarded above; exhaustive for -Wswitch
+            case RopeKind::Partial:
+                rope_rot(q_.data(), n_heads, hd, b.rope_dim > 0 ? b.rope_dim : hd, pos, theta);
+                rope_rot(k_.data(), n_kv,    hd, b.rope_dim > 0 ? b.rope_dim : hd, pos, theta);
+                break;
+            case RopeKind::Llama3Scaled: {
+                RopeScaling rs;
+                rs.llama3 = true;
+                rs.factor = cfg_.rope_scale_factor;
+                rs.low_freq_factor = cfg_.rope_low_freq_factor;
+                rs.high_freq_factor = cfg_.rope_high_freq_factor;
+                rs.orig_ctx_len = (float)cfg_.rope_orig_ctx_len;
+                apply_rope(q_.data(), n_heads, hd, pos, theta, rs);
+                apply_rope(k_.data(), n_kv,    hd, pos, theta, rs);
+                break;
+            }
+            case RopeKind::Full:
+                apply_rope(q_.data(), n_heads, hd, pos, theta);
+                apply_rope(k_.data(), n_kv,    hd, pos, theta);
+                break;
+        }
+    }
+
+    // --- 5. Cache Write ---
     std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));
     std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
 
+    // --- 6. Attention Math ---
+    const float scale = cfg_.query_pre_attn_scalar > 0.f ? (1.0f / std::sqrt(cfg_.query_pre_attn_scalar)) 
+                                                         : (1.0f / std::sqrt((float)hd));
     for (int64_t h = 0; h < n_heads; ++h) {
         const float* qh = q_.data() + h * hd;
         const int64_t kvh = h / group;
-        for (int64_t t = 0; t <= pos; ++t)
+        for (int64_t t = 0; t <= pos; ++t) {
             att_[t] = dot_f32(qh, kv_->k(layer, t) + kvh * hd, hd) * scale;
+        }
+        if (b.attn_softcap) softcap_inplace(att_.data(), pos + 1, cfg_.attn_logit_softcap);
         softmax(att_.data(), pos + 1);
         float* out = attn_out_.data() + h * hd;
         for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
-        for (int64_t t = 0; t <= pos; ++t)
+        for (int64_t t = 0; t <= pos; ++t) {
             axpy_f32(out, kv_->v(layer, t) + kvh * hd, att_[t], hd);
+        }
     }
-    linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
-    vec_add_inplace(x_.data(), proj_.data(), dim);
 
-    // --- feed-forward: one fused gate+up projection ([gate;up]) ---
-    WeightRef fn = loader_->getWeight(Role::FfnNorm);
-    rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(fn.data), dim, cfg_.rms_eps);
-    linear(fused_.data(), loader_->getWeight(Role::FfnUp), xb_.data(), pool_);   // [gate; up]
-    float* gate = fused_.data();
-    float* up   = fused_.data() + ff;
-    silu_inplace(gate, ff);
-    mul_f32(hb_.data(), gate, up, ff);                       // silu(gate) * up
-    linear(proj_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
-    vec_add_inplace(x_.data(), proj_.data(), dim);
-
-    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
-}
-
-// Mixtral MoE block: shared attention, then a router picks the top-k of
-// n_experts FFNs per token, softmax-weights them, and sums their SwiGLU
-// outputs. The expert weights live in packed 3D tensors (all experts resident,
-// quantized); only the selected experts are dequantized and computed — the
-// streaming loader keeps peak RAM at one layer regardless of expert count.
-void Transformer::block_moe(int64_t layer, int64_t pos) {
-    attention_llama(layer, pos);
-
-    const int64_t dim = cfg_.dim;
-    const int64_t ff  = cfg_.ffn_dim;
-    const int64_t ne  = cfg_.n_experts;
-    const int64_t k   = std::min<int64_t>(cfg_.n_experts_used, ne);
-
-    WeightRef fn = loader_->getWeight(Role::FfnNorm);
-    rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(fn.data), dim, cfg_.rms_eps);
-
-    // Router: score every expert, softmax over all, then take the top-k and
-    // renormalize their weights to sum to 1 (Mixtral gating).
-    linear(router_.data(), loader_->getWeight(Role::FfnGateInp), xb_.data(), pool_);
-    softmax(router_.data(), ne);
-    std::vector<int> ord(ne);
-    for (int64_t e = 0; e < ne; ++e) ord[e] = (int)e;
-    std::partial_sort(ord.begin(), ord.begin() + k, ord.end(),
-                      [&](int a, int b) { return router_[a] > router_[b]; });
-    float wsum = 0.f;
-    for (int64_t i = 0; i < k; ++i) wsum += router_[ord[i]];
-    const float winv = wsum > 0.f ? 1.0f / wsum : 0.f;
-
-    WeightRef ge = loader_->getWeight(Role::FfnGateExps);   // [ne*ff, dim]
-    WeightRef ue = loader_->getWeight(Role::FfnUpExps);     // [ne*ff, dim]
-    WeightRef de = loader_->getWeight(Role::FfnDownExps);   // [ne*dim, ff]
-    const int64_t gate_rb = type_nbytes(ge.dtype, dim);     // bytes per gate/up row
-    const int64_t down_rb = type_nbytes(de.dtype, ff);      // bytes per down row
-    const uint8_t* gbase = static_cast<const uint8_t*>(ge.data);
-    const uint8_t* ubase = static_cast<const uint8_t*>(ue.data);
-    const uint8_t* dbase = static_cast<const uint8_t*>(de.data);
-
-    for (int64_t d = 0; d < dim; ++d) moe_[d] = 0.f;
-    for (int64_t i = 0; i < k; ++i) {
-        const int64_t e = ord[i];
-        const float w = router_[e] * winv;
-        // expert e's gate/up rows start at e*ff; down rows start at e*dim.
-        WeightRef eg{gbase + e * ff * gate_rb, ge.dtype, ff, dim};
-        WeightRef eu{ubase + e * ff * gate_rb, ue.dtype, ff, dim};
-        WeightRef ed{dbase + e * dim * down_rb, de.dtype, dim, ff};
-        linear(hb_.data(),  eg, xb_.data(), pool_);
-        linear(hb2_.data(), eu, xb_.data(), pool_);
-        silu_inplace(hb_.data(), ff);
-        mul_f32(hb_.data(), hb_.data(), hb2_.data(), ff);   // silu(gate) * up
-        linear(proj_.data(), ed, hb_.data(), pool_);
-        axpy_f32(moe_.data(), proj_.data(), w, dim);        // += weight * expert_out
-    }
-    vec_add_inplace(x_.data(), moe_.data(), dim);
-
-    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
-}
-
-// GPT-2 block: LayerNorm (with bias) around each sublayer, one fused attn_qkv
-// projection (with bias), *no* RoPE (learned positional embeddings are added at
-// the input in forward), a causal attention, and a non-gated GELU MLP. Every
-// linear carries a bias.
-void Transformer::block_gpt2(int64_t layer, int64_t pos) {
-    const int64_t dim = cfg_.dim;
-    const int64_t hd = cfg_.head_dim;
-    const int64_t n_heads = cfg_.n_heads;
-    const int64_t kv_dim = cfg_.kv_dim();
-    const int64_t q_dim = cfg_.q_dim();
-    const int64_t group = cfg_.gqa_group();
-    const float scale = 1.0f / std::sqrt((float)hd);
-    const float eps = cfg_.layernorm_eps;
-
-    // --- attention (LayerNorm pre-norm) ---
-    layernorm(xb_.data(), x_.data(),
-              static_cast<const float*>(loader_->getWeight(Role::AttnNorm).data),
-              static_cast<const float*>(loader_->getWeight(Role::AttnNormBias).data), dim, eps);
-    linear(fused_.data(), loader_->getWeight(Role::AttnQKV), xb_.data(), pool_);
-    add_bias(fused_.data(), loader_->getWeight(Role::AttnQKVBias), q_dim + 2 * kv_dim);
-    std::memcpy(q_.data(), fused_.data(),                  q_dim * sizeof(float));
-    std::memcpy(k_.data(), fused_.data() + q_dim,          kv_dim * sizeof(float));
-    std::memcpy(v_.data(), fused_.data() + q_dim + kv_dim, kv_dim * sizeof(float));
-
-    std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));   // no RoPE
-    std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
-
-    for (int64_t h = 0; h < n_heads; ++h) {
-        const float* qh = q_.data() + h * hd;
-        const int64_t kvh = h / group;
-        for (int64_t t = 0; t <= pos; ++t)
-            att_[t] = dot_f32(qh, kv_->k(layer, t) + kvh * hd, hd) * scale;
-        softmax(att_.data(), pos + 1);
-        float* out = attn_out_.data() + h * hd;
-        for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
-        for (int64_t t = 0; t <= pos; ++t)
-            axpy_f32(out, kv_->v(layer, t) + kvh * hd, att_[t], hd);
-    }
+    // --- 7. Attention Out Projection ---
     linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
     add_bias(proj_.data(), loader_->getWeight(Role::AttnOutBias), dim);
-    vec_add_inplace(x_.data(), proj_.data(), dim);
-
-    // --- feed-forward (non-gated GELU MLP) ---
-    layernorm(xb_.data(), x_.data(),
-              static_cast<const float*>(loader_->getWeight(Role::FfnNorm).data),
-              static_cast<const float*>(loader_->getWeight(Role::FfnNormBias).data), dim, eps);
-    linear(hb_.data(), loader_->getWeight(Role::FfnUp), xb_.data(), pool_);
-    add_bias(hb_.data(), loader_->getWeight(Role::FfnUpBias), cfg_.ffn_dim);
-    gelu_inplace(hb_.data(), cfg_.ffn_dim);
-    linear(proj_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
-    add_bias(proj_.data(), loader_->getWeight(Role::FfnDownBias), dim);
-    vec_add_inplace(x_.data(), proj_.data(), dim);
-
-    if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
-}
-
-// Phi-2 block: a *parallel* block — one shared LayerNorm feeds both the
-// attention and the FFN, and both outputs are added to the residual. Fused
-// attn_qkv (with bias), partial-rotary RoPE, non-gated GELU MLP, all biased.
-void Transformer::block_phi2(int64_t layer, int64_t pos) {
-    const int64_t dim = cfg_.dim;
-    const int64_t hd = cfg_.head_dim;
-    const int64_t n_heads = cfg_.n_heads;
-    const int64_t n_kv = cfg_.n_kv_heads;
-    const int64_t kv_dim = cfg_.kv_dim();
-    const int64_t q_dim = cfg_.q_dim();
-    const int64_t group = cfg_.gqa_group();
-    const int64_t rot = cfg_.rope_dim > 0 ? cfg_.rope_dim : hd;
-    const float scale = 1.0f / std::sqrt((float)hd);
-    const float eps = cfg_.layernorm_eps;
-
-    // Shared LayerNorm feeds both sublayers.
-    layernorm(xb_.data(), x_.data(),
-              static_cast<const float*>(loader_->getWeight(Role::AttnNorm).data),
-              static_cast<const float*>(loader_->getWeight(Role::AttnNormBias).data), dim, eps);
-
-    // Attention from xb_.
-    linear(fused_.data(), loader_->getWeight(Role::AttnQKV), xb_.data(), pool_);
-    add_bias(fused_.data(), loader_->getWeight(Role::AttnQKVBias), q_dim + 2 * kv_dim);
-    std::memcpy(q_.data(), fused_.data(),                  q_dim * sizeof(float));
-    std::memcpy(k_.data(), fused_.data() + q_dim,          kv_dim * sizeof(float));
-    std::memcpy(v_.data(), fused_.data() + q_dim + kv_dim, kv_dim * sizeof(float));
-    rope_rot(q_.data(), n_heads, hd, rot, pos, cfg_.rope_theta);
-    rope_rot(k_.data(), n_kv,    hd, rot, pos, cfg_.rope_theta);
-    std::memcpy(kv_->k(layer, pos), k_.data(), kv_dim * sizeof(float));
-    std::memcpy(kv_->v(layer, pos), v_.data(), kv_dim * sizeof(float));
-    for (int64_t h = 0; h < n_heads; ++h) {
-        const float* qh = q_.data() + h * hd;
-        const int64_t kvh = h / group;
-        for (int64_t t = 0; t <= pos; ++t)
-            att_[t] = dot_f32(qh, kv_->k(layer, t) + kvh * hd, hd) * scale;
-        softmax(att_.data(), pos + 1);
-        float* out = attn_out_.data() + h * hd;
-        for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
-        for (int64_t t = 0; t <= pos; ++t)
-            axpy_f32(out, kv_->v(layer, t) + kvh * hd, att_[t], hd);
+    if (b.post_attn_norm) {
+        WeightRef apn = loader_->getWeight(Role::AttnPostNorm);
+        if (apn.valid()) rmsnorm_gemma(proj_.data(), proj_.data(), static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
     }
-    linear(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), pool_);
-    add_bias(proj_.data(), loader_->getWeight(Role::AttnOutBias), dim);   // attn output
-
-    // FFN from the SAME xb_ (parallel), into moe_ as scratch.
-    linear(hb_.data(), loader_->getWeight(Role::FfnUp), xb_.data(), pool_);
-    add_bias(hb_.data(), loader_->getWeight(Role::FfnUpBias), cfg_.ffn_dim);
-    gelu_inplace(hb_.data(), cfg_.ffn_dim);
-    linear(moe_.data(), loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
-    add_bias(moe_.data(), loader_->getWeight(Role::FfnDownBias), dim);    // ffn output
-
-    // Parallel residual: x += attn_out + ffn_out.
     vec_add_inplace(x_.data(), proj_.data(), dim);
-    vec_add_inplace(x_.data(), moe_.data(), dim);
+
+    // --- 8. FFN Pre-Norm ---
+    if (!b.parallel_residual) {
+        WeightRef fn = loader_->getWeight(Role::FfnNorm);
+        switch (b.norm) {
+            case NormKind::LayerNorm:
+                layernorm(xb_.data(), x_.data(), static_cast<const float*>(fn.data),
+                          static_cast<const float*>(loader_->getWeight(Role::FfnNormBias).data), dim, cfg_.layernorm_eps);
+                break;
+            case NormKind::RMSNormGemma:
+                rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(fn.data), dim, cfg_.rms_eps);
+                break;
+            case NormKind::RMSNorm:
+                rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(fn.data), dim, cfg_.rms_eps);
+                break;
+        }
+    }
+
+    // --- 9. FFN ---
+    float* ffn_out = proj_.data();
+    if (b.parallel_residual) ffn_out = moe_.data(); // use moe_ as scratch for parallel residual
+
+    if (b.moe) {
+        const int64_t ff  = cfg_.ffn_dim;
+        const int64_t ne  = b.n_experts;
+        const int64_t k   = std::min<int64_t>(b.n_experts_used, ne);
+
+        linear(router_.data(), loader_->getWeight(Role::FfnGateInp), xb_.data(), pool_);
+        softmax(router_.data(), ne);
+        std::vector<int> ord(ne);
+        for (int64_t e = 0; e < ne; ++e) ord[e] = (int)e;
+        std::partial_sort(ord.begin(), ord.begin() + k, ord.end(),
+                          [&](int lhs, int rhs) { return router_[lhs] > router_[rhs]; });
+        float wsum = 0.f;
+        for (int64_t i = 0; i < k; ++i) wsum += router_[ord[i]];
+        const float winv = wsum > 0.f ? 1.0f / wsum : 0.f;
+
+        WeightRef ge = loader_->getWeight(Role::FfnGateExps);
+        WeightRef ue = loader_->getWeight(Role::FfnUpExps);
+        WeightRef de = loader_->getWeight(Role::FfnDownExps);
+        const int64_t gate_rb = type_nbytes(ge.dtype, dim);
+        const int64_t down_rb = type_nbytes(de.dtype, ff);
+        const uint8_t* gbase = static_cast<const uint8_t*>(ge.data);
+        const uint8_t* ubase = static_cast<const uint8_t*>(ue.data);
+        const uint8_t* dbase = static_cast<const uint8_t*>(de.data);
+
+        for (int64_t d = 0; d < dim; ++d) moe_[d] = 0.f; // clear moe accumulator
+        for (int64_t i = 0; i < k; ++i) {
+            const int64_t e = ord[i];
+            const float w = router_[e] * winv;
+            WeightRef eg{gbase + e * ff * gate_rb, ge.dtype, ff, dim};
+            WeightRef eu{ubase + e * ff * gate_rb, ue.dtype, ff, dim};
+            WeightRef ed{dbase + e * dim * down_rb, de.dtype, dim, ff};
+            linear(hb_.data(),  eg, xb_.data(), pool_);
+            linear(hb2_.data(), eu, xb_.data(), pool_);
+            silu_inplace(hb_.data(), ff);
+            mul_f32(hb_.data(), hb_.data(), hb2_.data(), ff);
+            linear(proj_.data(), ed, hb_.data(), pool_);
+            axpy_f32(moe_.data(), proj_.data(), w, dim);
+        }
+        if (ffn_out != moe_.data()) {
+            std::memcpy(ffn_out, moe_.data(), dim * sizeof(float)); // copy result to output
+        }
+    } else {
+        const int64_t ff = cfg_.ffn_dim;
+        switch (b.ffn) {
+            case FfnKind::GeluMLP:
+                linear(hb_.data(), loader_->getWeight(Role::FfnUp), xb_.data(), pool_);
+                add_bias(hb_.data(), loader_->getWeight(Role::FfnUpBias), ff);
+                gelu_inplace(hb_.data(), ff);
+                linear(ffn_out, loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
+                break;
+            case FfnKind::GeGLU:
+            case FfnKind::SwiGLU:
+                if (b.ffn_fused_gate_up) {
+                    linear(fused_.data(), loader_->getWeight(Role::FfnUp), xb_.data(), pool_);
+                    float* gate = fused_.data();
+                    float* up   = fused_.data() + ff;
+                    if (b.ffn == FfnKind::GeGLU) gelu_inplace(gate, ff);
+                    else silu_inplace(gate, ff);
+                    mul_f32(hb_.data(), gate, up, ff);
+                } else {
+                    linear(hb_.data(),  loader_->getWeight(Role::FfnGate), xb_.data(), pool_);
+                    linear(hb2_.data(), loader_->getWeight(Role::FfnUp),   xb_.data(), pool_);
+                    if (b.ffn == FfnKind::GeGLU) gelu_inplace(hb_.data(), ff);
+                    else silu_inplace(hb_.data(), ff);
+                    mul_f32(hb_.data(), hb_.data(), hb2_.data(), ff);
+                }
+                linear(ffn_out, loader_->getWeight(Role::FfnDown), hb_.data(), pool_);
+                break;
+        }
+        if (b.proj_bias) add_bias(ffn_out, loader_->getWeight(Role::FfnDownBias), dim);
+    }
+
+    // --- 10. Post-FFN Norm ---
+    if (b.post_ffn_norm) {
+        WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
+        if (fpn.valid()) rmsnorm_gemma(ffn_out, ffn_out, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
+    }
+
+    // --- 11. Residual Add ---
+    vec_add_inplace(x_.data(), ffn_out, dim);
 
     if (hidden_hook_) hidden_hook_((int)layer, x_.data(), dim);
 }
@@ -590,14 +372,20 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
 
     // final norm + output projection to logits
     WeightRef on = loader_->output_norm_weight();
-    if (cfg_.use_layernorm)
-        layernorm(xb_.data(), x_.data(), static_cast<const float*>(on.data),
-                  static_cast<const float*>(loader_->output_norm_bias_weight().data),
-                  cfg_.dim, cfg_.layernorm_eps);
-    else if (cfg_.gemma_rmsnorm)
-        rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
-    else
-        rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
+    switch (cfg_.block_spec.norm) {
+        case NormKind::LayerNorm:
+            layernorm(xb_.data(), x_.data(), static_cast<const float*>(on.data),
+                      static_cast<const float*>(loader_->output_norm_bias_weight().data),
+                      cfg_.dim, cfg_.layernorm_eps);
+            break;
+        case NormKind::RMSNormGemma:
+            rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
+            break;
+        case NormKind::RMSNorm:
+        default:
+            rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), cfg_.dim, cfg_.rms_eps);
+            break;
+    }
     loader_->project_output(xb_.data(), logits_.data(), pool_);
     // Gemma 2 caps the final logits (no-op when the cap is 0).
     softcap_inplace(logits_.data(), cfg_.vocab_size, cfg_.final_logit_softcap);
@@ -653,14 +441,20 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
     // projection once, on the last position's residual.
     std::memcpy(x_.data(), resid_.data() + (size_t)(n - 1) * dim, dim * sizeof(float));
     WeightRef on = loader_->output_norm_weight();
-    if (cfg_.use_layernorm)
-        layernorm(xb_.data(), x_.data(), static_cast<const float*>(on.data),
-                  static_cast<const float*>(loader_->output_norm_bias_weight().data),
-                  dim, cfg_.layernorm_eps);
-    else if (cfg_.gemma_rmsnorm)
-        rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
-    else
-        rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+    switch (cfg_.block_spec.norm) {
+        case NormKind::LayerNorm:
+            layernorm(xb_.data(), x_.data(), static_cast<const float*>(on.data),
+                      static_cast<const float*>(loader_->output_norm_bias_weight().data),
+                      dim, cfg_.layernorm_eps);
+            break;
+        case NormKind::RMSNormGemma:
+            rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+            break;
+        case NormKind::RMSNorm:
+        default:
+            rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+            break;
+    }
     loader_->project_output(xb_.data(), logits_.data(), pool_);
     softcap_inplace(logits_.data(), cfg_.vocab_size, cfg_.final_logit_softcap);
     return logits_.data();

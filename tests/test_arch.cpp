@@ -140,7 +140,7 @@ TEST(gemma2_config_discovery) {
     std::string p = scratch("gemma2_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::Gemma2 && cfg.gemma_rmsnorm);
+    CHECK(cfg.arch_kind == Arch::Gemma2 && cfg.block_spec.norm == NormKind::RMSNormGemma);
     APPROX(cfg.embedding_scale, std::sqrt(32.0), 1e-4);
     APPROX(cfg.attn_logit_softcap, 50.0, 1e-4);
     APPROX(cfg.final_logit_softcap, 30.0, 1e-4);
@@ -174,7 +174,7 @@ TEST(gemma3_config_discovery) {
     std::string p = scratch("gemma3_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::Gemma3 && cfg.gemma_rmsnorm);
+    CHECK(cfg.arch_kind == Arch::Gemma3 && cfg.block_spec.norm == NormKind::RMSNormGemma);
     APPROX(cfg.embedding_scale, std::sqrt(32.0), 1e-4);
     APPROX(cfg.rope_theta_local, 10000.0, 1e-3);
     CHECK(cfg.sliding_window_pattern == 3);
@@ -234,7 +234,7 @@ TEST(phi3_config_discovery) {
     std::string p = scratch("phi3_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::Phi3 && cfg.fused_qkv && cfg.fused_gate_up);
+    CHECK(cfg.arch_kind == Arch::Phi3 && cfg.block_spec.qkv_fused && cfg.block_spec.ffn_fused_gate_up);
     CHECK(g.find("blk.0.attn_qkv.weight") != nullptr);
     CHECK(g.find("blk.0.attn_q.weight") == nullptr);   // fused, no separate q
 }
@@ -278,7 +278,7 @@ TEST(moe_config_discovery) {
     std::string p = scratch("moe_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.is_moe() && cfg.n_experts == 4 && cfg.n_experts_used == 2);
+    CHECK(cfg.is_moe() && cfg.block_spec.n_experts == 4 && cfg.block_spec.n_experts_used == 2);
     CHECK(g.find("blk.0.ffn_gate_inp.weight") != nullptr);
     CHECK(g.find("blk.0.ffn_gate_exps.weight") != nullptr);
     CHECK(g.find("blk.0.ffn_gate.weight") == nullptr);   // no dense FFN
@@ -325,9 +325,11 @@ TEST(gpt2_config_discovery) {
     std::string p = scratch("gpt2_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::GPT2 && cfg.use_layernorm && cfg.learned_pos_emb);
+    CHECK(cfg.arch_kind == Arch::GPT2 && cfg.block_spec.norm == NormKind::LayerNorm && cfg.learned_pos_emb);
     CHECK(g.find("position_embd.weight") != nullptr);
     CHECK(g.find("blk.0.attn_qkv.weight") != nullptr);
+    CHECK(g.find("blk.0.attn_qkv.bias") != nullptr);
+    CHECK(cfg.block_spec.qkv_bias);
     CHECK(g.find("blk.0.attn_norm.bias") != nullptr);
     CHECK(g.find("blk.0.ffn_gate.weight") == nullptr);   // non-gated MLP
 }
@@ -353,7 +355,9 @@ TEST(phi2_forward_finite_and_deterministic) {
     std::string p = scratch("phi2_fwd.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::Phi2 && cfg.use_layernorm && cfg.parallel_residual);
+    CHECK(cfg.arch_kind == Arch::Phi2 && cfg.block_spec.norm == NormKind::LayerNorm && cfg.block_spec.parallel_residual);
+    CHECK(g.find("blk.0.attn_qkv.bias") != nullptr);
+    CHECK(cfg.block_spec.qkv_bias);
     std::vector<int64_t> toks = {5, 2, 9, 1, 7};
     auto a = forward_gguf(p, toks), b = forward_gguf(p, toks);
     CHECK(a == b);
@@ -385,7 +389,7 @@ TEST(gemma4_and_phi4_discovery) {
     std::string pg = scratch("gemma4_cfg.gguf"); write_toy_gguf(pg, cg);
     GgufFile gg(pg);
     ModelConfig cfgg = ModelConfig::from_source(gg);
-    CHECK(cfgg.arch_kind == Arch::Gemma4 && cfgg.gemma_rmsnorm);
+    CHECK(cfgg.arch_kind == Arch::Gemma4 && cfgg.block_spec.norm == NormKind::RMSNormGemma);
 
     ToyGgufConfig cp; cp.arch = "phi4";
     cp.n_layers = 2; cp.dim = 32; cp.n_heads = 4; cp.n_kv_heads = 2;
@@ -393,7 +397,7 @@ TEST(gemma4_and_phi4_discovery) {
     std::string pp = scratch("phi4_cfg.gguf"); write_toy_gguf(pp, cp);
     GgufFile gp(pp);
     ModelConfig cfgp = ModelConfig::from_source(gp);
-    CHECK(cfgp.arch_kind == Arch::Phi4 && cfgp.fused_qkv && cfgp.fused_gate_up);
+    CHECK(cfgp.arch_kind == Arch::Phi4 && cfgp.block_spec.qkv_fused && cfgp.block_spec.ffn_fused_gate_up);
 }
 
 TEST(kimi_and_gemma4_forward_pass) {

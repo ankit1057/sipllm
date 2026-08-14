@@ -38,6 +38,56 @@ enum class Arch {
 Arch arch_from_name(const std::string& name);
 const char* arch_name(Arch a);
 
+// Normalization applied at a block's sublayer inputs and the final norm.
+enum class NormKind {
+    RMSNorm,        // x / rms(x) * w                       (Llama, Mistral, Qwen2, Phi3)
+    RMSNormGemma,   // x / rms(x) * (1 + w)                 (Gemma 2 / 3)
+    LayerNorm,      // (x - mean) / std * w + b             (GPT-2, Phi-2)
+};
+
+// Feed-forward network structure.
+enum class FfnKind {
+    SwiGLU,   // down(silu(gate(x)) * up(x))                (Llama family)
+    GeGLU,    // down(gelu(gate(x)) * up(x))                (Gemma)
+    GeluMLP,  // down(gelu(up(x)))  — non-gated             (GPT-2, Phi-2)
+};
+
+// Rotary position embedding mode.
+enum class RopeKind {
+    None,          // no RoPE; positions come from a learned table (GPT-2)
+    Full,          // rotate all head_dim dims
+    Partial,       // rotate only the first rope_dim dims/head (Phi-2/3)
+    Llama3Scaled,  // Full + per-wavelength frequency stretch (Llama 3.x)
+};
+
+const char* norm_kind_name(NormKind);
+const char* ffn_kind_name(FfnKind);
+const char* rope_kind_name(RopeKind);
+
+// Declarative recipe for one transformer block. This is the single source of
+// truth for what a block does; the executor's dispatch is a pure function of
+// these fields. Deriving it from the architecture (below) replaces the scattered
+// `if (arch_kind == ...)` checks with data (#44).
+struct BlockSpec {
+    NormKind norm = NormKind::RMSNorm;   // attn/ffn input norm
+    bool     qkv_fused = false;          // one attn_qkv tensor split into q,k,v (Phi)
+    bool     qkv_bias  = false;          // separate q/k/v projection biases (Qwen2)
+    bool     qk_norm   = false;          // per-head q/k norm before RoPE (Gemma3)
+    RopeKind rope = RopeKind::Full;
+    int64_t  rope_dim = 0;               // rotary dims/head when rope == Partial
+    bool     rope_dual_base = false;     // separate local/global RoPE base (Gemma3)
+    bool     attn_softcap = false;       // cap attention logits before softmax (Gemma2)
+    bool     post_attn_norm = false;     // norm the attn output before the residual (Gemma2)
+    FfnKind  ffn = FfnKind::SwiGLU;
+    bool     ffn_fused_gate_up = false;  // ffn_up packs [gate; up] (Phi3)
+    bool     post_ffn_norm = false;      // norm the ffn output before the residual (Gemma2)
+    bool     parallel_residual = false;  // attn & ffn read one shared norm, both added (Phi2)
+    bool     proj_bias = false;          // attn_output / ffn projections are biased (GPT-2, Phi-2)
+    bool     moe = false;                // router + top-k expert FFNs (Mixtral)
+    int64_t  n_experts = 0;              // total experts (MoE)
+    int64_t  n_experts_used = 0;         // experts per token (MoE)
+};
+
 // Decoder configuration. GQA is expressed via n_kv_heads; when it equals
 // n_heads there is no grouping (Llama-2 7B), when smaller there is (Llama-3 8B
 // uses 8 kv heads for 32 query heads).
@@ -74,33 +124,20 @@ struct ModelConfig {
                rope_high_freq_factor != rope_low_freq_factor && rope_orig_ctx_len > 0;
     }
 
-    // Gemma-family knobs (0 / 1.0 defaults => inert for every other arch).
-    bool    gemma_rmsnorm    = false;  // learned scale is (1 + weight)
+    // The data-driven BlockSpec for this model (Issue #44).
+    BlockSpec block_spec;
+
+    // Remaining global configuration flags (not specific to a single block).
     float   embedding_scale  = 1.f;    // token embeddings *= scale (Gemma: sqrt(dim))
-    float   attn_logit_softcap  = 0.f; // cap on attention scores (Gemma2 ~50)
+    float   attn_logit_softcap = 0.f;  // cap on attention scores (Gemma2 ~50)
     float   final_logit_softcap = 0.f; // cap on output logits (Gemma2 ~30)
     float   query_pre_attn_scalar = 0.f; // attn scale denom; 0 => head_dim
-    // Gemma 3: sliding-window pattern (every Nth layer is global) with a
-    // separate RoPE base for local layers. 0 pattern / 0 local base => all
-    // layers use rope_theta (inert for Gemma2 and everything else).
     float   rope_theta_local = 0.f;      // RoPE base for local (sliding) layers
     int64_t sliding_window_pattern = 0;  // global layer every Nth (Gemma3: 6)
-    // Phi-3: fused QKV / gate+up projections and partial-rotary RoPE.
-    bool    fused_qkv = false;           // one attn_qkv.weight split into q,k,v
-    bool    fused_gate_up = false;       // ffn_up packs [gate;up] (2*ffn rows)
-    int64_t rope_dim = 0;                // rotary dims per head; 0 => full head_dim
-    // Mixtral / MoE: a router selects n_experts_used of n_experts FFNs per token.
-    // n_experts == 0 => a dense FFN (every non-MoE model).
-    int64_t n_experts = 0;               // total experts (expert_count)
-    int64_t n_experts_used = 0;          // experts per token (expert_used_count)
-    bool is_moe() const { return n_experts > 0 && n_experts_used > 0; }
-
-    // GPT-2 / Phi-2 knobs (all false => inert for every other arch).
-    bool    use_layernorm    = false;   // LayerNorm (mean+var) instead of RMSNorm
     bool    learned_pos_emb  = false;   // add position_embd[pos] to the embedding
-    bool    parallel_residual = false;  // attn and FFN both read the same norm (Phi-2)
-    bool    ffn_gelu         = false;   // non-gated GELU MLP: down(gelu(up(x)))
     float   layernorm_eps    = 1e-5f;   // LayerNorm epsilon
+
+    bool is_moe() const { return block_spec.moe; }
 
     int64_t q_dim()  const { return n_heads * head_dim; }
     int64_t kv_dim() const { return n_kv_heads * head_dim; }

@@ -37,31 +37,9 @@ namespace llm {
 // pin against this; importers stamp it into every model they emit.
 constexpr int kSipIRVersion = 1;
 
-// Normalization applied at a block's sublayer inputs and the final norm.
-enum class NormKind {
-    RMSNorm,        // x / rms(x) * w                       (Llama, Mistral, Qwen2, Phi3)
-    RMSNormGemma,   // x / rms(x) * (1 + w)                 (Gemma 2 / 3)
-    LayerNorm,      // (x - mean) / std * w + b             (GPT-2, Phi-2)
-};
-
-// Feed-forward network structure.
-enum class FfnKind {
-    SwiGLU,   // down(silu(gate(x)) * up(x))                (Llama family)
-    GeGLU,    // down(gelu(gate(x)) * up(x))                (Gemma)
-    GeluMLP,  // down(gelu(up(x)))  — non-gated             (GPT-2, Phi-2)
-};
-
-// Rotary position embedding mode.
-enum class RopeKind {
-    None,          // no RoPE; positions come from a learned table (GPT-2)
-    Full,          // rotate all head_dim dims
-    Partial,       // rotate only the first rope_dim dims/head (Phi-2/3)
-    Llama3Scaled,  // Full + per-wavelength frequency stretch (Llama 3.x)
-};
-
-const char* norm_kind_name(NormKind);
-const char* ffn_kind_name(FfnKind);
-const char* rope_kind_name(RopeKind);
+// NormKind / FfnKind / RopeKind and their *_kind_name() helpers now live in
+// model.h as part of the BlockSpec refactor (#44); this header consumes them
+// through the include above rather than redefining them.
 
 // Declarative recipe for one transformer block. This is the single source of
 // truth for what a block does; the executor's dispatch is a pure function of

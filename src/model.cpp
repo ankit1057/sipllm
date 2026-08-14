@@ -62,6 +62,32 @@ static bool first_float(const WeightSource& s, std::initializer_list<std::string
     return false;
 }
 
+const char* norm_kind_name(NormKind k) {
+    switch (k) {
+        case NormKind::RMSNorm:      return "rmsnorm";
+        case NormKind::RMSNormGemma: return "rmsnorm_gemma";
+        case NormKind::LayerNorm:    return "layernorm";
+    }
+    return "?";
+}
+const char* ffn_kind_name(FfnKind k) {
+    switch (k) {
+        case FfnKind::SwiGLU:  return "swiglu";
+        case FfnKind::GeGLU:   return "geglu";
+        case FfnKind::GeluMLP: return "gelu_mlp";
+    }
+    return "?";
+}
+const char* rope_kind_name(RopeKind k) {
+    switch (k) {
+        case RopeKind::None:         return "none";
+        case RopeKind::Full:         return "full";
+        case RopeKind::Partial:      return "partial";
+        case RopeKind::Llama3Scaled: return "llama3_scaled";
+    }
+    return "?";
+}
+
 ModelConfig ModelConfig::from_source(const WeightSource& src) {
     ModelConfig c;
     int64_t v = 0;
@@ -129,7 +155,7 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     if (first_float(src, {K("final_logit_softcapping")}, f))  c.final_logit_softcap = (float)f;
     if (first_float(src, {K("attention.query_pre_attn_scalar")}, f)) c.query_pre_attn_scalar = (float)f;
     if (c.arch_kind == Arch::Gemma2 || c.arch_kind == Arch::Gemma3 || c.arch_kind == Arch::Gemma4) {
-        c.gemma_rmsnorm = true;
+        c.block_spec.norm = NormKind::RMSNormGemma;
         if (c.dim > 0) c.embedding_scale = std::sqrt((float)c.dim);
         if (c.rms_eps == 1e-5f) c.rms_eps = 1e-6f;   // Gemma default eps
     }
@@ -140,24 +166,59 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
 
     // Phi-3 / Phi-4: fused q/k/v and fused gate+up projections, plus partial-rotary RoPE
     // (rope.dimension_count rotary dims per head; the rest pass through).
-    if (c.arch_kind == Arch::Phi3 || c.arch_kind == Arch::Phi4) { c.fused_qkv = true; c.fused_gate_up = true; }
-    if (first_int(src, {K("rope.dimension_count")}, v)) c.rope_dim = v;
+    if (c.arch_kind == Arch::Phi3 || c.arch_kind == Arch::Phi4) {
+        c.block_spec.qkv_fused = true;
+        c.block_spec.ffn_fused_gate_up = true;
+    }
+    if (first_int(src, {K("rope.dimension_count")}, v)) {
+        c.block_spec.rope_dim = v;
+    }
 
     // Mixtral / MoE: expert counts (Mixtral ships as arch "llama" with these set).
-    if (first_int(src, {K("expert_count"), "llama.expert_count"}, v)) c.n_experts = v;
-    if (first_int(src, {K("expert_used_count"), "llama.expert_used_count"}, v)) c.n_experts_used = v;
+    if (first_int(src, {K("expert_count"), "llama.expert_count"}, v)) c.block_spec.n_experts = v;
+    if (first_int(src, {K("expert_used_count"), "llama.expert_used_count"}, v)) c.block_spec.n_experts_used = v;
+    if (c.block_spec.n_experts > 0 && c.block_spec.n_experts_used > 0) c.block_spec.moe = true;
 
     // GPT-2 / Phi-2: LayerNorm architectures. GPT-2 uses learned positional
     // embeddings and no RoPE; Phi-2 is a parallel block with partial-rotary RoPE.
     // Both fuse q/k/v and use a non-gated GELU MLP.
     if (c.arch_kind == Arch::GPT2 || c.arch_kind == Arch::Phi2) {
-        c.use_layernorm = true;
-        c.ffn_gelu = true;
-        c.fused_qkv = true;
+        c.block_spec.norm = NormKind::LayerNorm;
+        c.block_spec.ffn = FfnKind::GeluMLP;
+        c.block_spec.qkv_fused = true;
     }
     if (c.arch_kind == Arch::GPT2) c.learned_pos_emb = true;
-    if (c.arch_kind == Arch::Phi2) c.parallel_residual = true;
+    if (c.arch_kind == Arch::Phi2) c.block_spec.parallel_residual = true;
     if (first_float(src, {K("attention.layer_norm_epsilon")}, f)) c.layernorm_eps = (float)f;
+
+    // Sniff tensors for biases and specific norms.
+    c.block_spec.qkv_bias  = (src.find(names::blk(0, "attn_q.bias")) != nullptr) ||
+                             (src.find(names::blk(0, "attn_qkv.bias")) != nullptr);
+    c.block_spec.qk_norm   = (src.find(names::blk(0, "attn_q_norm.weight")) != nullptr);
+    c.block_spec.post_attn_norm = (src.find(names::blk(0, "post_attention_norm.weight")) != nullptr);
+    c.block_spec.post_ffn_norm  = (src.find(names::blk(0, "post_ffw_norm.weight")) != nullptr);
+    c.block_spec.proj_bias = (src.find(names::blk(0, "attn_output.bias")) != nullptr) ||
+                             (src.find(names::blk(0, "attn_qkv.bias")) != nullptr);
+
+    // RoPE mode logic.
+    if (c.arch_kind == Arch::GPT2) {
+        c.block_spec.rope = RopeKind::None;
+    } else if (c.use_llama3_rope()) {
+        c.block_spec.rope = RopeKind::Llama3Scaled;
+    } else if (c.block_spec.rope_dim > 0 && c.block_spec.rope_dim < c.head_dim) {
+        c.block_spec.rope = RopeKind::Partial;
+    } else {
+        c.block_spec.rope = RopeKind::Full;
+    }
+    c.block_spec.rope_dual_base = (c.rope_theta_local > 0.f && c.sliding_window_pattern > 0);
+
+    // FFN kind logic (if not already set by GPT2/Phi2).
+    if (c.block_spec.ffn == FfnKind::SwiGLU) {
+        if (c.block_spec.norm == NormKind::RMSNormGemma) c.block_spec.ffn = FfnKind::GeGLU;
+    }
+    
+    // Softcapping.
+    c.block_spec.attn_softcap = (c.attn_logit_softcap > 0.f);
 
     if (c.head_dim == 0 && c.n_heads > 0 && c.dim > 0) c.head_dim = c.dim / c.n_heads;
     return c;
