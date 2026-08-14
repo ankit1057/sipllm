@@ -5,6 +5,10 @@
 #include "llm/common.h"
 #include "llm/neon.h"
 #include "llm/mem_plan.h"
+#include "llm/plugin.h"
+#include "llm/session.h"
+
+#include <cstdio>
 
 #include <algorithm>
 
@@ -77,13 +81,84 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     GenStats st;
     st.ctx_max = (int)kv_->max_ctx();
 
+
+    // ---- plugin seam setup (Kosh #52 context, RTK #53 runtime/KV) ----------
+    // A read-only KV snapshot for RTK; expressed as RtkKvView so the contract
+    // survives a future distributed/persisted KV backing.
+    auto kv_view = [&]() -> RtkKvView {
+        RtkKvView v;
+        v.n_layers = kv_->n_layers();
+        v.kv_dim   = kv_->kv_dim();
+        v.seq_len  = pos_;
+        v.capacity = kv_->capacity();
+        v.max_ctx  = kv_->max_ctx();
+        v.bytes    = kv_->bytes();
+        return v;
+    };
+    if (host_ && !host_->inited()) host_->init(cfg_, kv_view());
+    RtkPlugin* rtk = host_ ? host_->rtk() : nullptr;
+    if (rtk) st.rtk_active = true;
     // Tokenize (add BOS only at the very start of a fresh context).
-    bool fresh = (pos_ == 0);
+    bool fresh = reuse_ ? true : (pos_ == 0);  // reuse expects full-context resends
     std::vector<int64_t> prompt_ids = tok_.encode(prompt, /*add_bos=*/fresh);
     st.prompt_tokens = (int)prompt_ids.size();
 
     std::string output;
     const int64_t vocab = cfg_.vocab_size;
+
+    // ---- Kosh seam (context intelligence, #52) ----------------------------
+    // Optimize the token stream before prefill. Guarded: any failure or an
+    // invalid result falls back to the untouched stream, so the default
+    // (no-Kosh) path is byte-identical.
+    if (host_ && host_->kosh()) {
+        KoshRequest kr;
+        kr.cfg       = &cfg_;
+        kr.prompt    = prompt;
+        kr.tokens    = prompt_ids;
+        kr.start_pos = pos_;
+        kr.add_bos   = fresh;
+        KoshResult kres;
+        bool ok = false;
+        try { kres = host_->kosh()->optimize(kr); ok = true; }
+        catch (const std::exception& e) {
+            fprintf(stderr, "[plugin] kosh optimize threw: %s — fallback\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[plugin] kosh optimize threw (unknown) — fallback\n");
+        }
+        // Validate: non-empty, fits the remaining context, ids in vocab range.
+        bool valid = ok && !kres.tokens.empty()
+                     && (int64_t)kres.tokens.size() <= kv_->max_ctx() - pos_;
+        if (valid)
+            for (int64_t id : kres.tokens)
+                if (id < 0 || id >= vocab) { valid = false; break; }
+        if (valid) {
+            st.kosh_active     = true;
+            st.kosh_tokens_in  = kres.tokens_in;
+            st.kosh_tokens_out = kres.tokens_out;
+            prompt_ids         = std::move(kres.tokens);
+            st.prompt_tokens   = (int)prompt_ids.size();
+        }
+    }
+
+    // ---- context reuse (Kosh #52 x RTK #53) --------------------------------
+    // Reuse the KV of the longest common prefix already committed, reprocessing
+    // only the changed tail. Opt-in; when off, reuse_r == 0 and the prefill below
+    // is byte-identical to the plugin-free engine.
+    st.reuse_active = reuse_;
+    int64_t reuse_r = 0;
+    if (reuse_) {
+        const int64_t maxr = std::min((int64_t)prompt_ids.size(),
+                                      (int64_t)committed_.size());
+        while (reuse_r < maxr && prompt_ids[reuse_r] == committed_[reuse_r]) ++reuse_r;
+        // Always reprocess >= 1 token so we obtain last-position logits.
+        if (reuse_r > (int64_t)prompt_ids.size() - 1)
+            reuse_r = (int64_t)prompt_ids.size() - 1;
+        if (reuse_r < 0) reuse_r = 0;
+        pos_ = reuse_r;
+        committed_.resize((size_t)reuse_r);
+        st.reused_prefix_tokens = (int)reuse_r;
+    }
+    st.processed_tokens = (int)((int64_t)prompt_ids.size() - reuse_r);
 
     // ---- prefill (RFC-007: single-pass batched) ----
     // One batched sweep streams the whole model ONCE for the entire prompt,
@@ -91,16 +166,19 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     // re-streamed every layer for every prompt token (P full-model streams).
     double t_start = now_sec();
     int64_t next = -1;
-    if (!prompt_ids.empty()) {
-        LLM_CHECK(pos_ + (int64_t)prompt_ids.size() - 1 < kv_->max_ctx(),
+    if ((int64_t)prompt_ids.size() > reuse_r) {
+        const int64_t n_delta = (int64_t)prompt_ids.size() - reuse_r;
+        LLM_CHECK(pos_ + n_delta - 1 < kv_->max_ctx(),
                   "context window exceeded during prefill");
-        const float* logits = tf_->prefill(prompt_ids.data(),
-                                            (int64_t)prompt_ids.size(), pos_);
-        pos_ += (int64_t)prompt_ids.size();
-        for (int64_t id : prompt_ids) sampler.accept(id);  // seed repetition history
+        const float* logits = tf_->prefill(prompt_ids.data() + reuse_r, n_delta, pos_);
+        pos_ += n_delta;
+        for (int64_t id : prompt_ids) sampler.accept(id);  // full history for repetition
+        committed_.insert(committed_.end(),
+                          prompt_ids.begin() + reuse_r, prompt_ids.end());
         first_logits_.assign(logits, logits + vocab);
         next = sampler.sample(logits, vocab);
     }
+    if (rtk) rtk->on_prefill(kv_view());
     double t_prefill_done = now_sec();
     st.prefill_s = t_prefill_done - t_start;
     st.ttft_s = st.prefill_s;   // first token emerges right after prefill
@@ -120,7 +198,9 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         if (on_token && !on_token(piece, next)) break;
 
         const float* logits = tf_->forward(next, pos_);
+        committed_.push_back(next);
         ++pos_;
+        if (rtk) rtk->on_step(kv_view());
         if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
         next = sampler.sample(logits, vocab);
     }
@@ -136,8 +216,48 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     st.prefetch_hits = loader_->stats().prefetch_hits.load();
     st.prefetch_misses = loader_->stats().prefetch_misses.load();
     st.ctx_used = (int)pos_;
+    if (rtk) {
+        RtkMetrics rm = rtk->metrics();
+        st.rtk_steps         = rm.steps;
+        st.rtk_max_seq       = rm.max_seq;
+        st.rtk_peak_kv_bytes = rm.peak_kv_bytes;
+    }
     if (stats) *stats = st;
     return output;
+}
+
+// FNV-1a over the model's identity (arch + shape). Guards session load against
+// a mismatched model; it does NOT detect same-config-but-different-weights
+// (that is the caller's responsibility — a session pairs with its model).
+static uint64_t session_model_id(const ModelConfig& c) {
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&](uint64_t x) { h ^= x; h *= 1099511628211ULL; };
+    for (unsigned char ch : c.arch) mix(ch);
+    mix((uint64_t)c.n_layers);
+    mix((uint64_t)c.n_heads);
+    mix((uint64_t)c.n_kv_heads);
+    mix((uint64_t)c.dim);
+    mix((uint64_t)c.head_dim);
+    mix((uint64_t)c.ffn_dim);
+    mix((uint64_t)c.vocab_size);
+    return h;
+}
+
+bool Runtime::save_session(const std::string& path) const {
+    return session_write(path, committed_, *kv_, (int64_t)committed_.size(),
+                         session_model_id(cfg_));
+}
+
+bool Runtime::load_session(const std::string& path) {
+    std::vector<int64_t> toks;
+    int64_t sl = 0;
+    if (!session_read(path, toks, *kv_, &sl, session_model_id(cfg_))) {
+        reset();   // leave the runtime clean and usable
+        return false;
+    }
+    committed_ = std::move(toks);
+    pos_ = sl;
+    return true;
 }
 
 } // namespace llm

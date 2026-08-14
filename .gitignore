@@ -24,3 +24,13 @@ CLAUDE.md
 
 # OS cruft
 .DS_Store
+/.claude-artifacts/
+
+# Prebuilt app bundles are distributed via GitHub Releases, never committed
+*.apk
+*.aab
+
+# Local design/planning + agent evidence (kept on-machine, never published)
+docs/superpowers/
+__pycache__/
+*.pyc

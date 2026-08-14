@@ -39,6 +39,87 @@ Confidence:            High — v0.4 numbers measured vs llama.cpp on tinyllama 
                        re-validate at the start of the next wave.
 ```
 
+## [0.5.0] — Plugin runtime + persistent context (2026-08-13)
+
+### Wave 11 — Persistent context: session save/restore (Phase 5)
+
+Turns the in-process cross-turn reuse (Wave 10) into CROSS-PROCESS persistence: a
+Runtime serializes its committed tokens + resident KV cache to a "SIPS" v1 file
+and restores them in a new process, so a session's context survives a restart —
+the checkpoint primitive Nishachar needs.
+
+- **`Runtime::save_session(path)` / `load_session(path)`** (CLI `--save-session F`
+  / `--load-session F`). load restores committed tokens + KV + position; combined
+  with `--reuse`, the next turn reprocesses only the changed tail.
+- **`include/llm/session.{h,cpp}`** — dependency-free "SIPS" v1 serializer
+  (magic / version / **model_id** / n_layers / kv_dim / seq_len / tokens / K / V),
+  using only KVCache's public API. `session_read` hard-refuses on bad
+  magic/version, a **model_id mismatch** (FNV-1a over arch+shape — guards against
+  loading a KV saved from a different model), dim mismatch, or seq_len > ctx.
+  (Residual: same-config-different-weights is the caller's responsibility — a
+  session pairs with its model.)
+
+**Verified on host (macOS / Apple M3):** new `test_session` (4 cases) — restore+reuse
+logits equal a from-scratch full prefill within 1e-4; identical reprompt after
+restore reuses all-but-one token; missing file refused; a same-shape different
+model (differing only in `ffn_dim`, so the dims check passes) refused by model_id.
+Full `make -j4 all && make test` green; every existing suite unchanged (default
+byte-identical). CROSS-PROCESS smoke: process A `--save-session` → process B
+`--load-session --reuse` reused 21/30 tokens. **Deferred:** compressed / partial
+KV persistence, mesh-shared sessions.
+
+### Wave 10 — Cross-turn context reuse (Kosh × RTK), opt-in
+
+The first real Kosh × RTK cooperation and the seed of Phase 5 (persistent
+context). `Runtime::set_context_reuse(true)` (CLI `--reuse`) makes a multi-turn
+session reuse the KV of the longest common prefix already committed and reprocess
+only the changed tail — the win a coding agent (Nishachar) needs, where the
+system prompt + repo context are resent every turn.
+
+- **Mechanism:** attention reads `kv_->k(layer,t)` for `t in [0,pos]`, so reuse is
+  just `pos_ = LCP(new_tokens, committed_)` then `prefill(delta, start_pos=pos_)`
+  — a natural extension of the existing multi-turn prefill; no KVCache surgery.
+- **Invariant:** `reuse_ == false` (default) ⇒ `generate()` byte-identical; the
+  `committed_` token list mirrors `KV[0,pos_)` (a small vector, never read on the default path). The
+  HTTP server (`rt->reset()` per request) is unaffected.
+
+**Verified on host (macOS / Apple M3):** new `test_reuse` (3 cases) — the golden
+gate **reuse ≡ full-prefill** (last-position logits within 1e-4 of a from-scratch
+prefill of the same context), identical-reprompt reuses all-but-one token, first
+turn reuses nothing; `make -j4 all && make test` green with every existing suite
+unchanged (byte-identical default). **Deferred:** Kosh/RTK plugins *governing*
+reuse policy (hint/veto), cross-process / mesh KV, on-disk persistence.
+
+### Wave 9 — Plugin seam: Kosh (context) + RTK (runtime/KV) as opt-in plugins
+
+First seed of the Phase-2 plugin runtime (#51), proving the boundary that Kosh
+(#52, context/token intelligence) and RTK (#53, runtime/KV intelligence) plug
+into — designed **mesh-ready** (the request/KV contracts survive a future
+distributed/persisted backing) but implemented locally first.
+
+- **`PluginHost`** (`include/llm/plugin.h`, `src/plugin.cpp`) — in-process
+  lifecycle + graceful fallback: a plugin whose `init` throws or returns false is
+  disabled and logged, never fatal; a null plugin means the identity path.
+- **Kosh** (`include/llm/kosh.h`, `src/kosh.cpp`) — `KoshPlugin::optimize()`
+  transforms the token stream after tokenize, before prefill; POD
+  `KoshRequest`/`KoshResult` are the future mesh serialization unit. v0 collapses
+  over-long identical-token runs with full `tokens_in -> tokens_out` accounting.
+- **RTK** (`include/llm/rtk.h`, `src/rtk.cpp`) — a runtime-state contract over an
+  abstract `RtkKvView` (dims + bytes, never the concrete `KVCache`). v0 observes
+  seq-len / peak-KV-bytes / step count. (Distinct from the disabled tool-calling
+  `rtk_tools.cpp.bak`; that name is retired here in favor of runtime/KV per #53.)
+- **CLI** — `--kosh [--kosh-max-run N]` and `--rtk` (both default OFF); a
+  one-line metrics block prints when active.
+
+**Regression oracle:** both plugins default OFF => `Runtime::generate()` is
+byte-identical to the plugin-free engine. **Verified on host (macOS / Apple M3):**
+`make -j4 all && make test` green (incl. new `test_plugin` — 9 cases: Kosh
+collapse/identity/metrics, host lifecycle + throw/false-init fallback, RTK
+accounting), existing e2e / 200-generation stress / sampler / arch suites
+unchanged; CLI smoke exercised the `--kosh --rtk` path end-to-end (RTK observed
+real step/seq/byte progression). **Not yet done:** dynamic loading / sandbox /
+permissions (Phase 2 proper), real Kosh compression + RTK precision/persistence.
+
 ## [0.4.0] — Developer Preview (2026-07-27)
 
 ### Wave 8 — Flutter FFI bindings + on-device productization (M6.5, in progress)

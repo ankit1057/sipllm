@@ -19,6 +19,11 @@
 
 namespace llm {
 
+// Optional plugin seam: Kosh (context intelligence) + RTK (runtime/KV
+// intelligence). Forward-declared so runtime.h stays light; the host is owned
+// by the caller and installed via Runtime::set_plugins().
+class PluginHost;
+
 // Open a model file by content sniffing (GGUF or .llmw). Returns a WeightSource.
 std::unique_ptr<WeightSource> open_model(const std::string& path, bool use_mmap = false);
 
@@ -39,6 +44,19 @@ struct GenStats {
     uint64_t prefetch_misses = 0;
     int    ctx_used = 0;
     int    ctx_max = 0;
+    // Plugin seam accounting. Populated only when a PluginHost with the
+    // respective plugin is installed; all zero/false on the default path.
+    bool     kosh_active = false;
+    int64_t  kosh_tokens_in = 0;
+    int64_t  kosh_tokens_out = 0;
+    bool     rtk_active = false;
+    uint64_t rtk_steps = 0;
+    int64_t  rtk_max_seq = 0;
+    size_t   rtk_peak_kv_bytes = 0;
+    // Context-reuse accounting (opt-in; zero on the default path).
+    bool reuse_active = false;
+    int  reused_prefix_tokens = 0;
+    int  processed_tokens = 0;
 };
 
 class Runtime {
@@ -80,7 +98,25 @@ public:
     const std::vector<float>& first_logits() const { return first_logits_; }
 
     // Reset conversation state (KV cache).
-    void reset() { kv_->clear(); pos_ = 0; }
+    void reset() { kv_->clear(); pos_ = 0; committed_.clear(); }
+
+    // Install an optional plugin host (non-owning). Null (default) => generate()
+    // is byte-identical to the plugin-free engine. The host is init()'d lazily
+    // on the first generate() with the live KV view.
+    void set_plugins(PluginHost* host) { host_ = host; }
+
+    // Enable cross-turn context reuse: reuse the KV of the longest common
+    // prefix with the previously committed tokens, reprocessing only the tail.
+    // Opt-in (default off => byte-identical). Set before the first generate().
+    void set_context_reuse(bool on) { reuse_ = on; }
+
+    // Persist / restore the committed context (tokens + KV) to a session file
+    // so cross-turn reuse survives a process restart (Phase 5). Opt-in.
+    // load_session resets the runtime and returns false on any mismatch
+    // (magic/version/model-id/dims) or IO error — a session is only valid for
+    // the model that wrote it.
+    bool save_session(const std::string& path) const;
+    bool load_session(const std::string& path);
 
 private:
     std::unique_ptr<WeightSource> src_;
@@ -94,6 +130,9 @@ private:
     int64_t pos_ = 0;   // absolute position in the KV cache
     ProfileSink profile_sink_;
     std::vector<float> first_logits_;   // logits at first prediction (golden)
+    PluginHost* host_ = nullptr;   // optional, non-owning plugin seam
+    bool reuse_ = false;                 // cross-turn context reuse (opt-in)
+    std::vector<int64_t> committed_;     // mirrors tokens in KV [0,pos_) (for reuse + session save)
 };
 
 } // namespace llm

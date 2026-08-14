@@ -8,6 +8,9 @@
 #include "llm/runtime.h"
 #include "llm/device_profile.h"
 #include "llm/auto_tuner.h"
+#include "llm/plugin.h"
+#include "llm/kosh.h"
+#include "llm/rtk.h"
 
 #include <cinttypes>
 #include <cstdio>
@@ -43,7 +46,9 @@ int main(int argc, char** argv) {
             "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
             "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
             "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy] [--schedule P]\n"
-            "          [--ram-budget BYTES|N{K,M,G}] [--fast]\n",
+            "          [--ram-budget BYTES|N{K,M,G}] [--fast]\n"
+            "          [--kosh] [--kosh-max-run N] [--rtk] [--reuse]\n"
+            "          [--save-session F] [--load-session F]\n",
             argv[0]);
         return 2;
     }
@@ -58,6 +63,10 @@ int main(int argc, char** argv) {
     ThreadPool::SchedulePolicy schedule_policy = ThreadPool::SchedulePolicy::Proportional2;
     SamplerConfig scfg;
     LayerLoader::Options opt;
+    bool use_kosh = false, use_rtk = false;
+    int  kosh_max_run = 8;
+    bool use_reuse = false;
+    std::string save_path, load_path;
 
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -103,6 +112,12 @@ int main(int argc, char** argv) {
         }
         else if (a == "--recalibrate") tuner_opt.force_recalibrate = true;
         else if (a == "--no-autotune") tuner_opt.disable_autotune = true;
+        else if (a == "--kosh") use_kosh = true;
+        else if (a == "--kosh-max-run") kosh_max_run = std::stoi(next("8"));
+        else if (a == "--rtk") use_rtk = true;
+        else if (a == "--reuse") use_reuse = true;
+        else if (a == "--save-session") { save_path = next(""); use_reuse = true; }
+        else if (a == "--load-session") { load_path = next(""); use_reuse = true; }
         else if (a == "--profile-info") {
             HardwareInfo hw = get_hardware_info();
             printf("Hardware ID: %s\n", hw.hardware_id().c_str());
@@ -126,6 +141,16 @@ int main(int argc, char** argv) {
         if (rt.thread_pool()) rt.thread_pool()->set_policy(schedule_policy);
         double load_s = now_sec() - t0;
 
+        // Optional plugin seam: Kosh (context) + RTK (runtime/KV). Default OFF
+        // ⇒ generate() is byte-identical to the plugin-free engine.
+        PluginHost plugins;
+        if (use_kosh) plugins.set_kosh(make_kosh_v0(kosh_max_run));
+        if (use_rtk)  plugins.set_rtk(make_rtk_v0());
+        if (use_kosh || use_rtk) rt.set_plugins(&plugins);
+        if (use_reuse) rt.set_context_reuse(true);
+        if (!load_path.empty() && !rt.load_session(load_path))
+            fprintf(stderr, "warning: could not load session '%s'\n", load_path.c_str());
+
         fprintf(stderr, "model: %s\nconfig: %s\ntokenizer: %s vocab=%lld\n",
                 model.c_str(), rt.config().summary().c_str(),
                 rt.tokenizer().kind() == Tokenizer::Kind::BPE ? "BPE" :
@@ -143,6 +168,8 @@ int main(int argc, char** argv) {
                         printf("%s", piece.c_str()); fflush(stdout); return true;
                     }, &st);
         st.load_s = load_s;
+        if (!save_path.empty() && !rt.save_session(save_path))
+            fprintf(stderr, "warning: could not save session '%s'\n", save_path.c_str());
 
         size_t rss = current_rss_bytes();
         char budget_note[64] = "";
@@ -178,6 +205,25 @@ int main(int argc, char** argv) {
             rt.thread_pool()->stats.steals.load(),
             rt.thread_pool()->stats.idle_time_us.load() / 1000.0,
             rt.thread_pool()->stats.barrier_time_us.load() / 1000.0);
+        if (st.kosh_active || st.rtk_active || st.reuse_active) {
+            fprintf(stderr, "── plugins ───────────────\n");
+            if (st.kosh_active) {
+                double pct = st.kosh_tokens_in > 0
+                    ? 100.0 * (double)(st.kosh_tokens_in - st.kosh_tokens_out) / (double)st.kosh_tokens_in
+                    : 0.0;
+                fprintf(stderr, "kosh:            %lld -> %lld tok (%.1f%% reduced)\n",
+                        (long long)st.kosh_tokens_in, (long long)st.kosh_tokens_out, pct);
+            }
+            if (st.rtk_active) {
+                fprintf(stderr, "rtk:             %llu steps, max seq %lld, peak kv %.1f MB\n",
+                        (unsigned long long)st.rtk_steps, (long long)st.rtk_max_seq,
+                        st.rtk_peak_kv_bytes / 1e6);
+            }
+            if (st.reuse_active) {
+                fprintf(stderr, "reuse:           %d reused / %d processed tokens\n",
+                        st.reused_prefix_tokens, st.processed_tokens);
+            }
+        }
         return 0;
     } catch (const std::exception& e) {
         fprintf(stderr, "\nerror: %s\n", e.what());
