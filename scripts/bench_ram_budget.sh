@@ -37,7 +37,7 @@ CTX="${CTX:-512}"
 PROMPT="${PROMPT:-Once upon a time}"
 THREADS="${THREADS:-4}"
 BUDGETS="${BUDGETS:-0 128M 256M 384M 512M 768M 1200M}"
-MODELS_DIR="${MODELS_DIR:-$HOME/.sipllm/models}"
+MODELS_DIR="/mnt/c/Users/Radhe Shyam/.sipllm/models"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SETTLE="${SETTLE:-4}"   # seconds idle between data points (fanless thermal settle)
 OUTDIR="bench/results"
@@ -61,7 +61,7 @@ mkdir -p "$OUTDIR"
 
 # Candidate models (name -> file), only those present are benched.
 declare -a MODELS NAMES
-add_model() { [ -f "$2" ] && { NAMES+=("$1"); MODELS+=("$2"); }; }
+add_model() { if [ -f "$2" ]; then NAMES+=("$1"); MODELS+=("$2"); fi; }
 add_model smollm2-135m  "$MODELS_DIR/smollm2-135m.gguf"
 add_model tinyllama     "$MODELS_DIR/tinyllama-q4_k_m.gguf"
 [ "${#MODELS[@]}" -gt 0 ] || { echo "FATAL: no models in $MODELS_DIR" >&2; exit 1; }
@@ -83,12 +83,12 @@ for mi in "${!MODELS[@]}"; do
         rss=""; pinned=""; wres=""; streamed=""
         for r in $(seq 1 "$N"); do
             cap="$WORK/cap"
-            /usr/bin/time -l ./build/llm "$path" -p "$PROMPT" -n "$NGEN" --greedy \
+            /usr/bin/time -v ./build/llm "$path" -p "$PROMPT" -n "$NGEN" --greedy \
                 --ctx "$CTX" --threads "$THREADS" "${budget_arg[@]}" >/dev/null 2>"$cap" || true
             d="$(grep -E '^decode:' "$cap" | awk '{print $2}' | head -1)"
             [ -n "$d" ] && echo "$d" >> "$decs"
             # last run supplies the (deterministic) residency + RSS facts
-            rss="$(grep 'maximum resident set size' "$cap" | awk '{print $1}' | head -1)"
+            rss="$(grep 'Maximum resident set size' "$cap" | awk -F': ' '{print $2 * 1024}' | head -1)"
             pinned="$(grep -E '^pinned layers:' "$cap" | awk '{print $3}' | head -1)"
             wres="$(grep -E '^weights resident:' "$cap" | sed -E 's/.*:([0-9.]+) MB.*/\1/' | head -1)"
             streamed="$(grep -E '^streamed:' "$cap" | sed -E 's/.*:[[:space:]]*([0-9.]+) MB.*/\1/' | head -1)"
