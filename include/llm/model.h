@@ -134,6 +134,7 @@ struct ModelConfig {
     float   query_pre_attn_scalar = 0.f; // attn scale denom; 0 => head_dim
     float   rope_theta_local = 0.f;      // RoPE base for local (sliding) layers
     int64_t sliding_window_pattern = 0;  // global layer every Nth (Gemma3: 6)
+    int64_t sliding_window = 0;          // max context attention size (Mistral: 4096)
     bool    learned_pos_emb  = false;   // add position_embd[pos] to the embedding
     float   layernorm_eps    = 1e-5f;   // LayerNorm epsilon
 
