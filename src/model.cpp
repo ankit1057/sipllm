@@ -163,6 +163,7 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     // the pattern that says which layers are global.
     if (first_float(src, {K("rope.local_freq_base")}, f)) c.rope_theta_local = (float)f;
     if (first_int(src, {K("attention.sliding_window_pattern")}, v)) c.sliding_window_pattern = v;
+    if (first_int(src, {K("attention.sliding_window")}, v)) c.sliding_window = v;
 
     // Phi-3 / Phi-4: fused q/k/v and fused gate+up projections, plus partial-rotary RoPE
     // (rope.dimension_count rotary dims per head; the rest pass through).

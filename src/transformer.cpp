@@ -205,17 +205,19 @@ void Transformer::block(int64_t layer, int64_t pos) {
     // --- 6. Attention Math ---
     const float scale = cfg_.query_pre_attn_scalar > 0.f ? (1.0f / std::sqrt(cfg_.query_pre_attn_scalar)) 
                                                          : (1.0f / std::sqrt((float)hd));
+    const int64_t start_t = cfg_.sliding_window > 0 ? std::max<int64_t>(0, pos - cfg_.sliding_window + 1) : 0;
+    const int64_t window_len = pos - start_t + 1;
     for (int64_t h = 0; h < n_heads; ++h) {
         const float* qh = q_.data() + h * hd;
         const int64_t kvh = h / group;
-        for (int64_t t = 0; t <= pos; ++t) {
+        for (int64_t t = start_t; t <= pos; ++t) {
             att_[t] = dot_f32(qh, kv_->k(layer, t) + kvh * hd, hd) * scale;
         }
-        if (b.attn_softcap) softcap_inplace(att_.data(), pos + 1, cfg_.attn_logit_softcap);
-        softmax(att_.data(), pos + 1);
+        if (b.attn_softcap) softcap_inplace(att_.data() + start_t, window_len, cfg_.attn_logit_softcap);
+        softmax(att_.data() + start_t, window_len);
         float* out = attn_out_.data() + h * hd;
         for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
-        for (int64_t t = 0; t <= pos; ++t) {
+        for (int64_t t = start_t; t <= pos; ++t) {
             axpy_f32(out, kv_->v(layer, t) + kvh * hd, att_[t], hd);
         }
     }
