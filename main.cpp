@@ -10,6 +10,7 @@
 #include "llm/auto_tuner.h"
 #include "llm/plugin.h"
 #include "llm/kosh.h"
+#include "llm/semantic_cache.h"
 #include "llm/rtk.h"
 
 #include <cinttypes>
@@ -66,6 +67,7 @@ int main(int argc, char** argv) {
     LayerLoader::Options opt;
     bool use_kosh = false, use_rtk = false;
     int  kosh_max_run = 8;
+    size_t semantic_cache_budget = 0;
     bool use_reuse = false;
     std::string save_path, load_path;
 
@@ -114,6 +116,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--recalibrate") tuner_opt.force_recalibrate = true;
         else if (a == "--no-autotune") tuner_opt.disable_autotune = true;
+        else if (a == "--semantic-cache-budget") semantic_cache_budget = parse_bytes(next("0"));
         else if (a == "--kosh") use_kosh = true;
         else if (a == "--kosh-max-run") kosh_max_run = std::stoi(next("8"));
         else if (a == "--rtk") use_rtk = true;
@@ -151,6 +154,7 @@ int main(int argc, char** argv) {
         if (use_rtk)  plugins.set_rtk(make_rtk_v0());
         if (use_kosh || use_rtk) rt.set_plugins(&plugins);
         if (use_reuse) rt.set_context_reuse(true);
+        if (semantic_cache_budget > 0) rt.enable_semantic_cache(semantic_cache_budget);
         if (!load_path.empty() && !rt.load_session(load_path))
             fprintf(stderr, "warning: could not load session '%s'\n", load_path.c_str());
 
@@ -208,7 +212,10 @@ int main(int argc, char** argv) {
             rt.thread_pool()->stats.steals.load(),
             rt.thread_pool()->stats.idle_time_us.load() / 1000.0,
             rt.thread_pool()->stats.barrier_time_us.load() / 1000.0);
-        if (st.kosh_active || st.rtk_active || st.reuse_active) {
+        if (st.kosh_active || st.rtk_active || st.reuse_active || st.semantic_cache_hits > 0) {
+            if (st.semantic_cache_hits > 0) {
+                fprintf(stderr, "semantic cache:  %llu hits\n", (unsigned long long)st.semantic_cache_hits);
+            }
             fprintf(stderr, "── plugins ───────────────\n");
             if (st.kosh_active) {
                 double pct = st.kosh_tokens_in > 0

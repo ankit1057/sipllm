@@ -91,6 +91,20 @@ public:
     const float* k(int64_t layer, int64_t pos) const { return (const float*)k_ptr(layer, pos); }
     const float* v(int64_t layer, int64_t pos) const { return (const float*)v_ptr(layer, pos); }
 
+    // ---- Semantic Cache Extensions ----
+    // Return raw pointers to the start of a layer's KV block (used by memcpy bypass)
+    void* k_ptr_layer(int64_t layer) { return (void*)(k_.data() + offset_bytes(layer, 0)); }
+    void* v_ptr_layer(int64_t layer) { return (void*)(v_.data() + offset_bytes(layer, 0)); }
+    
+    // Inject a contiguous block of cached memory into this KV cache
+    void inject(int64_t layer, const float* k_src, const float* v_src, int64_t num_positions) {
+        if (precision_ != KVPrecision::FP32) throw std::runtime_error("SemanticCache only supports FP32 currently");
+        if (num_positions > cap_) grow_to(num_positions);
+        std::memcpy(k_ptr_layer(layer), k_src, num_positions * bytes_per_row_);
+        std::memcpy(v_ptr_layer(layer), v_src, num_positions * bytes_per_row_);
+        if (num_positions > seq_len_) seq_len_ = num_positions;
+    }
+
     size_t bytes() const { return k_.size() + v_.size(); }
 
 private:

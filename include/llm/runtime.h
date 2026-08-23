@@ -12,6 +12,7 @@
 #include "llm/tokenizer.h"
 #include "llm/transformer.h"
 #include "llm/weight_source.h"
+#include "llm/semantic_cache.h"
 
 #include <functional>
 #include <memory>
@@ -57,6 +58,7 @@ struct GenStats {
     bool reuse_active = false;
     int  reused_prefix_tokens = 0;
     int  processed_tokens = 0;
+    uint64_t semantic_cache_hits = 0;
 };
 
 class Runtime {
@@ -112,6 +114,9 @@ public:
     // Opt-in (default off => byte-identical). Set before the first generate().
     void set_context_reuse(bool on) { reuse_ = on; }
 
+    // Enable Semantic Cache (Radix Tree + memcpy injection)
+    void enable_semantic_cache(size_t max_bytes);
+
     // Persist / restore the committed context (tokens + KV) to a session file
     // so cross-turn reuse survives a process restart (Phase 5). Opt-in.
     // load_session resets the runtime and returns false on any mismatch
@@ -134,7 +139,8 @@ private:
     std::vector<float> first_logits_;   // logits at first prediction (golden)
     PluginHost* host_ = nullptr;   // optional, non-owning plugin seam
     bool reuse_ = false;                 // cross-turn context reuse (opt-in)
-    std::vector<int64_t> committed_;     // mirrors tokens in KV [0,pos_) (for reuse + session save)
+    std::vector<int64_t> committed_;
+    std::unique_ptr<SemanticCache> semantic_cache_;     // mirrors tokens in KV [0,pos_) (for reuse + session save)
 };
 
 } // namespace llm
