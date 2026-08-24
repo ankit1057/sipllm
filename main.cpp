@@ -57,6 +57,7 @@ int main(int argc, char** argv) {
     int max_new = 64, threads = 0, buffers = 2, ctx = 0;
     size_t ram_budget = 0;   // #37: total peak-RSS target (0 = unlimited)
     bool force_budget = false;
+    bool kv_q8 = false;
     AutoTunerOptions tuner_opt;
     bool schedule_overridden = false;
     bool threads_overridden = false;
@@ -89,6 +90,7 @@ int main(int argc, char** argv) {
         else if (a == "--buffers") buffers = std::stoi(next("2"));
         else if (a == "--ram-budget") ram_budget = parse_bytes(next("0"));
         else if (a == "--ram-budget-force") force_budget = true;
+        else if (a == "--kv-q8") kv_q8 = true;
         else if (a == "--fast") opt.fast_quant = true;
         else if (a == "--ctx") ctx = std::stoi(next("0"));
         else if (a == "--schedule") {
@@ -137,7 +139,8 @@ int main(int argc, char** argv) {
         if (!schedule_overridden && rp.schedule_policy >= 0) schedule_policy = (ThreadPool::SchedulePolicy)rp.schedule_policy;
         
         auto src = open_model(model, opt.use_mmap);
-        Runtime rt(std::move(src), opt, ctx, threads, ram_budget, force_budget);
+        KVPrecision kv_precision = kv_q8 ? KVPrecision::Q8_0 : KVPrecision::FP32;
+        Runtime rt(std::move(src), opt, ctx, threads, ram_budget, force_budget, kv_precision);
         if (rt.thread_pool()) rt.thread_pool()->set_policy(schedule_policy);
         double load_s = now_sec() - t0;
 

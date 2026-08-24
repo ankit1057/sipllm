@@ -23,22 +23,31 @@
 #pragma once
 
 #include "llm/common.h"
+#include "llm/dtype.h"
 
 #include <cstring>
 #include <vector>
 
 namespace llm {
 
+enum class KVPrecision { FP32, Q8_0 };
+
 class KVCache {
 public:
-    KVCache(int64_t n_layers, int64_t kv_dim, int64_t max_ctx)
-        : n_layers_(n_layers), kv_dim_(kv_dim), max_ctx_(max_ctx) {
+    KVCache(int64_t n_layers, int64_t kv_dim, int64_t max_ctx, KVPrecision precision = KVPrecision::FP32)
+        : n_layers_(n_layers), kv_dim_(kv_dim), max_ctx_(max_ctx), precision_(precision) {
         // Start with a small capacity instead of the full max_ctx window. Most
         // sessions are far shorter than the trained context, and growth is
         // amortized O(1) via doubling. Never exceed max_ctx (the hard ceiling
         // the runtime enforces before every forward) or underflow to zero.
         cap_ = max_ctx_ < kInitialCap ? max_ctx_ : kInitialCap;
         if (cap_ < 1) cap_ = max_ctx_ < 1 ? 1 : max_ctx_;
+        
+        if (precision_ == KVPrecision::Q8_0) {
+            bytes_per_row_ = type_nbytes(DType::Q8_0, kv_dim_);
+        } else {
+            bytes_per_row_ = kv_dim_ * sizeof(float);
+        }
         alloc(cap_);
     }
 
@@ -47,6 +56,7 @@ public:
     int64_t n_layers() const { return n_layers_; }
     int64_t seq_len()  const { return seq_len_; }
     int64_t capacity() const { return cap_; }   // currently-resident positions
+    KVPrecision precision() const { return precision_; }
 
     // Advance the filled length after writing position `pos`. Also ensures the
     // backing store can hold `n` positions (writes normally grow it first via
@@ -61,34 +71,39 @@ public:
     // grow the cache so `pos` is resident before handing back the pointer. The
     // const overloads are read-only and never grow (every position read has
     // already been written, hence is within cap_).
-    float* k(int64_t layer, int64_t pos) {
+    void* k_ptr(int64_t layer, int64_t pos) {
         if (pos >= cap_) grow_to(pos + 1);
-        return k_.data() + offset(layer, pos);
+        return (void*)(k_.data() + offset_bytes(layer, pos));
     }
-    float* v(int64_t layer, int64_t pos) {
+    void* v_ptr(int64_t layer, int64_t pos) {
         if (pos >= cap_) grow_to(pos + 1);
-        return v_.data() + offset(layer, pos);
+        return (void*)(v_.data() + offset_bytes(layer, pos));
     }
-    const float* k(int64_t layer, int64_t pos) const {
-        return k_.data() + offset(layer, pos);
+    const void* k_ptr(int64_t layer, int64_t pos) const {
+        return (const void*)(k_.data() + offset_bytes(layer, pos));
     }
-    const float* v(int64_t layer, int64_t pos) const {
-        return v_.data() + offset(layer, pos);
+    const void* v_ptr(int64_t layer, int64_t pos) const {
+        return (const void*)(v_.data() + offset_bytes(layer, pos));
     }
 
-    size_t bytes() const { return (k_.size() + v_.size()) * sizeof(float); }
+    float* k(int64_t layer, int64_t pos) { return (float*)k_ptr(layer, pos); }
+    float* v(int64_t layer, int64_t pos) { return (float*)v_ptr(layer, pos); }
+    const float* k(int64_t layer, int64_t pos) const { return (const float*)k_ptr(layer, pos); }
+    const float* v(int64_t layer, int64_t pos) const { return (const float*)v_ptr(layer, pos); }
+
+    size_t bytes() const { return k_.size() + v_.size(); }
 
 private:
     static constexpr int64_t kInitialCap = 64;
 
-    size_t offset(int64_t layer, int64_t pos) const {
-        return (((size_t)layer * cap_) + pos) * kv_dim_;
+    size_t offset_bytes(int64_t layer, int64_t pos) const {
+        return (((size_t)layer * cap_) + pos) * bytes_per_row_;
     }
 
     void alloc(int64_t cap) {
-        const size_t per = (size_t)n_layers_ * cap * kv_dim_;
-        k_.assign(per, 0.f);
-        v_.assign(per, 0.f);
+        const size_t per = (size_t)n_layers_ * cap * bytes_per_row_;
+        k_.assign(per, 0);
+        v_.assign(per, 0);
     }
 
     // Grow capacity to at least `need` positions (doubling, capped at max_ctx),
@@ -99,15 +114,15 @@ private:
         while (nc < need) nc <<= 1;
         if (nc > max_ctx_) nc = max_ctx_;   // need <= max_ctx_ (runtime-enforced)
 
-        const size_t per = (size_t)n_layers_ * nc * kv_dim_;
-        std::vector<float> nk(per, 0.f), nv(per, 0.f);
+        const size_t per = (size_t)n_layers_ * nc * bytes_per_row_;
+        std::vector<uint8_t> nk(per, 0), nv(per, 0);
         // Copy each layer's rows from the old stride (cap_) to the new (nc).
-        const size_t old_row = (size_t)cap_ * kv_dim_;
+        const size_t old_row = (size_t)cap_ * bytes_per_row_;
         for (int64_t l = 0; l < n_layers_; ++l) {
-            const size_t src = (size_t)l * cap_ * kv_dim_;
-            const size_t dst = (size_t)l * nc * kv_dim_;
-            std::memcpy(nk.data() + dst, k_.data() + src, old_row * sizeof(float));
-            std::memcpy(nv.data() + dst, v_.data() + src, old_row * sizeof(float));
+            const size_t src = (size_t)l * cap_ * bytes_per_row_;
+            const size_t dst = (size_t)l * nc * bytes_per_row_;
+            std::memcpy(nk.data() + dst, k_.data() + src, old_row);
+            std::memcpy(nv.data() + dst, v_.data() + src, old_row);
         }
         k_.swap(nk);
         v_.swap(nv);
@@ -115,9 +130,11 @@ private:
     }
 
     int64_t n_layers_, kv_dim_, max_ctx_;
+    KVPrecision precision_;
+    size_t bytes_per_row_;
     int64_t cap_ = 0;
     int64_t seq_len_ = 0;
-    std::vector<float> k_, v_;
+    std::vector<uint8_t> k_, v_;
 };
 
 } // namespace llm

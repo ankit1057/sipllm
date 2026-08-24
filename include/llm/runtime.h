@@ -63,9 +63,11 @@ class Runtime {
 public:
     // Takes ownership of the source. opt controls residency/prefetch/mmap.
     // ram_budget_total (bytes, 0 = unlimited) is a TOTAL peak-RSS target; the
-    // ctor derives the loader's weight ceiling from it (subtracting KV + scratch).
+    // runtime calculates how many layers can be resident alongside the KV cache,
+    // setting loader capacity. If force_budget is true, throws if the minimum
+    // working set exceeds the budget.
     Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
-            int max_ctx = 0, int threads = 0, size_t ram_budget_total = 0, bool force_budget = false);
+            int max_ctx = 0, int threads = 0, size_t ram_budget_total = 0, bool force_budget = false, KVPrecision kv_precision = KVPrecision::FP32);
 
     const ModelConfig& config() const { return cfg_; }
     const Tokenizer&   tokenizer() const { return tok_; }

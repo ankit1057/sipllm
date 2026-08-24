@@ -130,7 +130,9 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
     for (int ctx : ctx_candidates) {
         size_t attn = (size_t)ctx * sizeof(float);
         size_t resid = (size_t)ctx * cfg.dim * sizeof(float);
-        size_t kv = (size_t)cfg.n_layers * cfg.kv_dim() * ctx * 2 * sizeof(float);
+        
+        size_t kv_row_bytes = req.kv_precision == KVPrecision::Q8_0 ? type_nbytes(DType::Q8_0, cfg.kv_dim()) : cfg.kv_dim() * sizeof(float);
+        size_t kv = (size_t)cfg.n_layers * kv_row_bytes * ctx * 2;
 
         std::vector<bool> stream_head_opts = {req.stream_head_req};
         if (!req.stream_head_req && !tied) stream_head_opts.push_back(true);
