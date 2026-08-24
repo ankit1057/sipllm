@@ -35,7 +35,7 @@ static size_t runtime_reserve_bytes(const ModelConfig& c, int ctx) {
 }
 
 Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
-                 int max_ctx, int threads, size_t ram_budget_total, bool force_budget)
+                 int max_ctx, int threads, size_t ram_budget_total, bool force_budget, KVPrecision kv_precision)
     : src_(std::move(src)), opt_(opt) {
     cfg_ = ModelConfig::from_source(*src_);
     set_fast_quant(opt_.fast_quant);   // #demo: opt-in int8 SDOT for Q8_0 (--fast)
@@ -51,6 +51,7 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     req.stream_head_req = opt_.stream_lm_head;
     req.force = force_budget;
     req.default_ctx_cap = 4096;
+    req.kv_precision = kv_precision;
 
     MemoryPlan plan = plan_memory(*src_, cfg_, req);
 
@@ -69,7 +70,7 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     pool_ = std::make_unique<ThreadPool>(threads);
     opt_.dequant_pool = pool_.get();
     loader_ = std::make_unique<LayerLoader>(src_.get(), cfg_, opt_);
-    kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx);
+    kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx, kv_precision);
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
     tok_ = Tokenizer::from_source(*src_);
 }

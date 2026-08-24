@@ -241,12 +241,27 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
     // --- 5. Cache Write & 6. Attention Math ---
     const float scale = cfg_.query_pre_attn_scalar > 0.f ? (1.0f / std::sqrt(cfg_.query_pre_attn_scalar)) 
                                                          : (1.0f / std::sqrt((float)hd));
+    std::vector<float> head_scratch;
+    if (kv_->precision() == KVPrecision::Q8_0) head_scratch.resize(hd);
+
     for (int64_t i = 0; i < bs; ++i) {
         int64_t pos_i = pos + i;
         float* ki = k_.data() + i * kv_dim;
         float* vi = v_.data() + i * kv_dim;
-        std::memcpy(kv_->k(layer, pos_i), ki, kv_dim * sizeof(float));
-        std::memcpy(kv_->v(layer, pos_i), vi, kv_dim * sizeof(float));
+
+        if (kv_->precision() == KVPrecision::Q8_0) {
+            const int64_t q8_bytes = type_nbytes(DType::Q8_0, hd);
+            const int64_t n_kv_heads = cfg_.n_kv_heads;
+            for (int64_t h = 0; h < n_kv_heads; ++h) {
+                uint8_t* k8 = (uint8_t*)kv_->k_ptr(layer, pos_i) + h * q8_bytes;
+                uint8_t* v8 = (uint8_t*)kv_->v_ptr(layer, pos_i) + h * q8_bytes;
+                quantize_q8_0(ki + h * hd, k8, hd);
+                quantize_q8_0(vi + h * hd, v8, hd);
+            }
+        } else {
+            std::memcpy(kv_->k_ptr(layer, pos_i), ki, kv_dim * sizeof(float));
+            std::memcpy(kv_->v_ptr(layer, pos_i), vi, kv_dim * sizeof(float));
+        }
 
         float* qi = q_.data() + i * q_dim;
         float* attn_out_i = attn_out_.data() + i * q_dim;
@@ -258,14 +273,26 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             const float* qh = qi + h * hd;
             const int64_t kvh = h / group;
             for (int64_t t = start_t; t <= pos_i; ++t) {
-                att_[t] = dot_f32(qh, kv_->k(layer, t) + kvh * hd, hd) * scale;
+                if (kv_->precision() == KVPrecision::Q8_0) {
+                    const uint8_t* k8 = (const uint8_t*)kv_->k_ptr(layer, t) + kvh * type_nbytes(DType::Q8_0, hd);
+                    dequantize_row(DType::Q8_0, k8, head_scratch.data(), hd);
+                    att_[t] = dot_f32(qh, head_scratch.data(), hd) * scale;
+                } else {
+                    att_[t] = dot_f32(qh, (const float*)kv_->k_ptr(layer, t) + kvh * hd, hd) * scale;
+                }
             }
             if (b.attn_softcap) softcap_inplace(att_.data() + start_t, window_len, cfg_.attn_logit_softcap);
             softmax(att_.data() + start_t, window_len);
             float* out = attn_out_i + h * hd;
             for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
             for (int64_t t = start_t; t <= pos_i; ++t) {
-                axpy_f32(out, kv_->v(layer, t) + kvh * hd, att_[t], hd);
+                if (kv_->precision() == KVPrecision::Q8_0) {
+                    const uint8_t* v8 = (const uint8_t*)kv_->v_ptr(layer, t) + kvh * type_nbytes(DType::Q8_0, hd);
+                    dequantize_row(DType::Q8_0, v8, head_scratch.data(), hd);
+                    axpy_f32(out, head_scratch.data(), att_[t], hd);
+                } else {
+                    axpy_f32(out, (const float*)kv_->v_ptr(layer, t) + kvh * hd, att_[t], hd);
+                }
             }
         }
     }

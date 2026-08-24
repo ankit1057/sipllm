@@ -32,20 +32,23 @@
 
 #include <string>
 
+#include "llm/kv_cache.h" // For KVPrecision
+
 namespace llm {
 
 // What the user asked for. budget_bytes == 0 means "unlimited" — the planner is
 // not consulted and the legacy path runs byte-for-byte unchanged.
 struct BudgetRequest {
-    size_t    budget_bytes    = 0;      // total peak-RSS target (0 = unlimited)
-    int       ctx_req         = 0;      // requested --ctx (0 => model/default)
-    bool      ctx_explicit    = false;  // true iff the user passed --ctx
-    int       default_ctx_cap = 4096;   // edge-friendly clamp for a defaulted ctx
-    int       n_buffers_req   = 2;      // requested streaming ring depth
-    bool      async_req       = true;   // false => --no-async (ring pinned to 1)
-    Residency residency       = Residency::Quantized;
-    bool      stream_head_req = false;  // user forced --stream-lm-head
-    bool      force           = false;  // --ram-budget-force: run even if impossible
+    size_t      budget_bytes    = 0;      // total peak-RSS target (0 = unlimited)
+    int         ctx_req         = 0;      // requested --ctx (0 => model/default)
+    bool        ctx_explicit    = false;  // true iff the user passed --ctx
+    int         default_ctx_cap = 4096;   // edge-friendly clamp for a defaulted ctx
+    int         n_buffers_req   = 2;      // requested streaming ring depth
+    bool        async_req       = true;   // false => --no-async (ring pinned to 1)
+    Residency   residency       = Residency::Quantized;
+    bool        stream_head_req = false;  // user forced --stream-lm-head
+    bool        force           = false;  // --ram-budget-force: run even if impossible
+    KVPrecision kv_precision    = KVPrecision::FP32;
 };
 
 // Itemized ledger (bytes). Every line is a real contributor to peak RSS; the sum
