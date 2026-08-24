@@ -424,6 +424,26 @@ void matmul_quant(float* y, const void* W, DType t, const float* x,
         body(0, 0, n_out);
 }
 
+void matmul_quant_batch(float* Y, const void* W, DType t, const float* X,
+                        int64_t m, int64_t n_out, int64_t n_in, ThreadPool* pool) {
+    const int64_t row_bytes = type_nbytes(t, n_in);
+    const uint8_t* base = static_cast<const uint8_t*>(W);
+
+    auto body = [&](int, int64_t begin, int64_t end) {
+        std::vector<float> row(n_in);
+        for (int64_t o = begin; o < end; ++o) {
+            dequantize_row(t, base + o * row_bytes, row.data(), n_in);
+            for (int64_t b = 0; b < m; ++b) {
+                Y[b * n_out + o] = dot_f32(row.data(), X + b * n_in, n_in);
+            }
+        }
+    };
+    if (pool && pool->size() > 1 && n_out >= 32)
+        pool->parallel_for(n_out, body);
+    else
+        body(0, 0, n_out);
+}
+
 // ---- reference quantizers -------------------------------------------------
 void quantize_q8_0(const float* src, void* dst, int64_t n) {
     LLM_CHECK(n % QK == 0, "quantize_q8_0: n must be multiple of 32");
