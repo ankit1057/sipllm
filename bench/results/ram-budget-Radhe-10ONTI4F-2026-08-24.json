@@ -1,0 +1,83 @@
+{
+  "meta": {
+    "benchmark": "ram_budget_sweep (#37)",
+    "host": "Radhe-10ONTI4F",
+    "date": "2026-08-24",
+    "os": "Linux 6.18.33.2-microsoft-standard-WSL2",
+    "cpu": "unknown",
+    "git_commit": "7ddd4c0",
+    "gen_tokens": 24,
+    "ctx": 512,
+    "prompt": "Once upon a time",
+    "threads": 4,
+    "median_of_n": 3,
+    "cache_state": "warm",
+    "peak_rss_source": "/usr/bin/time -l 'maximum resident set size' (bytes)",
+    "reproduce": "./scripts/bench_ram_budget.sh"
+  },
+  "ram_budget_sweep": [
+    {
+      "model": "tinyllama",
+      "ram_budget": "0",
+      "decode_tok_s": 0.35,
+      "peak_rss_mb": 125.2,
+      "pinned_layers": 0,
+      "weights_resident_mb": 106.5,
+      "streamed_mb": 14411.2
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "128M",
+      "decode_tok_s": 0.33,
+      "peak_rss_mb": 73.3,
+      "pinned_layers": 1,
+      "weights_resident_mb": 52.7,
+      "streamed_mb": 13741.6
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "256M",
+      "decode_tok_s": 0.42,
+      "peak_rss_mb": 202.7,
+      "pinned_layers": 4,
+      "weights_resident_mb": 183.9,
+      "streamed_mb": 11882.2
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "384M",
+      "decode_tok_s": 0.53,
+      "peak_rss_mb": 336.1,
+      "pinned_layers": 9,
+      "weights_resident_mb": 317.2,
+      "streamed_mb": 8683.7
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "512M",
+      "decode_tok_s": 0.88,
+      "peak_rss_mb": 473.1,
+      "pinned_layers": 14,
+      "weights_resident_mb": 447.4,
+      "streamed_mb": 5559.8
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "768M",
+      "decode_tok_s": 5.4,
+      "peak_rss_mb": 646.2,
+      "pinned_layers": 22,
+      "weights_resident_mb": 630.2,
+      "streamed_mb": 576.4
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "1200M",
+      "decode_tok_s": 4.59,
+      "peak_rss_mb": 646.3,
+      "pinned_layers": 22,
+      "weights_resident_mb": 630.2,
+      "streamed_mb": 576.4
+    }
+  ]
+}
