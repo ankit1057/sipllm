@@ -36,6 +36,12 @@ void dequantize_row(DType t, const void* src, float* dst, int64_t n);
 void matmul_quant(float* y, const void* W, DType t, const float* x,
                   int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
 
+// Batched fused quantized matmul: Y = X @ W^T
+//   X: [m, n_in] row-major, W: [n_out, n_in] row-major, Y: [m, n_out]
+// This amortizes the cost of dequantizing W across m positions.
+void matmul_quant_batch(float* Y, const void* W, DType t, const float* X,
+                        int64_t m, int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+
 // ---- reference quantizers (for tests / fixtures) --------------------------
 // dst must hold type_nbytes(Q*, n) bytes; n a multiple of 32.
 void quantize_q8_0(const float* src, void* dst, int64_t n);

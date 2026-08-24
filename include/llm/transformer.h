@@ -80,7 +80,7 @@ public:
     void set_hidden_hook(HiddenHook h) { hidden_hook_ = std::move(h); }
 
 private:
-    void block(int64_t layer, int64_t pos);        // arch dispatch on cfg_.block_spec
+    void block(int64_t layer, int64_t pos, int64_t bs = 1, float* x_in = nullptr);        // arch dispatch on cfg_.block_spec
 
     LayerLoader* loader_;
     KVCache*     kv_;
