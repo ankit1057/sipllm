@@ -53,8 +53,10 @@ install_prebuilt() {
         codesign --force -s - "$BIN"/* 2>/dev/null || true
     fi
 
-    # verify the binary can execute on this system (catches libc/arch mismatch)
-    if ! "$BIN/sipllm" --help >/dev/null 2>&1; then
+    # verify the compiled binary can execute on this system (catches libc/arch mismatch)
+    local ret=0
+    "$BIN/llm-engine" >/dev/null 2>&1 || ret=$?
+    if [ "$ret" = "126" ] || [ "$ret" = "127" ] || [ "$ret" -gt 128 ]; then
         warn "prebuilt binary is incompatible with this system (libc or architecture mismatch)"
         return 1
     fi
