@@ -51,8 +51,10 @@ CPU_STR="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -p)"
 
 log() { printf '\033[36m[rb-bench]\033[0m %s\n' "$*" >&2; }
 
-if [ "$(uname -s)" != "Darwin" ]; then
-    log "note: peak RSS parsing targets macOS '/usr/bin/time -l'. On Linux use GNU time -v and adjust RE_MAXRSS."
+if [ "$(uname -s)" = "Darwin" ]; then
+    TIME_CMD=("/usr/bin/time" "-l")
+else
+    TIME_CMD=("/usr/bin/time" "-v")
 fi
 
 [ "$SKIP_BUILD" = "1" ] || make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)" build/llm >/dev/null
@@ -61,7 +63,7 @@ mkdir -p "$OUTDIR"
 
 # Candidate models (name -> file), only those present are benched.
 declare -a MODELS NAMES
-add_model() { [ -f "$2" ] && { NAMES+=("$1"); MODELS+=("$2"); }; }
+add_model() { if [ -f "$2" ]; then NAMES+=("$1"); MODELS+=("$2"); fi; }
 add_model smollm2-135m  "$MODELS_DIR/smollm2-135m.gguf"
 add_model tinyllama     "$MODELS_DIR/tinyllama-q4_k_m.gguf"
 [ "${#MODELS[@]}" -gt 0 ] || { echo "FATAL: no models in $MODELS_DIR" >&2; exit 1; }
@@ -83,12 +85,18 @@ for mi in "${!MODELS[@]}"; do
         rss=""; pinned=""; wres=""; streamed=""
         for r in $(seq 1 "$N"); do
             cap="$WORK/cap"
-            /usr/bin/time -l ./build/llm "$path" -p "$PROMPT" -n "$NGEN" --greedy \
+            "${TIME_CMD[@]}" ./build/llm "$path" -p "$PROMPT" -n "$NGEN" --greedy \
                 --ctx "$CTX" --threads "$THREADS" "${budget_arg[@]}" >/dev/null 2>"$cap" || true
             d="$(grep -E '^decode:' "$cap" | awk '{print $2}' | head -1)"
             [ -n "$d" ] && echo "$d" >> "$decs"
             # last run supplies the (deterministic) residency + RSS facts
-            rss="$(grep 'maximum resident set size' "$cap" | awk '{print $1}' | head -1)"
+            if [ "$(uname -s)" = "Darwin" ]; then
+                rss="$(grep 'maximum resident set size' "$cap" | awk '{print $1}' | head -1)"
+            else
+                rss="$(grep 'Maximum resident set size' "$cap" | awk '{print $6}' | head -1)"
+                # Linux time -v reports in kbytes, macOS reports in bytes
+                if [ -n "$rss" ]; then rss=$((rss * 1024)); fi
+            fi
             pinned="$(grep -E '^pinned layers:' "$cap" | awk '{print $3}' | head -1)"
             wres="$(grep -E '^weights resident:' "$cap" | sed -E 's/.*:([0-9.]+) MB.*/\1/' | head -1)"
             streamed="$(grep -E '^streamed:' "$cap" | sed -E 's/.*:[[:space:]]*([0-9.]+) MB.*/\1/' | head -1)"

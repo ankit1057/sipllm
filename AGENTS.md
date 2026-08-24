@@ -133,6 +133,7 @@ python3 golden/validate_matrix.py --prompt "The capital of France is"  # golden 
 | `tests/test_rtk_chat.cpp` | **OPEN** | ⬜ QUEUE | After rtk.cpp done |
 | `server/server.cpp` | **OPEN** | ⬜ QUEUE | Refactor to use Scheduler |
 | `scripts/bench_matrix.sh` | **OPEN** | ⬜ QUEUE | Full benchmark automation |
+| `scripts/bench_ram_budget.sh` | self-cdd003bb | 🔄 WIP | Issue 37 benchmarking |
 
 ---
 
