@@ -75,6 +75,23 @@ public:
         // Opt-in int8 SDOT kernel for Q8_0 projections (--fast). Numerically
         // equivalent (activation is quantized), not bit-identical; off by default.
         bool      fast_quant   = false;
+        
+        // Policy seam to select which layer to prefetch next.
+        struct PrefetchPolicy {
+            virtual ~PrefetchPolicy() = default;
+            virtual int next(int current_layer, int n_layers, const std::vector<uint8_t>& pinned_mask) const = 0;
+        };
+        std::shared_ptr<PrefetchPolicy> prefetch_policy;
+    };
+
+    struct SequentialWrapPolicy : public Options::PrefetchPolicy {
+        int next(int current_layer, int n_layers, const std::vector<uint8_t>& pinned_mask) const override {
+            for (int i = 1; i <= n_layers; ++i) {
+                int nxt = (current_layer + i) % n_layers;
+                if (pinned_mask.empty() || !pinned_mask[nxt]) return nxt;
+            }
+            return -1;
+        }
     };
 
     struct Stats {

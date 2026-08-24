@@ -81,6 +81,9 @@ static bool is_optional(Role r) {
 }
 LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     : src_(src), cfg_(cfg), opt_(opt), n_layers_(cfg.n_layers) {
+    if (!opt_.prefetch_policy) {
+        opt_.prefetch_policy = std::make_shared<SequentialWrapPolicy>();
+    }
     LLM_CHECK(src_ != nullptr, "LayerLoader: null source");
     if (opt_.n_buffers < 1) opt_.n_buffers = 1;
     slots_.resize(opt_.n_buffers);
@@ -375,9 +378,14 @@ bool LayerLoader::loadLayer(int layer) {
     active_ = &slots_[current_];
 
     // Kick off prefetch of the next block into the other buffer.
-    if (opt_.n_buffers > 1 && layer + 1 < n_layers_) {
-        int nb = other_slot(current_);
-        if (!(slots_[nb].layer == layer + 1)) enqueue(nb, layer + 1);
+    if (opt_.n_buffers > 1 && opt_.prefetch_policy) {
+        int next_layer = opt_.prefetch_policy->next(layer, n_layers_, pinned_mask_);
+        if (next_layer >= 0) {
+            int nb = other_slot(current_);
+            if (slots_[nb].layer != next_layer) {
+                enqueue(nb, next_layer);
+            }
+        }
     }
     return true;
 }
