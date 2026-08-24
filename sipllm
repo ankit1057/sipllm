@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # sipllm — an Ollama-style front-end for the sipllm streaming inference engine.
 #
 #   sipllm run   tinyllama -p "The capital of France is"
@@ -177,8 +177,8 @@ cmd_serve() {
 
 cmd_list() {
     printf '%-40s %10s\n' "MODEL (local)" "SIZE"
-    shopt -s nullglob
     for f in "$MODELS_DIR"/*.gguf; do
+        [ -e "$f" ] || continue
         local sz; sz=$(du -hL "$f" 2>/dev/null | cut -f1)
         printf '%-40s %10s\n' "$(basename "$f")" "$sz"
     done
