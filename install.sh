@@ -127,7 +127,8 @@ fi
 
 # ---- wire up PATH ---------------------------------------------------------
 linked=0
-for d in /usr/local/bin /data/data/com.termux/files/usr/bin "$HOME/.local/bin"; do
+for d in /usr/local/bin /data/data/com.termux/files/usr/bin "$HOME/.local/bin" "$HOME/bin"; do
+    [ -d "$d" ] || mkdir -p "$d" 2>/dev/null || true
     if [ -d "$d" ] && [ -w "$d" ]; then
         ln -sf "$BIN/sipllm" "$d/sipllm" && linked=1 && say "linked sipllm into $d" && break
     fi
