@@ -63,8 +63,44 @@ install_prebuilt() {
     return 0
 }
 
+
+install_deps() {
+    local need_git=0 need_make=0 need_cxx=0
+    command -v git >/dev/null 2>&1 || need_git=1
+    command -v make >/dev/null 2>&1 || need_make=1
+    if ! command -v c++ >/dev/null 2>&1 && ! command -v g++ >/dev/null 2>&1 && ! command -v clang++ >/dev/null 2>&1; then
+        need_cxx=1
+    fi
+    if [ "$need_git" = "0" ] && [ "$need_make" = "0" ] && [ "$need_cxx" = "0" ]; then
+        return 0
+    fi
+    say "Installing missing build dependencies (git, make, C++ compiler)..."
+    local sudo_cmd=""
+    [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo_cmd="sudo"
+
+    if command -v apk >/dev/null 2>&1; then
+        $sudo_cmd apk add --no-cache git make g++
+    elif command -v pkg >/dev/null 2>&1 && uname -o 2>/dev/null | grep -iq android; then
+        pkg install -y git make clang
+    elif command -v apt-get >/dev/null 2>&1; then
+        $sudo_cmd apt-get update -qq || true
+        $sudo_cmd apt-get install -y git make g++ build-essential
+    elif command -v dnf >/dev/null 2>&1; then
+        $sudo_cmd dnf install -y git make gcc-c++
+    elif command -v yum >/dev/null 2>&1; then
+        $sudo_cmd yum install -y git make gcc-c++
+    elif command -v pacman >/dev/null 2>&1; then
+        $sudo_cmd pacman -Sy --noconfirm git make gcc
+    elif command -v brew >/dev/null 2>&1; then
+        brew install git make gcc
+    else
+        warn "Could not detect package manager. Build may fail if git, make, or C++17 compiler are missing."
+    fi
+}
+
 build_from_source() {
     say "building from source"
+    install_deps
     command -v git  >/dev/null 2>&1 || die "git required for source build"
     command -v make >/dev/null 2>&1 || die "make required for source build"
     git clone --depth 1 "https://github.com/${REPO}.git" "$TMP/src" >/dev/null 2>&1         || die "git clone failed"
