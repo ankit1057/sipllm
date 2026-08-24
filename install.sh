@@ -47,6 +47,17 @@ install_prebuilt() {
     src="$(find "$TMP" -maxdepth 2 -name sipllm -type f | head -1)"
     [ -n "$src" ] || return 1
     cp -f "$(dirname "$src")"/* "$BIN"/ 2>/dev/null || true
+
+    chmod +x "$BIN"/* 2>/dev/null || true
+    if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
+        codesign --force -s - "$BIN"/* 2>/dev/null || true
+    fi
+
+    # verify the binary can execute on this system (catches libc/arch mismatch)
+    if ! "$BIN/sipllm" --help >/dev/null 2>&1; then
+        warn "prebuilt binary is incompatible with this system (libc or architecture mismatch)"
+        return 1
+    fi
     return 0
 }
 
@@ -54,16 +65,19 @@ build_from_source() {
     say "building from source"
     command -v git  >/dev/null 2>&1 || die "git required for source build"
     command -v make >/dev/null 2>&1 || die "make required for source build"
-    git clone --depth 1 "https://github.com/${REPO}.git" "$TMP/src" >/dev/null 2>&1 \
-        || die "git clone failed"
-    ( cd "$TMP/src" && make -j"$(nproc 2>/dev/null || echo 2)" all && make server ) \
-        || die "build failed (need a C++17 compiler)"
+    git clone --depth 1 "https://github.com/${REPO}.git" "$TMP/src" >/dev/null 2>&1         || die "git clone failed"
+    ( cd "$TMP/src" && make -j"$(nproc 2>/dev/null || echo 2)" all && make server )         || die "build failed (need a C++17 compiler)"
     cp -f "$TMP/src/sipllm" "$BIN/sipllm"
     cp -f "$TMP/src/build/llm"        "$BIN/llm-engine"
     cp -f "$TMP/src/build/llm_server" "$BIN/llm_server" 2>/dev/null || true
     for t in dump_logits bench inspect_gguf make_toy_model gguf_to_f16; do
         cp -f "$TMP/src/build/$t" "$BIN/$t" 2>/dev/null || true
     done
+
+    chmod +x "$BIN"/* 2>/dev/null || true
+    if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
+        codesign --force -s - "$BIN"/* 2>/dev/null || true
+    fi
 }
 
 if [ "$FORCE_BUILD" = "1" ] || ! install_prebuilt; then
@@ -71,7 +85,6 @@ if [ "$FORCE_BUILD" = "1" ] || ! install_prebuilt; then
     build_from_source
 fi
 
-chmod +x "$BIN"/* 2>/dev/null || true
 [ -x "$BIN/sipllm" ] || die "install failed: $BIN/sipllm missing"
 
 # ---- wire up PATH ---------------------------------------------------------
