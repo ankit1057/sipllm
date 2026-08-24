@@ -37,7 +37,7 @@ CTX="${CTX:-512}"
 PROMPT="${PROMPT:-Once upon a time}"
 THREADS="${THREADS:-4}"
 BUDGETS="${BUDGETS:-0 128M 256M 384M 512M 768M 1200M}"
-MODELS_DIR="/mnt/c/Users/Radhe Shyam/.sipllm/models"
+MODELS_DIR="${MODELS_DIR:-$HOME/.sipllm/models}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SETTLE="${SETTLE:-4}"   # seconds idle between data points (fanless thermal settle)
 OUTDIR="bench/results"
@@ -51,8 +51,13 @@ CPU_STR="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -p)"
 
 log() { printf '\033[36m[rb-bench]\033[0m %s\n' "$*" >&2; }
 
-if [ "$(uname -s)" != "Darwin" ]; then
-    log "note: peak RSS parsing targets macOS '/usr/bin/time -l'. On Linux use GNU time -v and adjust RE_MAXRSS."
+if [ "$(uname -s)" = "Darwin" ]; then
+    TIME_CMD=("/usr/bin/time" "-l")
+    get_rss() { grep -i 'maximum resident set size' "$1" | awk '{print $1}' | head -1; }
+else
+    TIME_CMD=("/usr/bin/time" "-v")
+    # GNU time -v outputs: "Maximum resident set size (kbytes): 123456"
+    get_rss() { grep -i 'maximum resident set size' "$1" | awk -F': ' '{print $2 * 1024}' | head -1; }
 fi
 
 [ "$SKIP_BUILD" = "1" ] || make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)" build/llm >/dev/null
@@ -83,12 +88,12 @@ for mi in "${!MODELS[@]}"; do
         rss=""; pinned=""; wres=""; streamed=""
         for r in $(seq 1 "$N"); do
             cap="$WORK/cap"
-            /usr/bin/time -v ./build/llm "$path" -p "$PROMPT" -n "$NGEN" --greedy \
+            "${TIME_CMD[@]}" ./build/llm "$path" -p "$PROMPT" -n "$NGEN" --greedy \
                 --ctx "$CTX" --threads "$THREADS" "${budget_arg[@]}" >/dev/null 2>"$cap" || true
             d="$(grep -E '^decode:' "$cap" | awk '{print $2}' | head -1)"
             [ -n "$d" ] && echo "$d" >> "$decs"
             # last run supplies the (deterministic) residency + RSS facts
-            rss="$(grep 'Maximum resident set size' "$cap" | awk -F': ' '{print $2 * 1024}' | head -1)"
+            rss="$(get_rss "$cap")"
             pinned="$(grep -E '^pinned layers:' "$cap" | awk '{print $3}' | head -1)"
             wres="$(grep -E '^weights resident:' "$cap" | sed -E 's/.*:([0-9.]+) MB.*/\1/' | head -1)"
             streamed="$(grep -E '^streamed:' "$cap" | sed -E 's/.*:[[:space:]]*([0-9.]+) MB.*/\1/' | head -1)"
