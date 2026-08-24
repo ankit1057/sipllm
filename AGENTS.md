@@ -177,3 +177,4 @@ _Update this before you start coding — prevents duplication._
 [ ] Task: _______________
 [ ] ETA: _______________
 ```
+| `issue-43` | Sonnet | `include/llm/remote_weight_source.h`, `src/remote_weight_source.cpp`, `tools/remote_server.cpp`, `tools/remote_demo.cpp` | ✅ DONE Issue 43: Remote layer streaming with local compressed cache |
