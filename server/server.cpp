@@ -87,11 +87,10 @@ int main(int argc, char** argv) {
     }
 
     std::mutex gen_mutex;
-    // Locate index.html relative to the binary's launch dir or server/.
-    std::string html = read_file("server/index.html");
-    if (html.empty()) html = read_file("index.html");
-    if (html.empty()) html = "<!doctype html><h1>index.html not found</h1>"
-                             "<p>Run llm_server from the project root.</p>";
+    std::string html = read_file("index.html");
+    if (html.empty()) html = "<!doctype html><h1>SipLLM API Server</h1>"
+                             "<p>This server provides an OpenAI-compatible API at <code>/v1/chat/completions</code>.</p>"
+                             "<p><i>(Place an <code>index.html</code> in this directory to serve a custom Web UI here).</i></p>";
 
     http::Server srv(port);
 
@@ -126,7 +125,7 @@ int main(int argc, char** argv) {
     });
 
     srv.get("/api/selftest", [&](http::Request&, http::Response& res) {
-        auto results = run_selftests("/tmp");
+        auto results = run_selftests("");
         std::string j = "{\"results\":[";
         for (size_t i = 0; i < results.size(); ++i) {
             const auto& r = results[i];
@@ -231,75 +230,18 @@ int main(int argc, char** argv) {
         ChatCompletionResponse response;
 
         if (cr.agent) {
-            // Agent mode: run the Nishachar loop with server-side demo tools.
+            // Agent mode: run the Nishachar loop with real system tools.
             Nishachar nish;
-            {
-                ToolDef d;
-                d.name = "calc";
-                d.description =
-                    "Evaluate an integer expression of the form "
-                    "'<int> <op> <int>' where op is one of + - * /.";
-                ToolParam pm;
-                pm.name = "expr";
-                pm.type = ToolParamType::String;
-                pm.required = true;
-                pm.description = "the expression, e.g. \"2 + 3\"";
-                d.params.push_back(pm);
-                nish.add_tool(std::move(d), [](const ToolCall& c) -> std::string {
-                    std::istringstream ss(c.get("expr"));
-                    long a = 0, b = 0;
-                    std::string op;
-                    if (!(ss >> a >> op >> b))
-                        throw std::runtime_error("malformed expression");
-                    long r = 0;
-                    if (op == "+") r = a + b;
-                    else if (op == "-") r = a - b;
-                    else if (op == "*") r = a * b;
-                    else if (op == "/") {
-                        if (b == 0) throw std::runtime_error("division by zero");
-                        r = a / b;
-                    } else {
-                        throw std::runtime_error("unknown operator: " + op);
-                    }
-                    return std::to_string(r);
-                });
-            }
-            {
-                ToolDef d;
-                d.name = "echo";
-                d.description = "Return the given text verbatim.";
-                ToolParam pm;
-                pm.name = "text";
-                pm.type = ToolParamType::String;
-                pm.required = true;
-                pm.description = "the text to echo back";
-                d.params.push_back(pm);
-                nish.add_tool(std::move(d), [](const ToolCall& c) -> std::string {
-                    return c.get("text");
-                });
-            }
-            {
-                ToolDef d;
-                d.name = "upper";
-                d.description = "Uppercase the ASCII letters of the given text.";
-                ToolParam pm;
-                pm.name = "text";
-                pm.type = ToolParamType::String;
-                pm.required = true;
-                pm.description = "the text to uppercase";
-                d.params.push_back(pm);
-                nish.add_tool(std::move(d), [](const ToolCall& c) -> std::string {
-                    std::string s = c.get("text");
-                    for (char& ch : s) ch = (char)std::toupper((unsigned char)ch);
-                    return s;
-                });
-            }
+            register_system_tools([&](ToolDef d, ToolHandler h) {
+                nish.add_tool(std::move(d), std::move(h));
+            }, ".");
+
             AgentConfig cfg;
-            cfg.max_steps = 6;
-            cfg.max_new_tokens = cr.max_tokens;
+            cfg.max_steps = 10;
+            cfg.max_new_tokens = cr.max_tokens > 0 ? cr.max_tokens : 512;
             cfg.style = style;
             AgentResult ar = nish.run(last_user_message(cr.messages), gen, cfg);
-            response.content = ar.final_text;
+            response.content = ar.final_text.empty() ? ar.report() : ar.final_text;
             response.finish_reason =
                 ar.stop == AgentStop::MaxSteps ? "length" : "stop";
         } else {

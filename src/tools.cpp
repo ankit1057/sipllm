@@ -6,8 +6,19 @@
 // Pure C++17 + the standard library.
 #include "llm/tools.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <regex>
 #include <sstream>
+
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 
 namespace llm {
 
@@ -358,6 +369,352 @@ std::string render_chat(const std::vector<ChatMessage>& messages,
             break;
     }
     return o.str();
+}
+
+// ============================================================================
+// Production System Tools (read_file, write_file, list_dir, bash, grep_search)
+// ============================================================================
+
+static std::filesystem::path resolve_tool_path(const std::string& raw_path, const std::string& workdir) {
+    std::filesystem::path p(raw_path);
+    if (p.is_absolute()) return p;
+    if (workdir.empty() || workdir == ".") return p;
+    return std::filesystem::path(workdir) / p;
+}
+
+ToolDef make_read_file_tool() {
+    ToolDef d;
+    d.name = "read_file";
+    d.description = "Read the contents of a file at the specified path safely.";
+    d.params.push_back({"path", ToolParamType::String, true, "Path to the file to read", ""});
+    return d;
+}
+
+ToolHandler make_read_file_handler(const std::string& workdir) {
+    return [workdir](const ToolCall& call) -> std::string {
+        std::string raw_path = call.get("path", call.get("file_path", ""));
+        if (raw_path.empty()) {
+            return "error: 'path' argument is required";
+        }
+        std::filesystem::path p = resolve_tool_path(raw_path, workdir);
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec)) {
+            return "error: file not found: " + raw_path;
+        }
+        if (std::filesystem::is_directory(p, ec)) {
+            return "error: path is a directory: " + raw_path;
+        }
+        uintmax_t sz = std::filesystem::file_size(p, ec);
+        if (ec) {
+            return "error: cannot determine file size: " + ec.message();
+        }
+        std::ifstream f(p, std::ios::binary);
+        if (!f.is_open()) {
+            return "error: failed to open file: " + raw_path;
+        }
+        constexpr uintmax_t MAX_READ_BYTES = 512 * 1024; // 512KB cap
+        if (sz > MAX_READ_BYTES) {
+            std::string buf(MAX_READ_BYTES, '\0');
+            f.read(&buf[0], MAX_READ_BYTES);
+            std::streamsize bytes_read = f.gcount();
+            buf.resize(bytes_read);
+            buf += "\n[... file truncated: read " + std::to_string(bytes_read) +
+                   " of " + std::to_string(sz) + " bytes ...]";
+            return buf;
+        }
+        std::string content((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+        return content;
+    };
+}
+
+ToolDef make_write_file_tool() {
+    ToolDef d;
+    d.name = "write_file";
+    d.description = "Write text content to a file at the specified path (creates parent directories if needed).";
+    d.params.push_back({"path", ToolParamType::String, true, "Path to the file to write", ""});
+    d.params.push_back({"content", ToolParamType::String, true, "Content to write into the file", ""});
+    return d;
+}
+
+ToolHandler make_write_file_handler(const std::string& workdir) {
+    return [workdir](const ToolCall& call) -> std::string {
+        std::string raw_path = call.get("path", call.get("file_path", ""));
+        if (raw_path.empty()) {
+            return "error: 'path' argument is required";
+        }
+        std::string content = call.get("content");
+        std::filesystem::path p = resolve_tool_path(raw_path, workdir);
+        std::error_code ec;
+        if (p.has_parent_path()) {
+            std::filesystem::create_directories(p.parent_path(), ec);
+            if (ec) {
+                return "error: failed to create parent directory: " + ec.message();
+            }
+        }
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) {
+            return "error: failed to open file for writing: " + raw_path;
+        }
+        f.write(content.data(), content.size());
+        f.close();
+        if (f.fail()) {
+            return "error: failed writing content to: " + raw_path;
+        }
+        return "ok: wrote " + std::to_string(content.size()) + " bytes to " + raw_path;
+    };
+}
+
+ToolDef make_list_dir_tool() {
+    ToolDef d;
+    d.name = "list_dir";
+    d.description = "List files and directories within a specified path.";
+    d.params.push_back({"path", ToolParamType::String, false, "Path to directory (default: current working directory)", "."});
+    return d;
+}
+
+ToolHandler make_list_dir_handler(const std::string& workdir) {
+    return [workdir](const ToolCall& call) -> std::string {
+        std::string raw_path = call.get("path", call.get("dir", call.get("directory", ".")));
+        if (raw_path.empty()) raw_path = ".";
+        std::filesystem::path p = resolve_tool_path(raw_path, workdir);
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec)) {
+            return "error: path not found: " + raw_path;
+        }
+        if (!std::filesystem::is_directory(p, ec)) {
+            return "error: path is not a directory: " + raw_path;
+        }
+        struct Item {
+            std::string name;
+            bool is_dir = false;
+            uintmax_t size = 0;
+        };
+        std::vector<Item> items;
+        for (const auto& entry : std::filesystem::directory_iterator(p, std::filesystem::directory_options::skip_permission_denied, ec)) {
+            Item itm;
+            itm.name = entry.path().filename().string();
+            itm.is_dir = entry.is_directory(ec);
+            if (!itm.is_dir) {
+                itm.size = entry.file_size(ec);
+                if (ec) itm.size = 0;
+            }
+            items.push_back(itm);
+        }
+        std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+            if (a.is_dir != b.is_dir) return a.is_dir > b.is_dir;
+            return a.name < b.name;
+        });
+        if (items.empty()) return "(empty directory)";
+        std::ostringstream oss;
+        for (const auto& itm : items) {
+            if (itm.is_dir) {
+                oss << "[DIR]  " << itm.name << "/\n";
+            } else {
+                oss << "[FILE] " << itm.name << " (" << itm.size << " bytes)\n";
+            }
+        }
+        return oss.str();
+    };
+}
+
+ToolDef make_bash_tool() {
+    ToolDef d;
+    d.name = "bash";
+    d.description = "Execute a bash shell command and capture combined stdout/stderr.";
+    d.params.push_back({"command", ToolParamType::String, true, "The command string to execute", ""});
+    return d;
+}
+
+ToolHandler make_bash_handler(const std::string& workdir) {
+    return [workdir](const ToolCall& call) -> std::string {
+        std::string cmd = call.get("command", call.get("cmd", ""));
+        if (cmd.empty()) {
+            return "error: 'command' argument is required";
+        }
+        std::string full_cmd;
+        if (!workdir.empty() && workdir != ".") {
+            full_cmd = "cd \"" + workdir + "\" 2>/dev/null && (" + cmd + ") 2>&1";
+        } else {
+            full_cmd = "(" + cmd + ") 2>&1";
+        }
+        FILE* pipe = popen(full_cmd.c_str(), "r");
+        if (!pipe) {
+            return "error: popen failed to start process";
+        }
+        std::string output;
+        constexpr size_t MAX_BASH_OUTPUT = 64 * 1024; // 64KB cap
+        char buffer[4096];
+        bool truncated = false;
+        while (true) {
+            size_t bytes = fread(buffer, 1, sizeof(buffer), pipe);
+            if (bytes == 0) break;
+            if (output.size() + bytes > MAX_BASH_OUTPUT) {
+                size_t take = MAX_BASH_OUTPUT - output.size();
+                output.append(buffer, take);
+                truncated = true;
+                break;
+            }
+            output.append(buffer, bytes);
+        }
+        int status = pclose(pipe);
+        int exit_code = 0;
+#if !defined(_WIN32)
+        if (WIFEXITED(status)) {
+            exit_code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            exit_code = 128 + WTERMSIG(status);
+        } else {
+            exit_code = status;
+        }
+#else
+        exit_code = status;
+#endif
+        std::string result;
+        if (exit_code != 0) {
+            result += "[exit status: " + std::to_string(exit_code) + "]\n";
+        }
+        if (output.empty() && exit_code == 0) {
+            result += "(command finished with no output)";
+        } else {
+            result += output;
+        }
+        if (truncated) {
+            result += "\n[... output truncated at 64KB ...]";
+        }
+        return result;
+    };
+}
+
+ToolDef make_grep_search_tool() {
+    ToolDef d;
+    d.name = "grep_search";
+    d.description = "Search for lines matching a pattern across files in a directory or file.";
+    d.params.push_back({"pattern", ToolParamType::String, true, "Substring or regex pattern to search for", ""});
+    d.params.push_back({"path", ToolParamType::String, false, "Path to directory or file (default: current working directory)", "."});
+    return d;
+}
+
+static bool is_binary_file_check(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in.is_open()) return false;
+    char buf[512];
+    in.read(buf, sizeof(buf));
+    std::streamsize n = in.gcount();
+    for (std::streamsize i = 0; i < n; ++i) {
+        if (buf[i] == '\0') return true;
+    }
+    return false;
+}
+
+ToolHandler make_grep_search_handler(const std::string& workdir) {
+    return [workdir](const ToolCall& call) -> std::string {
+        std::string pattern = call.get("pattern");
+        if (pattern.empty()) {
+            return "error: 'pattern' argument is required";
+        }
+        std::string raw_path = call.get("path", call.get("directory", call.get("dir", ".")));
+        if (raw_path.empty()) raw_path = ".";
+        std::filesystem::path p = resolve_tool_path(raw_path, workdir);
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec)) {
+            return "error: path not found: " + raw_path;
+        }
+
+        bool use_regex = false;
+        std::regex re;
+        try {
+            re = std::regex(pattern, std::regex_constants::ECMAScript | std::regex_constants::icase);
+            use_regex = true;
+        } catch (...) {
+            use_regex = false;
+        }
+
+        std::vector<std::filesystem::path> files_to_search;
+        if (std::filesystem::is_regular_file(p, ec)) {
+            files_to_search.push_back(p);
+        } else if (std::filesystem::is_directory(p, ec)) {
+            std::filesystem::recursive_directory_iterator it(p, std::filesystem::directory_options::skip_permission_denied, ec);
+            std::filesystem::recursive_directory_iterator end;
+            while (it != end && !ec) {
+                if (it->is_directory(ec)) {
+                    std::string dname = it->path().filename().string();
+                    if ((!dname.empty() && dname[0] == '.') || dname == "build" || dname == "node_modules") {
+                        it.disable_recursion_pending();
+                    }
+                } else if (it->is_regular_file(ec)) {
+                    uintmax_t fsz = it->file_size(ec);
+                    if (!ec && fsz <= 2 * 1024 * 1024) { // max 2MB per file
+                        files_to_search.push_back(it->path());
+                    }
+                }
+                it.increment(ec);
+            }
+        }
+
+        std::ostringstream oss;
+        int matches = 0;
+        constexpr int MAX_MATCHES = 100;
+
+        for (const auto& fpath : files_to_search) {
+            if (is_binary_file_check(fpath)) continue;
+            std::ifstream in(fpath);
+            if (!in.is_open()) continue;
+            std::string line;
+            int line_no = 0;
+            std::string display_path = fpath.string();
+            if (!workdir.empty() && workdir != ".") {
+                std::error_code rel_ec;
+                auto rel = std::filesystem::relative(fpath, workdir, rel_ec);
+                if (!rel_ec) display_path = rel.string();
+            }
+            while (std::getline(in, line)) {
+                ++line_no;
+                bool match = false;
+                if (use_regex) {
+                    try {
+                        match = std::regex_search(line, re);
+                    } catch (...) {
+                        match = (line.find(pattern) != std::string::npos);
+                    }
+                } else {
+                    match = (line.find(pattern) != std::string::npos);
+                }
+                if (match) {
+                    oss << display_path << ":" << line_no << ": " << line << "\n";
+                    ++matches;
+                    if (matches >= MAX_MATCHES) {
+                        oss << "[... maximum matches reached (" << MAX_MATCHES << ") ...]\n";
+                        break;
+                    }
+                }
+            }
+            if (matches >= MAX_MATCHES) break;
+        }
+
+        if (matches == 0) {
+            return "no matches found for pattern '" + pattern + "'";
+        }
+        return oss.str();
+    };
+}
+
+void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
+                           const std::string& workdir) {
+    registrar(make_read_file_tool(), make_read_file_handler(workdir));
+    registrar(make_write_file_tool(), make_write_file_handler(workdir));
+    registrar(make_list_dir_tool(), make_list_dir_handler(workdir));
+    registrar(make_bash_tool(), make_bash_handler(workdir));
+    registrar(make_grep_search_tool(), make_grep_search_handler(workdir));
+}
+
+void register_system_tools(ToolRegistry& reg,
+                           std::unordered_map<std::string, ToolHandler>& handlers,
+                           const std::string& workdir) {
+    register_system_tools([&](ToolDef def, ToolHandler handler) {
+        handlers[def.name] = handler;
+        reg.register_tool(std::move(def));
+    }, workdir);
 }
 
 } // namespace llm

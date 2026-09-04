@@ -14,7 +14,9 @@
 
 #include "llm/model.h"
 
+#include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace llm {
@@ -36,6 +38,9 @@ struct ToolCall {
     // Returns by value: safe to call with a temporary/default `fallback`.
     std::string get(const std::string& key, const std::string& fallback = "") const;
 };
+
+// Executes one tool call and returns the result text.
+using ToolHandler = std::function<std::string(const ToolCall&)>;
 
 // ============================================================================
 // Tool definitions + registry
@@ -139,5 +144,34 @@ std::string render_chat(const std::vector<ChatMessage>& messages,
                         const ToolRegistry& tools,
                         ChatTemplateStyle style,
                         bool add_gen_prompt);
+
+// ============================================================================
+// Production System Tools (read_file, write_file, list_dir, bash, grep_search)
+// ============================================================================
+
+ToolDef make_read_file_tool();
+ToolHandler make_read_file_handler(const std::string& workdir = ".");
+
+ToolDef make_write_file_tool();
+ToolHandler make_write_file_handler(const std::string& workdir = ".");
+
+ToolDef make_list_dir_tool();
+ToolHandler make_list_dir_handler(const std::string& workdir = ".");
+
+ToolDef make_bash_tool();
+ToolHandler make_bash_handler(const std::string& workdir = ".");
+
+ToolDef make_grep_search_tool();
+ToolHandler make_grep_search_handler(const std::string& workdir = ".");
+
+// Registers real production system tools (read_file, write_file, list_dir,
+// bash, grep_search) into a ToolRegistry and an associated handler map.
+void register_system_tools(ToolRegistry& reg,
+                           std::unordered_map<std::string, ToolHandler>& handlers,
+                           const std::string& workdir = ".");
+
+// Helper overload taking a registrar callback (e.g. for Nishachar::add_tool).
+void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
+                           const std::string& workdir = ".");
 
 } // namespace llm

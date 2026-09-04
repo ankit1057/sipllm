@@ -1,5 +1,5 @@
 #!/bin/sh
-# sipllm installer — one line to a working streaming LLM engine:
+# sipllm installer — one line to a production-ready streaming AI runtime:
 #
 #   curl -fsSL https://raw.githubusercontent.com/ankit1057/sipllm/main/install.sh | sh
 #
@@ -10,7 +10,7 @@
 set -eu
 
 REPO="ankit1057/sipllm"
-VERSION="0.6.0"
+VERSION="1.0.0"
 PREFIX="${SIPLLM_PREFIX:-$HOME/.sipllm}"
 BIN="$PREFIX/bin"
 FORCE_BUILD="${SIPLLM_BUILD:-0}"
@@ -108,7 +108,7 @@ build_from_source() {
     cp -f "$TMP/src/sipllm" "$BIN/sipllm"
     cp -f "$TMP/src/build/llm"        "$BIN/llm-engine"
     cp -f "$TMP/src/build/llm_server" "$BIN/llm_server" 2>/dev/null || true
-    for t in dump_logits bench inspect_gguf make_toy_model gguf_to_f16; do
+    for t in dump_logits bench inspect_gguf make_toy_model gguf_to_f16 ir_dump gguf_to_sipir nishachar_demo; do
         cp -f "$TMP/src/build/$t" "$BIN/$t" 2>/dev/null || true
     done
 
@@ -144,13 +144,16 @@ fi
 
 cat <<EOF
 
-$(say "sipllm $VERSION installed to $BIN")
+$(say "sipllm $VERSION (production release) installed to $BIN")
 
 Quick start:
-  sipllm run tinyllama -p "The capital of France is" -n 40
-  sipllm serve tinyllama --port 8080
-  sipllm registry          # list available models
+  sipllm run smollm2                     # interactive multi-turn chat REPL
+  sipllm run tinyllama -p "The capital of France is"  # one-shot prompt
+  sipllm serve smollm2 --port 8080       # OpenAI-compatible API server
+  sipllm list                            # local cached models
+  sipllm registry                        # discover supported models
 
-The engine streams model weights off disk, so peak RAM stays flat (~200-400 MB)
-regardless of model size. Models cache in $PREFIX/models.
+The engine streams model weights off disk with mathematically verified precision,
+keeping peak RAM bounded (~120-400 MB) regardless of model size.
+Models cache in $PREFIX/models.
 EOF

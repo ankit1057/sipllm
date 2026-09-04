@@ -11,14 +11,45 @@
 #include "llm/plugin.h"
 #include "llm/kosh.h"
 #include "llm/rtk.h"
+#include "llm/tools.h"
+
+#ifdef _WIN32
+#include <io.h>
+#define isatty _isatty
+#define fileno _fileno
+#else
+#include <unistd.h>
+#endif
 
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <cctype>
+#include <iostream>
 #include <string>
+#include <vector>
 
 using namespace llm;
+
+static void print_usage(const char* prog) {
+    fprintf(stderr,
+        "usage: %s <model> [prompt] [-p prompt] [-n tokens] [-t temp]\n"
+        "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
+        "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
+        "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy] [--schedule P]\n"
+        "          [--ram-budget BYTES|N{K,M,G}] [--fast]\n"
+        "          [--kosh] [--kosh-max-run N] [--rtk] [--reuse]\n"
+        "          [--save-session F] [--load-session F]\n"
+        "          [--chat | -i]\n",
+        prog);
+}
+
+static std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
 
 // Parse a byte count with an optional K/M/G (or KB/MB/GB) suffix: "512M", "1.5G",
 // "268435456", "0". Used by --ram-budget (#37).
@@ -41,19 +72,19 @@ static size_t parse_bytes(const std::string& in) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        fprintf(stderr,
-            "usage: %s <model> [-p prompt] [-n tokens] [-t temp]\n"
-            "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
-            "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
-            "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy] [--schedule P]\n"
-            "          [--ram-budget BYTES|N{K,M,G}] [--fast]\n"
-            "          [--kosh] [--kosh-max-run N] [--rtk] [--reuse]\n"
-            "          [--save-session F] [--load-session F]\n",
-            argv[0]);
+        print_usage(argv[0]);
         return 2;
     }
+    if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        print_usage(argv[0]);
+        return 0;
+    }
     std::string model = argv[1];
-    std::string prompt = "Hello";
+    std::string prompt;
+    bool prompt_specified = false;
+    bool p_flag_given = false;
+    bool force_interactive = false;
+    bool max_new_specified = false;
     int max_new = 64, threads = 0, buffers = 2, ctx = 0;
     size_t ram_budget = 0;   // #37: total peak-RSS target (0 = unlimited)
     bool force_budget = false;
@@ -74,8 +105,14 @@ int main(int argc, char** argv) {
         auto next = [&](const char* def) -> std::string {
             return (i + 1 < argc) ? argv[++i] : def;
         };
-        if (a == "-p") prompt = next("");
-        else if (a == "-n") max_new = std::stoi(next("64"));
+        if (a == "-p") {
+            prompt = next("");
+            prompt_specified = true;
+            p_flag_given = true;
+        }
+        else if (a == "--chat" || a == "-i") force_interactive = true;
+        else if (a == "-h" || a == "--help") { print_usage(argv[0]); return 0; }
+        else if (a == "-n") { max_new = std::stoi(next("64")); max_new_specified = true; }
         else if (a == "-t") scfg.temperature = std::stof(next("0.8"));
         else if (a == "--top-k") scfg.top_k = std::stoi(next("40"));
         else if (a == "--top-p") scfg.top_p = std::stof(next("0.95"));
@@ -126,8 +163,46 @@ int main(int argc, char** argv) {
             printf("%s\n", hw.to_json(2).c_str());
             return 0;
         }
+        else if (!a.empty() && a[0] != '-') {
+            if (!p_flag_given) {
+                if (!prompt_specified) {
+                    prompt = a;
+                    prompt_specified = true;
+                } else {
+                    prompt += " " + a;
+                }
+            }
+        }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 2; }
     }
+
+    bool is_tty = isatty(fileno(stdin));
+    if (!prompt_specified && !is_tty && !force_interactive) {
+        std::string piped;
+        char buf[4096];
+        while (size_t nr = fread(buf, 1, sizeof(buf), stdin)) {
+            piped.append(buf, nr);
+        }
+        while (!piped.empty() && (piped.back() == '\n' || piped.back() == '\r')) {
+            piped.pop_back();
+        }
+        if (!piped.empty()) {
+            prompt = piped;
+            prompt_specified = true;
+        }
+    }
+
+    bool interactive = force_interactive || (!prompt_specified && is_tty);
+    if (interactive && !max_new_specified) {
+        max_new = 512;
+    }
+    if (interactive) {
+        use_reuse = true;
+    }
+    if (!prompt_specified && !interactive) {
+        prompt = "Hello";
+    }
+
     if (opt.async) opt.n_buffers = buffers;
 
     try {
@@ -153,6 +228,128 @@ int main(int argc, char** argv) {
         if (use_reuse) rt.set_context_reuse(true);
         if (!load_path.empty() && !rt.load_session(load_path))
             fprintf(stderr, "warning: could not load session '%s'\n", load_path.c_str());
+
+        if (interactive) {
+            std::string model_name = model;
+            size_t last_slash = model_name.find_last_of("/\\");
+            if (last_slash != std::string::npos) {
+                model_name = model_name.substr(last_slash + 1);
+            }
+
+            printf("SipLLM Interactive Session (model: %s)\n", model_name.c_str());
+            printf("Type your message, or /help, /clear, /save <path>, /bye, /exit to quit.\n");
+            fflush(stdout);
+
+            std::vector<ChatMessage> history;
+            ToolRegistry tools;
+            ChatTemplateStyle chat_style = style_from_model(rt.config());
+
+            auto run_turn = [&](const std::string& user_text) {
+                history.push_back({ChatMessage::Role::User, user_text, ""});
+                std::string rendered = render_chat(history, tools, chat_style, /*add_gen_prompt=*/true);
+                GenStats st;
+                std::string assistant_text = rt.generate(rendered, max_new, scfg,
+                    [](const std::string& piece, int64_t) {
+                        printf("%s", piece.c_str());
+                        fflush(stdout);
+                        return true;
+                    }, &st);
+                printf("\n");
+                fflush(stdout);
+                history.push_back({ChatMessage::Role::Assistant, assistant_text, ""});
+            };
+
+            if (!prompt.empty()) {
+                printf(">>> %s\n", prompt.c_str());
+                fflush(stdout);
+                run_turn(prompt);
+            }
+
+            while (true) {
+                printf(">>> ");
+                fflush(stdout);
+
+                std::string line;
+                if (!std::getline(std::cin, line)) {
+                    printf("\n");
+                    break;
+                }
+
+                std::string user_input;
+                std::string trimmed = trim(line);
+
+                if (trimmed.rfind("\"\"\"", 0) == 0) {
+                    std::string content = trimmed.substr(3);
+                    size_t close_pos = content.find("\"\"\"");
+                    if (close_pos != std::string::npos) {
+                        user_input = content.substr(0, close_pos);
+                    } else {
+                        if (!content.empty()) content += "\n";
+                        while (true) {
+                            printf("... ");
+                            fflush(stdout);
+                            std::string next_line;
+                            if (!std::getline(std::cin, next_line)) break;
+                            size_t end_idx = next_line.find("\"\"\"");
+                            if (end_idx != std::string::npos) {
+                                content += next_line.substr(0, end_idx);
+                                break;
+                            }
+                            content += next_line + "\n";
+                        }
+                        user_input = content;
+                    }
+                } else {
+                    if (trimmed.empty()) continue;
+
+                    if (trimmed == "/exit" || trimmed == "/bye") {
+                        break;
+                    } else if (trimmed == "/clear") {
+                        rt.reset();
+                        history.clear();
+                        printf("Session cleared.\n");
+                        continue;
+                    } else if (trimmed == "/help") {
+                        printf("Available commands:\n"
+                               "  /help         - Show this help message\n"
+                               "  /clear        - Reset conversation history and KV cache\n"
+                               "  /save <path>  - Save current session to file\n"
+                               "  /exit, /bye   - Exit interactive session\n\n"
+                               "Multi-line input:\n"
+                               "  Start a line with \"\"\" to begin multi-line input, and end with \"\"\".\n\n");
+                        continue;
+                    } else if (trimmed.rfind("/save", 0) == 0) {
+                        std::string path;
+                        size_t sp = trimmed.find_first_not_of(" \t", 5);
+                        if (sp != std::string::npos) path = trimmed.substr(sp);
+                        if (path.empty()) {
+                            printf("Usage: /save <path>\n");
+                        } else {
+                            if (rt.save_session(path)) {
+                                printf("Session saved to %s\n", path.c_str());
+                            } else {
+                                printf("Failed to save session to %s\n", path.c_str());
+                            }
+                        }
+                        continue;
+                    } else if (!trimmed.empty() && trimmed[0] == '/') {
+                        printf("Unknown command: %s (type /help for available commands)\n", trimmed.c_str());
+                        continue;
+                    }
+                    user_input = line;
+                }
+
+                std::string clean_input = trim(user_input);
+                if (clean_input.empty()) continue;
+
+                run_turn(clean_input);
+            }
+
+            if (!save_path.empty() && !rt.save_session(save_path))
+                fprintf(stderr, "warning: could not save session '%s'\n", save_path.c_str());
+
+            return 0;
+        }
 
         fprintf(stderr, "model: %s\nconfig: %s\ntokenizer: %s vocab=%lld\n",
                 model.c_str(), rt.config().summary().c_str(),
