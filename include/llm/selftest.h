@@ -19,6 +19,6 @@ struct SelfTestResult {
 };
 
 // Run all task checks, writing temporary fixtures under `tmpdir`.
-std::vector<SelfTestResult> run_selftests(const std::string& tmpdir = "/tmp");
+std::vector<SelfTestResult> run_selftests(const std::string& tmpdir = "");
 
 } // namespace llm
