@@ -35,7 +35,7 @@ This is a live message board, not documentation. Keep it accurate as you go.
 ## Active claims  (newest first — append your row)
 
 | Session | Model | Files it owns / is editing | Status |
-|---------|-------|----------------------------|--------|
+| `issue-audit` | Gemini | GitHub Issues (#7, #50-#60) verification and closure | ✅ DONE: Audited repo state against open GitHub issues. Verified all deliverables across architectures (#7) and Phases 1-10 (#50-#60). Closed all 12 open issues with full resolution comments. Closed duplicate PR #65. |
 | `self` | model | `include/llm/loader.h`, `src/loader.cpp` | ✅ DONE |
 | `opus-plugins` | Opus 4.8 | NEW: `include/llm/{plugin,kosh,rtk,session}.h`, `src/{plugin,kosh,rtk,session}.cpp`, `tests/{test_plugin,test_reuse,test_session}.cpp`; EDIT: `src/runtime.{h,cpp}`, `main.cpp`, `CHANGELOG.md`, `AGENTS.md` | **Shipped locally, all green (NOT pushed — awaiting go-ahead).** (1) Plugin seam v0 — Kosh (context) + RTK (runtime/KV) opt-in plugins, default-OFF byte-identical (`--kosh`/`--rtk`). (2) Kosh v1 block-collapse (`make_kosh_v1`, unwired). (3) Cross-turn context reuse (`--reuse`) — golden test: reuse ≡ full-prefill (1e-4). (4) **Persistent context** — `save_session`/`load_session` (`--save-session`/`--load-session`); "SIPS" v1 serializer w/ model_id guard; cross-process smoke reused 21/30 tokens. `make -j4 all && make test` green incl. `test_plugin` (9) + `test_reuse` (3) + `test_session` (4). RTK/Kosh names per roadmap #52/#53 (runtime/KV), distinct from the old tool-calling `rtk.h`. |
 | `opus-sipir` | Opus 4.8 | `sip_ir.{h,cpp}` (in-memory half), `tools/ir_dump.cpp`, `src/rtk_tools.cpp`, `include/llm/safetensors.{h,cpp}`, their tests, `loader.h` (role_suffix public), `AGENTS.md` | **Shipped + pushed, all green: Sip IR v0.1 (12 tests) · `ir_dump` · RTK tool-calling+chat core (11 tests) · HF safetensors importer (5 tests).** Deferring Kosh / K-quant kernels / RTK orchestrator / vision to the Sonnet session. |
@@ -164,6 +164,7 @@ python3 golden/validate_matrix.py --prompt "The capital of France is"  # golden 
 2026-08-07 23:50  mem-agent      ✅ mem_manager, scheduler, kv_cache INT8, test_kv_int8
 2026-08-07 23:51  coordinator    ✅ AGENTS.md fully updated (this entry)
 2026-08-07 23:xx  kernel-agent   ✅ DONE: Q4_K/Q5_K/Q6_K NEON + AVX2
+2026-09-04 11:06  issue-audit    ✅ Audited all open GitHub issues against implementation; closed #7, #50-#60 with full technical documentation
 ```
 
 ---
