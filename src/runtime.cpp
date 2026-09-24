@@ -6,6 +6,7 @@
 #include "llm/neon.h"
 #include "llm/mem_plan.h"
 #include "llm/plugin.h"
+#include "llm/semantic_cache.h"
 #include "llm/session.h"
 
 #include <cstdio>
@@ -73,6 +74,12 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx, kv_precision);
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
     tok_ = Tokenizer::from_source(*src_);
+}
+
+void Runtime::enable_semantic_cache(size_t max_bytes) {
+    if (!semantic_cache_) {
+        semantic_cache_ = std::make_unique<SemanticCache>(max_bytes, cfg_.n_layers, cfg_.kv_dim());
+    }
 }
 
 std::string Runtime::generate(const std::string& prompt, int max_new,
@@ -159,6 +166,23 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         committed_.resize((size_t)reuse_r);
         st.reused_prefix_tokens = (int)reuse_r;
     }
+
+    // ---- semantic cache (Radix Tree prefix match) ----
+    if (semantic_cache_) {
+        std::vector<float> cached_k, cached_v;
+        int64_t hit_len = semantic_cache_->find_longest_prefix(prompt_ids, cached_k, cached_v);
+        if (hit_len >= (int64_t)prompt_ids.size()) hit_len = (int64_t)prompt_ids.size() - 1;
+        if (hit_len > reuse_r) {
+            int64_t stride = hit_len * cfg_.kv_dim();
+            for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+                kv_->inject(l, cached_k.data() + l * stride, cached_v.data() + l * stride, hit_len);
+            }
+            pos_ = hit_len;
+            committed_.assign(prompt_ids.begin(), prompt_ids.begin() + hit_len);
+            reuse_r = hit_len;
+            st.semantic_cache_hits = hit_len;
+        }
+    }
     st.processed_tokens = (int)((int64_t)prompt_ids.size() - reuse_r);
 
     // ---- prefill (RFC-007: single-pass batched) ----
@@ -222,6 +246,11 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         st.rtk_steps         = rm.steps;
         st.rtk_max_seq       = rm.max_seq;
         st.rtk_peak_kv_bytes = rm.peak_kv_bytes;
+    }
+    if (semantic_cache_ && pos_ > 0) {
+        auto k_fn = [&](int64_t l, int64_t p) -> const float* { return kv_->k(l, p); };
+        auto v_fn = [&](int64_t l, int64_t p) -> const float* { return kv_->v(l, p); };
+        semantic_cache_->commit(committed_, k_fn, v_fn);
     }
     if (stats) *stats = st;
     return output;

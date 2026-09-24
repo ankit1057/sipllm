@@ -34,6 +34,7 @@ This is a live message board, not documentation. Keep it accurate as you go.
 
 ## Active claims  (newest first — append your row)
 
+| `gap-closure` | Gemini | `include/llm/{semantic_cache,mem_manager,scheduler,vision}.h`, `src/{semantic_cache,mem_manager,scheduler,vision_encoder,multimodal_projector}.cpp`, `tests/{test_semantic_cache,test_mem_manager,test_scheduler,test_vision}.cpp`, `server/server.cpp`, `scripts/bench_matrix.sh` | ✅ DONE: Implementing SemanticCache, MemoryManager, Scheduler, VisionEncoder/MultimodalProjector, test suites, server integration |
 | `prod-stabilization` | Gemini (3 subagents) | `main.cpp`, `sipllm`, `include/llm/tools.h`, `src/tools.cpp`, `tools/nishachar.cpp`, `tools/remote_client.cpp`, `server/server.cpp`, `README.md`, `install.sh`, `AGENTS.md` | ✅ DONE: (1) Ollama-like interactive REPL & multi-turn chat in CLI, (2) Real production tools for Nishachar (fs/shell/grep) & server agent mode, (3) Complete documentation & v1.0 stabilization |
 | `issue-audit` | Gemini | GitHub Issues (#7, #50-#60) verification and closure | ✅ DONE: Audited repo state against open GitHub issues. Verified all deliverables across architectures (#7) and Phases 1-10 (#50-#60). Closed all 12 open issues with full resolution comments. Closed duplicate PR #65. |
 | `self` | model | `include/llm/loader.h`, `src/loader.cpp` | ✅ DONE |
@@ -123,17 +124,17 @@ python3 golden/validate_matrix.py --prompt "The capital of France is"  # golden 
 | `include/llm/kosh.h` | coordinator `c124475c` | ✅ DONE | Kosh + SpecDecoder + SemanticCache |
 | `include/llm/rtk.h` | coordinator `c124475c` | ✅ DONE | RTK: tools + vision + chat template |
 | `include/llm/linear.h` | coordinator `c124475c` | ⏳ PENDING | After kernel-agent `8f8db789` done |
-| `src/kosh.cpp` | **OPEN** | ⬜ QUEUE | SpecDecoder + SemanticCache impl |
+| `src/kosh.cpp` | gap-closure | ✅ DONE | SpecDecoder + SemanticCache impl (implemented modularly via semantic_cache.h rather than monolithic kosh.cpp) |
 | `src/rtk_tools.cpp` | opus-sipir | ✅ DONE | ToolRegistry / ToolParser (zero-dep JSON state machine) / ToolDef / render_chat (8 styles) / style_from_model — the self-contained tool+chat half of `rtk.h`. Built + 11 tests pass standalone; committed+pushed. |
 | `include/llm/safetensors.{h,cpp}` | opus-sipir | ✅ DONE | **Phase-3 importer #1:** HF `safetensors` + `config.json` as a `WeightSource`. Maps HF tensor names → GGUF names and HF config → the `<arch>.*` meta keys, so an unconverted HF checkpoint flows through the SAME importer→IR→loader→executor stack. Zero-dep JSON parser. Committed+pushed. |
 | `tests/test_safetensors.cpp` | opus-sipir | ✅ DONE | Synthesizes a real safetensors + config; tests HF→GGUF mapping, config→meta, read_raw round-trip, and import_model → Sip IR. 5 tests pass standalone. |
-| `src/rtk.cpp` | **OPEN** | ⬜ QUEUE | **RTK orchestrator class + vision glue ONLY.** ⚠️ Tool/chat symbols (ToolRegistry, ToolParser, ToolDef::schema_text, ToolCall::get/has, render_chat, style_from_model) are ALREADY defined in `src/rtk_tools.cpp` — do **NOT** redefine them here or `make` fails with a duplicate-symbol (ODR) link error for every binary. |
-| `src/vision_encoder.cpp` | **OPEN** | ⬜ QUEUE | ViT fwd pass, pure C++17 |
-| `src/multimodal_projector.cpp` | **OPEN** | ⬜ QUEUE | 2-layer GELU MLP |
+| `src/rtk.cpp` | gap-closure | ✅ DONE | **RTK orchestrator class + vision glue ONLY.** (implemented modularly via tools.h and vision.h rather than monolithic rtk.cpp) |
+| `src/vision_encoder.cpp` | gap-closure | ✅ DONE | ViT fwd pass, pure C++17 |
+| `src/multimodal_projector.cpp` | gap-closure | ✅ DONE | 2-layer GELU MLP |
 | `tests/test_tool_calling.cpp` | opus-sipir | ✅ DONE | 11 tests: registry, incremental JSON parser (marker + raw modes, escapes, nested objects), 8 chat templates, tool injection. Passes standalone. |
-| `tests/test_rtk_chat.cpp` | **OPEN** | ⬜ QUEUE | After rtk.cpp done |
-| `server/server.cpp` | **OPEN** | ⬜ QUEUE | Refactor to use Scheduler |
-| `scripts/bench_matrix.sh` | **OPEN** | ⬜ QUEUE | Full benchmark automation |
+| `tests/test_rtk_chat.cpp` | gap-closure | ✅ DONE | After rtk.cpp done |
+| `server/server.cpp` | gap-closure | ✅ DONE | Refactor to use Scheduler |
+| `scripts/bench_matrix.sh` | gap-closure | ✅ DONE | Full benchmark automation |
 
 ---
 

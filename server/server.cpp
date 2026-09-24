@@ -19,6 +19,7 @@
 #include "llm/selftest.h"
 #include "llm/openai_api.h"
 #include "llm/nishachar.h"
+#include "llm/scheduler.h"
 #include "server/http.h"
 
 #include <cstdio>
@@ -76,17 +77,18 @@ int main(int argc, char** argv) {
     }
 
     std::unique_ptr<Runtime> rt;
+    std::unique_ptr<Scheduler> sched;
     std::string model_err;
     try {
         auto src = open_model(model, opt.use_mmap);
         rt = std::make_unique<Runtime>(std::move(src), opt, ctx, threads);
+        sched = std::make_unique<Scheduler>(rt.get(), 64);
         printf("loaded %s\n  %s\n", model.c_str(), rt->config().summary().c_str());
     } catch (const std::exception& e) {
         model_err = e.what();
         fprintf(stderr, "model load failed: %s (server still serves UI + selftest)\n", e.what());
     }
 
-    std::mutex gen_mutex;
     std::string html = read_file("index.html");
     if (html.empty()) html = "<!doctype html><h1>SipLLM API Server</h1>"
                              "<p>This server provides an OpenAI-compatible API at <code>/v1/chat/completions</code>.</p>"
@@ -140,7 +142,7 @@ int main(int argc, char** argv) {
     });
 
     srv.get("/api/generate", [&](http::Request& req, http::Response& res) {
-        if (!rt) { res.send(503, "text/plain", "model not loaded: " + model_err); return; }
+        if (!rt || !sched) { res.send(503, "text/plain", "model not loaded: " + model_err); return; }
         std::string prompt = req.q("prompt", "Hello");
         int n = std::stoi(req.q("n", "64"));
         SamplerConfig scfg;
@@ -148,53 +150,57 @@ int main(int argc, char** argv) {
         if (req.q("greedy", "0") == "1") scfg.temperature = 0.f;
         bool profile = req.q("profile", "1") == "1";
 
-        std::unique_lock<std::mutex> lk(gen_mutex, std::try_to_lock);
-        if (!lk.owns_lock()) { res.send(429, "text/plain", "busy"); return; }
-
         res.begin_sse();
-        rt->reset();
         bool alive = true;
 
-        if (profile) {
-            rt->set_profile_sink([&](int idx, const std::vector<Transformer::LayerTiming>& t, size_t peak) {
-                if (!alive) return;
-                std::string j = "{\"token\":" + std::to_string(idx) + ",\"peak_rss\":" +
-                                std::to_string(peak) + ",\"layers\":[";
-                for (size_t l = 0; l < t.size(); ++l) {
-                    char b[160];
-                    snprintf(b, sizeof b, "%s{\"io\":%.3f,\"deq\":%.3f,\"cmp\":%.3f,\"rss\":%zu}",
-                             l ? "," : "", t[l].io_ms, t[l].dequant_ms, t[l].compute_ms, t[l].rss_bytes);
-                    j += b;
-                }
-                j += "]}";
-                alive = res.sse_event(j, "profile");
-            });
+        auto fut = sched->submit_fn([&](Runtime& r) {
+            r.reset();
+            if (profile) {
+                r.set_profile_sink([&](int idx, const std::vector<Transformer::LayerTiming>& t, size_t peak) {
+                    if (!alive) return;
+                    std::string j = "{\"token\":" + std::to_string(idx) + ",\"peak_rss\":" +
+                                    std::to_string(peak) + ",\"layers\":[";
+                    for (size_t l = 0; l < t.size(); ++l) {
+                        char b[160];
+                        snprintf(b, sizeof b, "%s{\"io\":%.3f,\"deq\":%.3f,\"cmp\":%.3f,\"rss\":%zu}",
+                                 l ? "," : "", t[l].io_ms, t[l].dequant_ms, t[l].compute_ms, t[l].rss_bytes);
+                        j += b;
+                    }
+                    j += "]}";
+                    alive = res.sse_event(j, "profile");
+                });
+            }
+
+            GenStats st;
+            r.generate(prompt, n, scfg,
+                [&](const std::string& piece, int64_t id) {
+                    std::string j = "{\"piece\":\"" + json_escape(piece) + "\",\"id\":" + std::to_string(id) + "}";
+                    alive = res.sse_event(j, "token");
+                    return alive;
+                }, &st);
+
+            // final stats
+            char b[900];
+            snprintf(b, sizeof b,
+                "{\"prompt_tokens\":%d,\"gen_tokens\":%d,\"ttft\":%.4f,\"prefill_tok_s\":%.3f,"
+                "\"decode_tok_s\":%.3f,\"weights_mb\":%.2f,\"kv_mb\":%.2f,\"streamed_mb\":%.1f,"
+                "\"prefetch_hits\":%llu,\"prefetch_misses\":%llu,\"ctx_used\":%d,\"ctx_max\":%d,\"peak_rss_mb\":%.1f}",
+                st.prompt_tokens, st.gen_tokens, st.ttft_s, st.prefill_tok_s, st.decode_tok_s,
+                st.weights_resident_bytes / 1e6, st.kv_bytes / 1e6, st.bytes_read / 1e6,
+                (unsigned long long)st.prefetch_hits, (unsigned long long)st.prefetch_misses,
+                st.ctx_used, st.ctx_max, r.peak_rss() / 1e6);
+            res.sse_event(b, "done");
+        });
+
+        try {
+            fut.get();
+        } catch (const std::exception& e) {
+            res.send(503, "text/plain", std::string("scheduler error: ") + e.what());
         }
-
-        GenStats st;
-        rt->generate(prompt, n, scfg,
-            [&](const std::string& piece, int64_t id) {
-                std::string j = "{\"piece\":\"" + json_escape(piece) + "\",\"id\":" + std::to_string(id) + "}";
-                alive = res.sse_event(j, "token");
-                return alive;
-            }, &st);
-
-        // final stats
-        char b[900];
-        snprintf(b, sizeof b,
-            "{\"prompt_tokens\":%d,\"gen_tokens\":%d,\"ttft\":%.4f,\"prefill_tok_s\":%.3f,"
-            "\"decode_tok_s\":%.3f,\"weights_mb\":%.2f,\"kv_mb\":%.2f,\"streamed_mb\":%.1f,"
-            "\"prefetch_hits\":%llu,\"prefetch_misses\":%llu,\"ctx_used\":%d,\"ctx_max\":%d,\"peak_rss_mb\":%.1f}",
-            st.prompt_tokens, st.gen_tokens, st.ttft_s, st.prefill_tok_s, st.decode_tok_s,
-            st.weights_resident_bytes / 1e6, st.kv_bytes / 1e6, st.bytes_read / 1e6,
-            (unsigned long long)st.prefetch_hits, (unsigned long long)st.prefetch_misses,
-            st.ctx_used, st.ctx_max, rt->peak_rss() / 1e6);
-        res.sse_event(b, "done");
     });
 
     srv.post("/v1/chat/completions", [&](http::Request& req, http::Response& res) {
-        std::lock_guard<std::mutex> lk(gen_mutex);
-        if (!rt) {
+        if (!rt || !sched) {
             res.send(503, "application/json",
                      "{\"error\":{\"message\":\"model not loaded: " +
                      json_escape(model_err) + "\",\"type\":\"server_error\"}}");
@@ -214,74 +220,82 @@ int main(int argc, char** argv) {
         scfg.temperature = cr.temperature <= 0.f ? 0.f : cr.temperature;
 
         ChatTemplateStyle style = style_from_model(rt->config());
-
-        // Accumulate prompt/gen token counts across every generation this
-        // request drives (one turn for passthrough, N for the agent loop).
-        GenStats acc;
-        auto gen = [&](const std::string& prompt) -> std::string {
-            GenStats st;
-            rt->reset();
-            std::string out = rt->generate(prompt, cr.max_tokens, scfg, nullptr, &st);
-            acc.prompt_tokens += st.prompt_tokens;
-            acc.gen_tokens += st.gen_tokens;
-            return out;
-        };
-
         ChatCompletionResponse response;
 
-        if (cr.agent) {
-            // Agent mode: run the Nishachar loop with real system tools.
-            Nishachar nish;
-            register_system_tools([&](ToolDef d, ToolHandler h) {
-                nish.add_tool(std::move(d), std::move(h));
-            }, ".");
+        try {
+            auto fut = sched->submit_fn([&](Runtime& r) {
+                // Accumulate prompt/gen token counts across every generation this
+                // request drives (one turn for passthrough, N for the agent loop).
+                GenStats acc;
+                auto gen = [&](const std::string& prompt) -> std::string {
+                    GenStats st;
+                    r.reset();
+                    std::string out = r.generate(prompt, cr.max_tokens, scfg, nullptr, &st);
+                    acc.prompt_tokens += st.prompt_tokens;
+                    acc.gen_tokens += st.gen_tokens;
+                    return out;
+                };
 
-            AgentConfig cfg;
-            cfg.max_steps = 10;
-            cfg.max_new_tokens = cr.max_tokens > 0 ? cr.max_tokens : 512;
-            cfg.style = style;
-            AgentResult ar = nish.run(last_user_message(cr.messages), gen, cfg);
-            response.content = ar.final_text.empty() ? ar.report() : ar.final_text;
-            response.finish_reason =
-                ar.stop == AgentStop::MaxSteps ? "length" : "stop";
-        } else {
-            // Passthrough mode: one model turn. A completed tool call is handed
-            // back to the client in OpenAI format for it to execute.
-            ToolRegistry registry;
-            for (const auto& t : cr.tools) registry.register_tool(t);
-            std::string prompt = render_chat(cr.messages, registry, style, true);
-            std::string out = gen(prompt);
-            ToolParser parser(registry);
-            parser.feed(out);
-            if (parser.state() == ToolParser::State::Done) {
-                const ToolCall& call = parser.parsed_call();
-                std::string args = "{";
-                for (size_t i = 0; i < call.args.size(); ++i) {
-                    if (i) args += ",";
-                    args += "\"" + json_escape(call.args[i].key) + "\":\"" +
-                            json_escape(call.args[i].value) + "\"";
+                if (cr.agent) {
+                    // Agent mode: run the Nishachar loop with real system tools.
+                    Nishachar nish;
+                    register_system_tools([&](ToolDef d, ToolHandler h) {
+                        nish.add_tool(std::move(d), std::move(h));
+                    }, ".");
+
+                    AgentConfig cfg;
+                    cfg.max_steps = 10;
+                    cfg.max_new_tokens = cr.max_tokens > 0 ? cr.max_tokens : 512;
+                    cfg.style = style;
+                    AgentResult ar = nish.run(last_user_message(cr.messages), gen, cfg);
+                    response.content = ar.final_text.empty() ? ar.report() : ar.final_text;
+                    response.finish_reason =
+                        ar.stop == AgentStop::MaxSteps ? "length" : "stop";
+                } else {
+                    // Passthrough mode: one model turn. A completed tool call is handed
+                    // back to the client in OpenAI format for it to execute.
+                    ToolRegistry registry;
+                    for (const auto& t : cr.tools) registry.register_tool(t);
+                    std::string prompt = render_chat(cr.messages, registry, style, true);
+                    std::string out = gen(prompt);
+                    ToolParser parser(registry);
+                    parser.feed(out);
+                    if (parser.state() == ToolParser::State::Done) {
+                        const ToolCall& call = parser.parsed_call();
+                        std::string args = "{";
+                        for (size_t i = 0; i < call.args.size(); ++i) {
+                            if (i) args += ",";
+                            args += "\"" + json_escape(call.args[i].key) + "\":\"" +
+                                    json_escape(call.args[i].value) + "\"";
+                        }
+                        args += "}";
+                        ResponseToolCall rc;
+                        rc.id = "call_1";
+                        rc.name = call.name;
+                        rc.arguments = args;
+                        response.tool_calls.push_back(rc);
+                    } else {
+                        response.content = out;
+                        response.finish_reason =
+                            acc.gen_tokens >= cr.max_tokens ? "length" : "stop";
+                    }
                 }
-                args += "}";
-                ResponseToolCall rc;
-                rc.id = "call_1";
-                rc.name = call.name;
-                rc.arguments = args;
-                response.tool_calls.push_back(rc);
-            } else {
-                response.content = out;
-                response.finish_reason =
-                    acc.gen_tokens >= cr.max_tokens ? "length" : "stop";
-            }
+
+                static int chat_counter = 0;
+                response.id = "chatcmpl-" + std::to_string(++chat_counter);
+                response.created = (long)time(nullptr);
+                response.model = cr.model.empty() ? r.config().arch : cr.model;
+                response.prompt_tokens = acc.prompt_tokens;
+                response.completion_tokens = acc.gen_tokens;
+            });
+
+            fut.get();
+            res.send(200, "application/json", build_chat_response(response));
+        } catch (const std::exception& e) {
+            res.send(503, "application/json",
+                     "{\"error\":{\"message\":\"scheduler queue error: " +
+                     json_escape(e.what()) + "\",\"type\":\"server_error\"}}");
         }
-
-        static int chat_counter = 0;
-        response.id = "chatcmpl-" + std::to_string(++chat_counter);
-        response.created = (long)time(nullptr);
-        response.model = cr.model.empty() ? rt->config().arch : cr.model;
-        response.prompt_tokens = acc.prompt_tokens;
-        response.completion_tokens = acc.gen_tokens;
-
-        res.send(200, "application/json", build_chat_response(response));
     });
 
     return srv.run();
