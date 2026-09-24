@@ -7,6 +7,7 @@
 #include "llm/mem_plan.h"
 #include "llm/plugin.h"
 #include "llm/semantic_cache.h"
+#include "llm/spec_decoder.h"
 #include "llm/session.h"
 
 #include <cstdio>
@@ -79,6 +80,13 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
 void Runtime::enable_semantic_cache(size_t max_bytes) {
     if (!semantic_cache_) {
         semantic_cache_ = std::make_unique<SemanticCache>(max_bytes, cfg_.n_layers, cfg_.kv_dim());
+    }
+}
+
+void Runtime::enable_speculative_decoding(int max_draft_len) {
+    if (!spec_decoder_) {
+        spec_decoder_ = std::make_unique<PromptLookupDecoder>();
+        max_draft_len_ = max_draft_len;
     }
 }
 
@@ -212,7 +220,7 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     // ---- decode ----
     if (profile_sink_) tf_->enable_profiling(true);
     double t_decode_start = now_sec();
-    for (int n = 0; n < max_new; ++n) {
+    for (int n = 0; n < max_new; ) {
         if (next < 0) break;
         if (tok_.is_eog(next)) break;
         if (pos_ >= kv_->max_ctx()) break;
@@ -222,12 +230,62 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         ++st.gen_tokens;
         if (on_token && !on_token(piece, next)) break;
 
-        const float* logits = tf_->forward(next, pos_);
         committed_.push_back(next);
-        ++pos_;
-        if (rtk) rtk->on_step(kv_view());
-        if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
-        next = sampler.sample(logits, vocab);
+        ++n;
+
+        std::vector<int64_t> draft;
+        if (spec_decoder_ && n < max_new && pos_ + max_draft_len_ < kv_->max_ctx()) {
+            draft = spec_decoder_->draft(committed_, std::min(max_draft_len_, max_new - n));
+        }
+
+        if (draft.empty()) {
+            const float* logits = tf_->forward(next, pos_);
+            ++pos_;
+            if (rtk) rtk->on_step(kv_view());
+            if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
+            next = sampler.sample(logits, vocab);
+        } else {
+            int K = (int)draft.size();
+            std::vector<int64_t> batch;
+            batch.reserve(K + 1);
+            batch.push_back(next);
+            batch.insert(batch.end(), draft.begin(), draft.end());
+
+            const float* spec_logits = tf_->spec_forward(batch.data(), K + 1, pos_);
+            if (rtk) rtk->on_step(kv_view());
+            if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
+
+            for (int i = 0; i <= K; ++i) {
+                const float* step_logits = spec_logits + (size_t)i * vocab;
+                int sampled = sampler.sample(step_logits, vocab);
+                
+                if (i < K) {
+                    if (sampled == draft[i]) {
+                        // Accept draft
+                        piece = tok_.decode_token(draft[i]);
+                        output += piece;
+                        ++st.gen_tokens;
+                        ++pos_;
+                        if (on_token && !on_token(piece, draft[i])) {
+                            next = -1;
+                            break;
+                        }
+                        committed_.push_back(draft[i]);
+                        ++n;
+                    } else {
+                        // Reject draft
+                        ++pos_;
+                        kv_->set_seq_len(pos_);
+                        next = sampled;
+                        break;
+                    }
+                } else {
+                    // All accepted, this is the prediction for the next step
+                    ++pos_;
+                    next = sampled;
+                }
+            }
+        }
     }
     if (profile_sink_) tf_->enable_profiling(false);
     double t_end = now_sec();

@@ -42,6 +42,13 @@ public:
     // the KV cache, so there is no per-arch fallback.
     const float* prefill(const int64_t* tokens, int64_t n, int64_t start_pos);
 
+    // Speculative forward: batched like prefill, but returns the logits for ALL
+    // `n` positions instead of just the last one. Required for speculative
+    // decoding verification where we must check the argmax/distribution of
+    // every drafted token against the target model.
+    // Returns a pointer to an internal buffer of size (n * vocab_size).
+    const float* spec_forward(const int64_t* tokens, int64_t n, int64_t start_pos);
+
     // RoPE is exposed for testing. Optional llama3 frequency scaling: when
     // `rs.llama3` is set the per-wavelength stretch (issue #9) is applied;
     // default-constructed => plain RoPE, identical to pre-#9 behavior.
@@ -102,6 +109,7 @@ private:
     std::vector<float> router_;  // n_experts (MoE gating scores)
     std::vector<float> moe_;     // dim (MoE weighted expert accumulator)
     std::vector<float> logits_;  // vocab
+    std::vector<float> spec_logits_; // n * vocab (for spec_forward)
     // Prefill-only: P residual streams (n x dim), the sole per-position state
     // that must survive the layer sweep. Sized on demand in prefill(); the only
     // buffer that grows with prompt length (tiny vs weights/KV — see RFC-007).

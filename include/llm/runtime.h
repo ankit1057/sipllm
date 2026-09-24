@@ -11,6 +11,7 @@
 #include "llm/sampler.h"
 #include "llm/tokenizer.h"
 #include "llm/semantic_cache.h"
+#include "llm/spec_decoder.h"
 #include "llm/transformer.h"
 #include "llm/weight_source.h"
 
@@ -121,6 +122,9 @@ public:
     // the model that wrote it.
     // Enable Semantic Cache (Radix Tree + memcpy injection)
     void enable_semantic_cache(size_t max_bytes);
+    
+    // Enable Speculative Decoding (Prompt Lookup)
+    void enable_speculative_decoding(int max_draft_len = 3);
 
     bool save_session(const std::string& path) const;
     bool load_session(const std::string& path);
@@ -141,6 +145,8 @@ private:
     bool reuse_ = false;                 // cross-turn context reuse (opt-in)
     std::vector<int64_t> committed_;     // mirrors tokens in KV [0,pos_) (for reuse + session save)
     std::unique_ptr<class SemanticCache> semantic_cache_;
+    std::unique_ptr<class SpecDecoder> spec_decoder_;
+    int max_draft_len_ = 0;
 };
 
 } // namespace llm
