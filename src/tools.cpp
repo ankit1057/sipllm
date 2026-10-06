@@ -632,7 +632,10 @@ ToolHandler make_edit_file_handler(const std::string& workdir) {
         const std::string new_s = call.get("new_string");
         const bool replace_all = tool_bool_arg(call, "replace_all");
         if (old_s.empty()) return "error: old_string is empty (use write_file to create a file)";
-        if (old_s == new_s) return "error: old_string and new_string are identical; nothing to do";
+        if (old_s == new_s)
+            return "error: old_string and new_string are identical, so nothing changed. "
+                   "To DELETE those lines pass new_string as an empty string (new_string:\"\"); "
+                   "to change them, new_string must contain the edited text";
 
         std::filesystem::path p;
         std::string err;
