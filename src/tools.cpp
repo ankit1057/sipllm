@@ -614,11 +614,15 @@ ToolHandler make_write_file_handler(const std::string& workdir) {
 ToolDef make_edit_file_tool() {
     ToolDef d;
     d.name = "edit_file";
-    d.description = "Replace exact text in a file. old_string must match exactly once (include surrounding lines to make it unique) unless replace_all=true.";
+    d.description = "Edit a file. Either replace exact text (old_string must match exactly once unless replace_all=true), "
+                    "or replace a line range by number: start_line + end_line (1-based, inclusive, as shown by read_file) "
+                    "with new_string; omit new_string to DELETE those lines.";
     d.params.push_back({"path", ToolParamType::String, true, "", ""});
-    d.params.push_back({"old_string", ToolParamType::String, true, "", ""});
-    d.params.push_back({"new_string", ToolParamType::String, true, "", ""});
+    d.params.push_back({"old_string", ToolParamType::String, false, "", ""});
+    d.params.push_back({"new_string", ToolParamType::String, false, "", ""});
     d.params.push_back({"replace_all", ToolParamType::Bool, false, "", ""});
+    d.params.push_back({"start_line", ToolParamType::Int, false, "", ""});
+    d.params.push_back({"end_line", ToolParamType::Int, false, "", ""});
     return d;
 }
 
@@ -626,7 +630,42 @@ ToolHandler make_edit_file_handler(const std::string& workdir) {
     return [workdir](const ToolCall& call) -> std::string {
         std::string raw_path = call.get("path", call.get("file_path", ""));
         if (raw_path.empty()) return "error: 'path' argument is required";
-        if (!call.has("old_string")) return "error: 'old_string' argument is required";
+        if (call.has("start_line")) {
+            // Line-range mode: replace (or, with no new_string, delete) lines
+            // [start_line, end_line] — no exact-text copy needed.
+            int64_t a = 0, b = 0;
+            try {
+                a = std::stoll(call.get("start_line"));
+                b = call.has("end_line") ? std::stoll(call.get("end_line")) : a;
+            } catch (...) { return "error: start_line/end_line must be integers"; }
+            std::filesystem::path p;
+            std::string err;
+            if (!resolve_tool_path(raw_path, workdir, p, err)) return err;
+            std::string text;
+            if (!slurp_file(p, text)) return "error: file not found or unreadable: " + raw_path;
+            std::vector<size_t> starts{0};
+            for (size_t k = 0; k < text.size(); ++k)
+                if (text[k] == '\n' && k + 1 < text.size()) starts.push_back(k + 1);
+            const int64_t n_lines = text.empty() ? 0 : (int64_t)starts.size();
+            if (a < 1 || b < a || b > n_lines)
+                return "error: line range " + std::to_string(a) + "-" + std::to_string(b) +
+                       " is outside the file (1-" + std::to_string(n_lines) + ")";
+            const size_t from = starts[(size_t)a - 1];
+            const size_t to = b < n_lines ? starts[(size_t)b] : text.size();
+            std::string repl = call.get("new_string", "");
+            if (!repl.empty() && repl.back() != '\n' && to > from && text[to - 1] == '\n') repl += '\n';
+            const std::string out = text.substr(0, from) + repl + text.substr(to);
+            std::ofstream f(p, std::ios::binary | std::ios::trunc);
+            if (!f.is_open()) return "error: failed to open file for writing: " + raw_path;
+            f.write(out.data(), (std::streamsize)out.size());
+            f.close();
+            if (f.fail()) return "error: failed writing to: " + raw_path;
+            const size_t ctx_from = a > 2 ? (size_t)a - 2 : 1;
+            return std::string("ok: ") + (repl.empty() ? "deleted" : "replaced") + " lines " + std::to_string(a) +
+                   "-" + std::to_string(b) + " in " + raw_path + "\n" +
+                   numbered_lines(out, ctx_from, ctx_from + std::max<size_t>(4, count_lines(repl) + 3));
+        }
+        if (!call.has("old_string")) return "error: 'old_string' (or start_line/end_line) argument is required";
         if (!call.has("new_string")) return "error: 'new_string' argument is required";
         const std::string old_s = call.get("old_string");
         const std::string new_s = call.get("new_string");
@@ -635,7 +674,8 @@ ToolHandler make_edit_file_handler(const std::string& workdir) {
         if (old_s == new_s)
             return "error: old_string and new_string are identical, so nothing changed. "
                    "To DELETE those lines pass new_string as an empty string (new_string:\"\"); "
-                   "to change them, new_string must contain the edited text";
+                   "to change them, new_string must contain the edited text. Easiest: delete by line number with "
+                   "start_line and end_line (from read_file) and no new_string";
 
         std::filesystem::path p;
         std::string err;

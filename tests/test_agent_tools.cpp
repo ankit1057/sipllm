@@ -242,6 +242,30 @@ TEST(print_schemas) {
     CHECK(!reg.system_prompt_block().empty());
 }
 
+TEST(edit_file_line_range_delete_and_replace) {
+    std::string d = fresh_dir("editlines");
+    put(d + "/w.dart", "a\nb\nc\nd\n");
+    ToolHandler ed = make_edit_file_handler(d);
+    // Delete one line by number (no new_string), the case Gemma 4 could not
+    // express with exact-text replacement.
+    std::string r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}, {"end_line", "2"}}));
+    CHECK_MSG(has(r, "ok: deleted lines 2-2"), r);
+    CHECK(slurp(d + "/w.dart") == "a\nc\nd\n");
+    // Replace a range; a missing trailing newline is added.
+    r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}, {"end_line", "3"}, {"new_string", "X"}}));
+    CHECK_MSG(has(r, "ok: replaced lines 2-3"), r);
+    CHECK(slurp(d + "/w.dart") == "a\nX\n");
+    // Last line, no end_line.
+    r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}}));
+    CHECK(slurp(d + "/w.dart") == "a\n");
+    CHECK(has(ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "5"}})), "outside the file"));
+    CHECK(has(ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "x"}})), "must be integers"));
+    // Identical old/new now points at the line-number delete.
+    put(d + "/v.dart", "keep\n");
+    CHECK(has(ed(mk("edit_file", {{"path", "v.dart"}, {"old_string", "keep"}, {"new_string", "keep"}})),
+              "start_line"));
+}
+
 int main() {
     printf("== test_agent_tools ==\n");
     return llmtest::run_all();
