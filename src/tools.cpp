@@ -399,18 +399,97 @@ std::string render_chat(const std::vector<ChatMessage>& messages,
 // Production System Tools (read_file, write_file, list_dir, bash, grep_search)
 // ============================================================================
 
-static std::filesystem::path resolve_tool_path(const std::string& raw_path, const std::string& workdir) {
-    std::filesystem::path p(raw_path);
-    if (p.is_absolute()) return p;
-    if (workdir.empty() || workdir == ".") return p;
-    return std::filesystem::path(workdir) / p;
+// Resolve a model-supplied path against the agent's workdir and refuse anything
+// that lands outside it ("../" escapes, absolute paths elsewhere, symlinks
+// pointing out). weakly_canonical resolves symlinks of the existing prefix and
+// normalizes the rest, so a not-yet-existing file (write_file) still resolves.
+// Returns false and sets `err` (never throws).
+// Component-wise prefix check (a string prefix would let /work2 pass for /work).
+// Both paths must already be canonical.
+static bool path_within(const std::filesystem::path& base, const std::filesystem::path& target) {
+    auto bi = base.begin(), ti = target.begin();
+    for (; bi != base.end(); ++bi, ++ti) {
+        if (bi->empty()) continue;   // trailing-separator artifact
+        if (ti == target.end() || *bi != *ti) return false;
+    }
+    return true;
+}
+
+static bool resolve_tool_path(const std::string& raw_path, const std::string& workdir,
+                              std::filesystem::path& out, std::string& err) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path base = fs::absolute(workdir.empty() ? fs::path(".") : fs::path(workdir), ec);
+    if (ec) { err = "error: invalid workdir: " + ec.message(); return false; }
+    base = fs::weakly_canonical(base, ec);
+    if (ec) { err = "error: invalid workdir: " + ec.message(); return false; }
+    fs::path p(raw_path);
+    fs::path target = p.is_absolute() ? p : base / p;
+    target = fs::weakly_canonical(target, ec);
+    if (ec) { err = "error: cannot resolve path '" + raw_path + "': " + ec.message(); return false; }
+    if (!path_within(base, target)) {
+        err = "error: path '" + raw_path + "' is outside the working directory "
+              "(use a path relative to " + base.string() + ")";
+        return false;
+    }
+    out = target;
+    return true;
+}
+
+// Parse a model-supplied integer argument ("10", "10.0", "\"10\""); -1 if absent/bad.
+static long long tool_int_arg(const ToolCall& call, const std::string& key) {
+    if (!call.has(key)) return -1;
+    std::string v = call.get(key);
+    try { size_t used = 0; long long n = std::stoll(v, &used); return used ? n : -1; }
+    catch (...) { return -1; }
+}
+
+static bool tool_bool_arg(const ToolCall& call, const std::string& key) {
+    std::string v = call.get(key);
+    for (char& c : v) c = (char)std::tolower((unsigned char)c);
+    return v == "true" || v == "1" || v == "yes";
+}
+
+static bool has_nul_byte(const std::string& s, size_t probe = 8192) {
+    return s.find('\0', 0) < std::min(probe, s.size());
+}
+
+static bool slurp_file(const std::filesystem::path& p, std::string& out) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f.is_open()) return false;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+// 1-based line number of byte offset `pos` in `s`.
+static size_t line_of(const std::string& s, size_t pos) {
+    return 1 + (size_t)std::count(s.begin(), s.begin() + (std::ptrdiff_t)std::min(pos, s.size()), '\n');
+}
+
+// Lines [first, last] (1-based, inclusive) of `s`, cat -n style ("N\t...").
+static std::string numbered_lines(const std::string& s, size_t first, size_t last,
+                                  size_t max_line_chars = 300) {
+    std::ostringstream o;
+    std::istringstream in(s);
+    std::string line;
+    size_t n = 0;
+    while (std::getline(in, line) && n < last) {
+        if (++n < first) continue;
+        if (line.size() > max_line_chars) line = line.substr(0, max_line_chars) + "...";
+        o << n << "\t" << line << "\n";
+    }
+    return o.str();
 }
 
 ToolDef make_read_file_tool() {
     ToolDef d;
     d.name = "read_file";
-    d.description = "Read the contents of a file at the specified path safely.";
-    d.params.push_back({"path", ToolParamType::String, true, "Path to the file to read", ""});
+    d.description = "Read a text file. Output lines are prefixed 'N<tab>' (line numbers, not file content).";
+    d.params.push_back({"path", ToolParamType::String, true, "", ""});
+    d.params.push_back({"offset", ToolParamType::Int, false, "first line to read (1-based)", ""});
+    d.params.push_back({"limit", ToolParamType::Int, false, "max lines (default 200)", ""});
     return d;
 }
 
@@ -420,45 +499,79 @@ ToolHandler make_read_file_handler(const std::string& workdir) {
         if (raw_path.empty()) {
             return "error: 'path' argument is required";
         }
-        std::filesystem::path p = resolve_tool_path(raw_path, workdir);
+        std::filesystem::path p;
+        std::string err;
+        if (!resolve_tool_path(raw_path, workdir, p, err)) return err;
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) {
             return "error: file not found: " + raw_path;
         }
         if (std::filesystem::is_directory(p, ec)) {
-            return "error: path is a directory: " + raw_path;
-        }
-        uintmax_t sz = std::filesystem::file_size(p, ec);
-        if (ec) {
-            return "error: cannot determine file size: " + ec.message();
+            return "error: path is a directory (use list_dir): " + raw_path;
         }
         std::ifstream f(p, std::ios::binary);
         if (!f.is_open()) {
             return "error: failed to open file: " + raw_path;
         }
-        constexpr uintmax_t MAX_READ_BYTES = 512 * 1024; // 512KB cap
-        if (sz > MAX_READ_BYTES) {
-            std::string buf(MAX_READ_BYTES, '\0');
-            f.read(&buf[0], MAX_READ_BYTES);
-            std::streamsize bytes_read = f.gcount();
-            buf.resize(bytes_read);
-            buf += "\n[... file truncated: read " + std::to_string(bytes_read) +
-                   " of " + std::to_string(sz) + " bytes ...]";
-            return buf;
+        // Kept under the Nishachar CLI's ~6000-char tool-result cap so a page
+        // is never middle-truncated and the paging note always survives.
+        constexpr long long DEFAULT_LIMIT = 200;
+        constexpr size_t MAX_OUT_BYTES = 5000;   // per-call output cap
+        constexpr size_t MAX_LINE_CHARS = 2000;
+        long long offset = tool_int_arg(call, "offset");
+        long long limit = tool_int_arg(call, "limit");
+        if (offset < 1) offset = 1;
+        if (limit < 1) limit = DEFAULT_LIMIT;
+
+        std::ostringstream o;
+        std::string line;
+        long long n = 0, last_shown = 0;
+        bool byte_capped = false, checked_binary = false;
+        size_t out_bytes = 0;
+        while (std::getline(f, line)) {
+            ++n;
+            if (!checked_binary) {
+                checked_binary = true;
+                if (line.find('\0') != std::string::npos)
+                    return "error: binary file, not shown: " + raw_path;
+            }
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (n < offset || n >= offset + limit || byte_capped) continue;
+            if (line.size() > MAX_LINE_CHARS)
+                line = line.substr(0, MAX_LINE_CHARS) + "... [line truncated]";
+            std::string row = std::to_string(n) + "\t" + line + "\n";
+            if (out_bytes + row.size() > MAX_OUT_BYTES && last_shown > 0) { byte_capped = true; continue; }
+            o << row;
+            out_bytes += row.size();
+            last_shown = n;
         }
-        std::string content((std::istreambuf_iterator<char>(f)),
-                             std::istreambuf_iterator<char>());
-        return content;
+        const long long total = n;
+        if (total == 0) return "(empty file)";
+        if (offset > total)
+            return "error: offset " + std::to_string(offset) + " is past end of file (" +
+                   std::to_string(total) + " lines)";
+        std::string out = o.str();
+        if (last_shown < total)
+            out += "[showing lines " + std::to_string(offset) + "-" + std::to_string(last_shown) +
+                   " of " + std::to_string(total) + "; use offset=" + std::to_string(last_shown + 1) +
+                   " to read more]";
+        return out;
     };
 }
 
 ToolDef make_write_file_tool() {
     ToolDef d;
     d.name = "write_file";
-    d.description = "Write text content to a file at the specified path (creates parent directories if needed).";
-    d.params.push_back({"path", ToolParamType::String, true, "Path to the file to write", ""});
-    d.params.push_back({"content", ToolParamType::String, true, "Content to write into the file", ""});
+    d.description = "Create or overwrite a file (makes parent dirs). Prefer edit_file for changes to existing files.";
+    d.params.push_back({"path", ToolParamType::String, true, "", ""});
+    d.params.push_back({"content", ToolParamType::String, true, "", ""});
     return d;
+}
+
+static size_t count_lines(const std::string& s) {
+    if (s.empty()) return 0;
+    size_t n = (size_t)std::count(s.begin(), s.end(), '\n');
+    return s.back() == '\n' ? n : n + 1;
 }
 
 ToolHandler make_write_file_handler(const std::string& workdir) {
@@ -467,9 +580,17 @@ ToolHandler make_write_file_handler(const std::string& workdir) {
         if (raw_path.empty()) {
             return "error: 'path' argument is required";
         }
+        if (!call.has("content")) {
+            return "error: 'content' argument is required";
+        }
         std::string content = call.get("content");
-        std::filesystem::path p = resolve_tool_path(raw_path, workdir);
+        std::filesystem::path p;
+        std::string err;
+        if (!resolve_tool_path(raw_path, workdir, p, err)) return err;
         std::error_code ec;
+        if (std::filesystem::is_directory(p, ec)) {
+            return "error: path is a directory: " + raw_path;
+        }
         if (p.has_parent_path()) {
             std::filesystem::create_directories(p.parent_path(), ec);
             if (ec) {
@@ -480,20 +601,126 @@ ToolHandler make_write_file_handler(const std::string& workdir) {
         if (!f.is_open()) {
             return "error: failed to open file for writing: " + raw_path;
         }
-        f.write(content.data(), content.size());
+        f.write(content.data(), (std::streamsize)content.size());
         f.close();
         if (f.fail()) {
             return "error: failed writing content to: " + raw_path;
         }
-        return "ok: wrote " + std::to_string(content.size()) + " bytes to " + raw_path;
+        return "ok: wrote " + std::to_string(content.size()) + " bytes (" +
+               std::to_string(count_lines(content)) + " lines) to " + raw_path;
+    };
+}
+
+ToolDef make_edit_file_tool() {
+    ToolDef d;
+    d.name = "edit_file";
+    d.description = "Replace exact text in a file. old_string must match exactly once (include surrounding lines to make it unique) unless replace_all=true.";
+    d.params.push_back({"path", ToolParamType::String, true, "", ""});
+    d.params.push_back({"old_string", ToolParamType::String, true, "", ""});
+    d.params.push_back({"new_string", ToolParamType::String, true, "", ""});
+    d.params.push_back({"replace_all", ToolParamType::Bool, false, "", ""});
+    return d;
+}
+
+ToolHandler make_edit_file_handler(const std::string& workdir) {
+    return [workdir](const ToolCall& call) -> std::string {
+        std::string raw_path = call.get("path", call.get("file_path", ""));
+        if (raw_path.empty()) return "error: 'path' argument is required";
+        if (!call.has("old_string")) return "error: 'old_string' argument is required";
+        if (!call.has("new_string")) return "error: 'new_string' argument is required";
+        const std::string old_s = call.get("old_string");
+        const std::string new_s = call.get("new_string");
+        const bool replace_all = tool_bool_arg(call, "replace_all");
+        if (old_s.empty()) return "error: old_string is empty (use write_file to create a file)";
+        if (old_s == new_s) return "error: old_string and new_string are identical; nothing to do";
+
+        std::filesystem::path p;
+        std::string err;
+        if (!resolve_tool_path(raw_path, workdir, p, err)) return err;
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec)) return "error: file not found: " + raw_path;
+        if (std::filesystem::is_directory(p, ec)) return "error: path is a directory: " + raw_path;
+        std::string text;
+        if (!slurp_file(p, text)) return "error: failed to open file: " + raw_path;
+        if (has_nul_byte(text)) return "error: binary file, cannot edit: " + raw_path;
+
+        std::vector<size_t> hits;
+        for (size_t pos = text.find(old_s); pos != std::string::npos;
+             pos = text.find(old_s, pos + old_s.size()))
+            hits.push_back(pos);
+
+        if (hits.empty()) {
+            std::string msg = "error: old_string not found in " + raw_path +
+                              ". It must match the file exactly (whitespace, indentation; no line-number prefixes).";
+            // Point at where the first meaningful line of old_string does occur.
+            std::istringstream in(old_s);
+            std::string first;
+            while (std::getline(in, first)) {
+                size_t b = first.find_first_not_of(" \t\r");
+                if (b == std::string::npos) continue;
+                first = first.substr(b, first.find_last_not_of(" \t\r") - b + 1);
+                break;
+            }
+            if (!first.empty()) {
+                std::vector<size_t> near;
+                for (size_t pos = text.find(first); pos != std::string::npos && near.size() < 3;
+                     pos = text.find(first, pos + first.size()))
+                    near.push_back(line_of(text, pos));
+                if (!near.empty()) {
+                    msg += " Its first line occurs at:\n";
+                    for (size_t ln : near)
+                        msg += numbered_lines(text, ln, ln + 2);
+                    msg += "Re-read those lines and copy them exactly.";
+                } else {
+                    msg += " Use read_file to see the current content.";
+                }
+            }
+            return msg;
+        }
+        if (hits.size() > 1 && !replace_all) {
+            std::string msg = "error: old_string matches " + std::to_string(hits.size()) +
+                              " times in " + raw_path + "; add surrounding lines to make it unique, "
+                              "or set replace_all=true. Matches at:\n";
+            for (size_t i = 0; i < hits.size() && i < 5; ++i) {
+                size_t ln = line_of(text, hits[i]);
+                msg += numbered_lines(text, ln, ln);
+            }
+            if (hits.size() > 5) msg += "...\n";
+            return msg;
+        }
+
+        std::string out;
+        out.reserve(text.size() + hits.size() * (new_s.size() + 1));
+        size_t prev = 0;
+        for (size_t pos : hits) {
+            out.append(text, prev, pos - prev);
+            out += new_s;
+            prev = pos + old_s.size();
+        }
+        out.append(text, prev, std::string::npos);
+
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) return "error: failed to open file for writing: " + raw_path;
+        f.write(out.data(), (std::streamsize)out.size());
+        f.close();
+        if (f.fail()) return "error: failed writing to: " + raw_path;
+
+        // Show the edited region (first replacement) so the model can verify
+        // without another read_file round-trip.
+        size_t first_ln = line_of(out, hits[0]);
+        size_t new_lines = std::max<size_t>(1, count_lines(new_s));
+        size_t from = first_ln > 2 ? first_ln - 2 : 1;
+        size_t to = first_ln + std::min<size_t>(new_lines, 8) + 1;
+        return "ok: replaced " + std::to_string(hits.size()) + " occurrence(s) in " + raw_path +
+               "\n" + numbered_lines(out, from, to);
     };
 }
 
 ToolDef make_list_dir_tool() {
     ToolDef d;
     d.name = "list_dir";
-    d.description = "List files and directories within a specified path.";
-    d.params.push_back({"path", ToolParamType::String, false, "Path to directory (default: current working directory)", "."});
+    d.description = "List a directory (default: workdir).";
+    d.params.push_back({"path", ToolParamType::String, false, "", "."});
     return d;
 }
 
@@ -501,7 +728,9 @@ ToolHandler make_list_dir_handler(const std::string& workdir) {
     return [workdir](const ToolCall& call) -> std::string {
         std::string raw_path = call.get("path", call.get("dir", call.get("directory", ".")));
         if (raw_path.empty()) raw_path = ".";
-        std::filesystem::path p = resolve_tool_path(raw_path, workdir);
+        std::filesystem::path p;
+        std::string err;
+        if (!resolve_tool_path(raw_path, workdir, p, err)) return err;
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) {
             return "error: path not found: " + raw_path;
@@ -545,8 +774,8 @@ ToolHandler make_list_dir_handler(const std::string& workdir) {
 ToolDef make_bash_tool() {
     ToolDef d;
     d.name = "bash";
-    d.description = "Execute a bash shell command and capture combined stdout/stderr.";
-    d.params.push_back({"command", ToolParamType::String, true, "The command string to execute", ""});
+    d.description = "Run a shell command in the workdir; returns stdout+stderr and [exit code: N].";
+    d.params.push_back({"command", ToolParamType::String, true, "", ""});
     return d;
 }
 
@@ -594,18 +823,15 @@ ToolHandler make_bash_handler(const std::string& workdir) {
 #else
         exit_code = status;
 #endif
-        std::string result;
-        if (exit_code != 0) {
-            result += "[exit status: " + std::to_string(exit_code) + "]\n";
-        }
-        if (output.empty() && exit_code == 0) {
-            result += "(command finished with no output)";
-        } else {
-            result += output;
-        }
+        std::string result = output;
+        if (output.empty()) result = "(no output)";
         if (truncated) {
             result += "\n[... output truncated at 64KB ...]";
         }
+        if (!result.empty() && result.back() != '\n') result += "\n";
+        result += "[exit code: " + std::to_string(exit_code) + "]";
+        if (exit_code == 124) result += " (timed out)";
+        else if (exit_code == 137) result += " (killed, likely timed out)";
         return result;
     };
 }
@@ -613,9 +839,9 @@ ToolHandler make_bash_handler(const std::string& workdir) {
 ToolDef make_grep_search_tool() {
     ToolDef d;
     d.name = "grep_search";
-    d.description = "Search for lines matching a pattern across files in a directory or file.";
-    d.params.push_back({"pattern", ToolParamType::String, true, "Substring or regex pattern to search for", ""});
-    d.params.push_back({"path", ToolParamType::String, false, "Path to directory or file (default: current working directory)", "."});
+    d.description = "Search files recursively for a regex (case-insensitive); returns path:line: text.";
+    d.params.push_back({"pattern", ToolParamType::String, true, "", ""});
+    d.params.push_back({"path", ToolParamType::String, false, "file or dir (default: workdir)", "."});
     return d;
 }
 
@@ -639,7 +865,9 @@ ToolHandler make_grep_search_handler(const std::string& workdir) {
         }
         std::string raw_path = call.get("path", call.get("directory", call.get("dir", ".")));
         if (raw_path.empty()) raw_path = ".";
-        std::filesystem::path p = resolve_tool_path(raw_path, workdir);
+        std::filesystem::path p;
+        std::string err;
+        if (!resolve_tool_path(raw_path, workdir, p, err)) return err;
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) {
             return "error: path not found: " + raw_path;
@@ -667,6 +895,12 @@ ToolHandler make_grep_search_handler(const std::string& workdir) {
                         it.disable_recursion_pending();
                     }
                 } else if (it->is_regular_file(ec)) {
+                    std::error_code cec;
+                    if (it->is_symlink(cec) &&
+                        !path_within(p, std::filesystem::weakly_canonical(it->path(), cec))) {
+                        it.increment(ec);
+                        continue;   // symlink pointing out of the workdir
+                    }
                     uintmax_t fsz = it->file_size(ec);
                     if (!ec && fsz <= 2 * 1024 * 1024) { // max 2MB per file
                         files_to_search.push_back(it->path());
@@ -687,10 +921,14 @@ ToolHandler make_grep_search_handler(const std::string& workdir) {
             std::string line;
             int line_no = 0;
             std::string display_path = fpath.string();
-            if (!workdir.empty() && workdir != ".") {
+            {
+                // Paths are canonical-absolute after resolve_tool_path; show
+                // them relative to the workdir (shorter, and reusable as-is).
                 std::error_code rel_ec;
-                auto rel = std::filesystem::relative(fpath, workdir, rel_ec);
-                if (!rel_ec) display_path = rel.string();
+                std::filesystem::path wd = std::filesystem::weakly_canonical(
+                    std::filesystem::absolute(workdir.empty() ? "." : workdir, rel_ec), rel_ec);
+                auto rel = std::filesystem::relative(fpath, wd, rel_ec);
+                if (!rel_ec && !rel.empty()) display_path = rel.string();
             }
             while (std::getline(in, line)) {
                 ++line_no;
@@ -727,6 +965,7 @@ void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
                            const std::string& workdir) {
     registrar(make_read_file_tool(), make_read_file_handler(workdir));
     registrar(make_write_file_tool(), make_write_file_handler(workdir));
+    registrar(make_edit_file_tool(), make_edit_file_handler(workdir));
     registrar(make_list_dir_tool(), make_list_dir_handler(workdir));
     registrar(make_bash_tool(), make_bash_handler(workdir));
     registrar(make_grep_search_tool(), make_grep_search_handler(workdir));

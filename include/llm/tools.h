@@ -147,7 +147,10 @@ std::string render_chat(const std::vector<ChatMessage>& messages,
                         bool add_gen_prompt);
 
 // ============================================================================
-// Production System Tools (read_file, write_file, list_dir, bash, grep_search)
+// Production System Tools (read_file, write_file, edit_file, list_dir, bash,
+// grep_search). All path arguments are confined to `workdir`: paths that
+// resolve outside it (".." escapes, foreign absolute paths, symlinks out) are
+// refused with an "error: ..." result string; handlers never throw.
 // ============================================================================
 
 ToolDef make_read_file_tool();
@@ -155,6 +158,11 @@ ToolHandler make_read_file_handler(const std::string& workdir = ".");
 
 ToolDef make_write_file_tool();
 ToolHandler make_write_file_handler(const std::string& workdir = ".");
+
+// edit_file: exact-match string replacement (path, old_string, new_string,
+// replace_all?). Errors report the match count + a numbered snippet.
+ToolDef make_edit_file_tool();
+ToolHandler make_edit_file_handler(const std::string& workdir = ".");
 
 ToolDef make_list_dir_tool();
 ToolHandler make_list_dir_handler(const std::string& workdir = ".");
@@ -165,8 +173,8 @@ ToolHandler make_bash_handler(const std::string& workdir = ".");
 ToolDef make_grep_search_tool();
 ToolHandler make_grep_search_handler(const std::string& workdir = ".");
 
-// Registers real production system tools (read_file, write_file, list_dir,
-// bash, grep_search) into a ToolRegistry and an associated handler map.
+// Registers real production system tools (read_file, write_file, edit_file,
+// list_dir, bash, grep_search) into a ToolRegistry and an associated handler map.
 void register_system_tools(ToolRegistry& reg,
                            std::unordered_map<std::string, ToolHandler>& handlers,
                            const std::string& workdir = ".");

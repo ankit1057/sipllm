@@ -42,6 +42,7 @@ enum class AgentStop {
     MaxSteps,   // hit AgentConfig::max_steps without a final answer
     ToolError,  // a handler failed and stop_on_tool_error was set
     Empty,      // generator returned empty text -> no progress possible
+    Loop,       // the same tool call was repeated past the loop guard
 };
 
 const char* agent_stop_name(AgentStop s);
@@ -55,7 +56,31 @@ struct AgentStep {
     std::string tool_args_json;  // the call's raw JSON (for the report)
     std::string tool_result;     // handler output, or the error text if !tool_ok
     bool        tool_ok = true;  // false if the handler failed
+    bool        malformed = false;  // model attempted a call that failed to parse
+                                    // (tool_result holds the error fed back)
+    bool        nudged = false;     // no-tool reply answered with a "use a tool"
+                                    // nudge (require_tool_before_done)
+    double      gen_s = -1.0;       // wall seconds in the generator (-1 = n/a)
+    double      tool_s = -1.0;      // wall seconds in the tool handler (-1 = n/a)
 };
+
+// Result of scanning one model output for a tool call (lenient, zero-dep).
+//   None      -> no attempted call: the output is a final answer.
+//   Call      -> a valid call to a registered tool (arguments normalized).
+//   Malformed -> a call was attempted (a <tool_call> / <|tool_call> marker is
+//                present) but could not be used; `error` says why.
+// Accepted variants: <tool_call>{json}</tool_call> (optionally ```json fenced),
+// "arguments" given as a JSON-encoded string, "parameters"/"args" aliases,
+// Gemma 4 native <|tool_call>call:NAME{key:<|"|>v<|"|>}<tool_call|>, and a bare
+// JSON object (no markers) naming a registered tool.
+struct AgentCallParse {
+    enum class Kind { None, Call, Malformed };
+    Kind        kind = Kind::None;
+    ToolCall    call;    // valid when kind == Call (raw_json = canonical JSON)
+    std::string error;   // reason when kind == Malformed
+};
+
+AgentCallParse parse_agent_tool_call(const std::string& text, const ToolRegistry& reg);
 
 // Structured run report (a slice of the #58 "structured run report" deliverable).
 struct AgentResult {
@@ -66,6 +91,7 @@ struct AgentResult {
 
     int steps_taken() const { return static_cast<int>(steps.size()); }
     int tool_calls() const;      // number of steps that dispatched a tool
+    double total_s() const;      // sum of known gen_s + tool_s
     std::string report() const;  // human-readable structured summary
 };
 
@@ -79,11 +105,24 @@ struct AgentConfig {
         "You are Nishachar, an autonomous worker. Achieve the user's goal step "
         "by step. To use a tool, emit exactly one "
         "<tool_call>{\"name\":\"<tool>\",\"arguments\":{...}}</tool_call> and "
-        "stop. When the goal is complete, reply with the final answer and no "
+        "stop. The JSON must be valid: escape newlines as \\n and quotes as "
+        "\\\". When the goal is complete, reply with the final answer and no "
         "tool call.";
 
     ChatTemplateStyle style = ChatTemplateStyle::ChatML;
     bool stop_on_tool_error = false;  // false => feed the error back and continue
+
+    // When the model answers without ever having used a tool, nudge it once
+    // ("act with a tool call") instead of accepting the answer as final.
+    bool require_tool_before_done = false;
+
+    // Loop guard: the Nth consecutive identical call (name + args) is not run;
+    // an error is fed back instead. One more identical call stops with
+    // AgentStop::Loop. 0 disables.
+    int loop_repeat_limit = 3;
+
+    // Optional observer invoked after every recorded step (transcripts, UIs).
+    std::function<void(const AgentStep&)> on_step;
 };
 
 // The loop. Model-agnostic: register tools (advertised schema + C++ executor),
