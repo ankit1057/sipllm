@@ -246,7 +246,17 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
             printf("\n\033[1;31m[rut detected: output repeats '%s' — step aborted]\033[0m\n", rut.c_str());
             err = "your output got stuck repeating '" + rut + "' and the call was discarded. "
                   "Make the call again from the start, writing simpler code at that point";
-        } else if (!stopped) err = "tool call was not closed with <tool_call|> (output too long?)";
+        } else if (!stopped) {
+            // Hit the per-step token cap mid-call: say so concretely, or the
+            // model just retries the same oversized write and hits it again.
+            printf("\n\033[1;31m[step hit --max-new %d tokens before <tool_call|> — call discarded]\033[0m\n",
+                   cfg.max_new_tokens);
+            err = "your tool call was cut off after " + std::to_string(st.gen_tokens) +
+                  " tokens (the per-step limit is " + std::to_string(cfg.max_new_tokens) +
+                  ") and was discarded, so nothing was written. Do NOT retry the same large call. "
+                  "Split the work: put widgets in separate smaller files (e.g. lib/widgets/*.dart) with one "
+                  "write_file each, or change an existing file with edit_file";
+        }
         else if (parse_native_call(out.substr(tc), call, err)) {
             auto it = handlers.find(call.name);
             if (it == handlers.end()) err = "unknown tool '" + call.name + "'";
