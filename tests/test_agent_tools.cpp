@@ -248,22 +248,46 @@ TEST(edit_file_line_range_delete_and_replace) {
     ToolHandler ed = make_edit_file_handler(d);
     // Delete one line by number (no new_string), the case Gemma 4 could not
     // express with exact-text replacement.
-    std::string r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}, {"end_line", "2"}}));
+    std::string r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}, {"end_line", "2"},
+                                        {"first_line", "b"}}));
     CHECK_MSG(has(r, "ok: deleted lines 2-2"), r);
+    CHECK_MSG(has(r, "removed: \"b\"") && has(r, "shifted by -1"), r);
     CHECK(slurp(d + "/w.dart") == "a\nc\nd\n");
-    // Replace a range; a missing trailing newline is added.
-    r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}, {"end_line", "3"}, {"new_string", "X"}}));
+    // Replace a range; a missing trailing newline is added; first_line ignores indentation.
+    r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}, {"end_line", "3"}, {"first_line", "  c"},
+                            {"new_string", "X"}}));
     CHECK_MSG(has(r, "ok: replaced lines 2-3"), r);
     CHECK(slurp(d + "/w.dart") == "a\nX\n");
     // Last line, no end_line.
-    r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}}));
+    r = ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "2"}, {"first_line", "X"}}));
     CHECK(slurp(d + "/w.dart") == "a\n");
-    CHECK(has(ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "5"}})), "outside the file"));
+    CHECK(has(ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "5"}, {"first_line", "a"}})), "outside the file"));
     CHECK(has(ed(mk("edit_file", {{"path", "w.dart"}, {"start_line", "x"}})), "must be integers"));
     // Identical old/new now points at the line-number delete.
     put(d + "/v.dart", "keep\n");
     CHECK(has(ed(mk("edit_file", {{"path", "v.dart"}, {"old_string", "keep"}, {"new_string", "keep"}})),
               "start_line"));
+}
+
+TEST(edit_file_line_range_rejects_stale_line_numbers) {
+    // The L4b portfolio run: after earlier edits shifted the file, a range
+    // from the first read_file wiped the wrong ~20 lines. first_line catches it.
+    std::string d = fresh_dir("editstale");
+    const std::string orig = "class A {\n  int x;\n}\nclass B {\n  int y;\n}\n";
+    put(d + "/s.dart", orig);
+    ToolHandler ed = make_edit_file_handler(d);
+    // Missing first_line: refused, shows the lines it would touch.
+    std::string r = ed(mk("edit_file", {{"path", "s.dart"}, {"start_line", "4"}, {"end_line", "6"}}));
+    CHECK_MSG(has(r, "need first_line") && has(r, "4\tclass B {"), r);
+    // Stale number: caller thinks "class B {" is line 3; it is line 4. Nothing changes.
+    r = ed(mk("edit_file", {{"path", "s.dart"}, {"start_line", "3"}, {"end_line", "5"},
+                            {"first_line", "class B {"}, {"new_string", "class C {}"}}));
+    CHECK_MSG(has(r, "line 3 is \"}\"") && has(r, "now at line 4") && has(r, "Nothing was changed"), r);
+    CHECK(slurp(d + "/s.dart") == orig);
+    // Text that no longer exists anywhere: told to re-read.
+    r = ed(mk("edit_file", {{"path", "s.dart"}, {"start_line", "1"}, {"first_line", "class Z {"}}));
+    CHECK_MSG(has(r, "read_file"), r);
+    CHECK(slurp(d + "/s.dart") == orig);
 }
 
 int main() {

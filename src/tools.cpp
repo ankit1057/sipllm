@@ -616,6 +616,7 @@ ToolDef make_edit_file_tool() {
     d.name = "edit_file";
     d.description = "Edit a file. Either replace exact text (old_string must match exactly once unless replace_all=true), "
                     "or replace a line range by number: start_line + end_line (1-based, inclusive, as shown by read_file) "
+                    "plus first_line = the exact current text of start_line (guards against stale line numbers), "
                     "with new_string; omit new_string to DELETE those lines.";
     d.params.push_back({"path", ToolParamType::String, true, "", ""});
     d.params.push_back({"old_string", ToolParamType::String, false, "", ""});
@@ -623,6 +624,7 @@ ToolDef make_edit_file_tool() {
     d.params.push_back({"replace_all", ToolParamType::Bool, false, "", ""});
     d.params.push_back({"start_line", ToolParamType::Int, false, "", ""});
     d.params.push_back({"end_line", ToolParamType::Int, false, "", ""});
+    d.params.push_back({"first_line", ToolParamType::String, false, "", ""});
     return d;
 }
 
@@ -650,8 +652,47 @@ ToolHandler make_edit_file_handler(const std::string& workdir) {
             if (a < 1 || b < a || b > n_lines)
                 return "error: line range " + std::to_string(a) + "-" + std::to_string(b) +
                        " is outside the file (1-" + std::to_string(n_lines) + ")";
+            auto line_at = [&](int64_t n) {           // 1-based, without the newline
+                const size_t s0 = starts[(size_t)n - 1];
+                const size_t e0 = n < n_lines ? starts[(size_t)n] - 1 : text.size();
+                std::string l = text.substr(s0, e0 - s0);
+                if (!l.empty() && l.back() == '\n') l.pop_back();
+                return l;
+            };
+            auto trim = [](std::string v) {
+                const size_t b0 = v.find_first_not_of(" \t\r");
+                if (b0 == std::string::npos) return std::string();
+                return v.substr(b0, v.find_last_not_of(" \t\r") - b0 + 1);
+            };
+            // Stale-line-number guard: line numbers shift after every edit, so
+            // the caller must restate the current text of start_line.
+            if (!call.has("first_line"))
+                return "error: line-range edits need first_line = the exact current text of line " +
+                       std::to_string(a) + ". Lines " + std::to_string(a) + "-" + std::to_string(b) +
+                       " currently are:\n" + numbered_lines(text, (size_t)a, (size_t)std::min(b, a + 5)) +
+                       "If these are the lines you mean, retry with first_line set to line " + std::to_string(a) +
+                       "; otherwise read_file again to get current line numbers.";
+            const std::string want = trim(call.get("first_line"));
+            if (trim(line_at(a)) != want) {
+                std::string where;
+                int found = 0;
+                for (int64_t n = 1; n <= n_lines && found < 5; ++n)
+                    if (!want.empty() && trim(line_at(n)) == want) {
+                        where += (found++ ? ", " : "") + std::to_string(n);
+                    }
+                std::string msg = "error: line " + std::to_string(a) + " is \"" + trim(line_at(a)) +
+                                  "\", not your first_line \"" + want + "\"; line numbers shifted since you read the file. "
+                                  "Nothing was changed.";
+                if (found)
+                    msg += " That text is now at line " + where + ": retry with start_line there and move end_line by "
+                           "the same offset.";
+                else
+                    msg += " Use read_file to get current line numbers.";
+                return msg;
+            }
             const size_t from = starts[(size_t)a - 1];
             const size_t to = b < n_lines ? starts[(size_t)b] : text.size();
+            const std::string removed_first = trim(line_at(a)), removed_last = trim(line_at(b));
             std::string repl = call.get("new_string", "");
             if (!repl.empty() && repl.back() != '\n' && to > from && text[to - 1] == '\n') repl += '\n';
             const std::string out = text.substr(0, from) + repl + text.substr(to);
@@ -662,7 +703,9 @@ ToolHandler make_edit_file_handler(const std::string& workdir) {
             if (f.fail()) return "error: failed writing to: " + raw_path;
             const size_t ctx_from = a > 2 ? (size_t)a - 2 : 1;
             return std::string("ok: ") + (repl.empty() ? "deleted" : "replaced") + " lines " + std::to_string(a) +
-                   "-" + std::to_string(b) + " in " + raw_path + "\n" +
+                   "-" + std::to_string(b) + " in " + raw_path + " (removed: \"" + removed_first + "\"" +
+                   (b > a ? " ... \"" + removed_last + "\"" : std::string()) + "). Line numbers after this point shifted by " +
+                   std::to_string((int64_t)count_lines(repl) - (b - a + 1)) + ".\n" +
                    numbered_lines(out, ctx_from, ctx_from + std::max<size_t>(4, count_lines(repl) + 3));
         }
         if (!call.has("old_string")) return "error: 'old_string' (or start_line/end_line) argument is required";
@@ -675,7 +718,7 @@ ToolHandler make_edit_file_handler(const std::string& workdir) {
             return "error: old_string and new_string are identical, so nothing changed. "
                    "To DELETE those lines pass new_string as an empty string (new_string:\"\"); "
                    "to change them, new_string must contain the edited text. Easiest: delete by line number with "
-                   "start_line and end_line (from read_file) and no new_string";
+                   "start_line, end_line and first_line (from read_file) and no new_string";
 
         std::filesystem::path p;
         std::string err;

@@ -31,7 +31,8 @@ std::string repeat_failure_note(const std::string& tool, int n) {
                        " with this same error in this run. Stop retrying it; take a different approach";
     if (tool == "edit_file")
         note += ": delete or replace lines by number instead — edit_file{path, start_line, end_line} "
-                "using the line numbers from read_file, and omit new_string to delete those lines.";
+                "plus first_line (the current text of start_line), using line numbers from read_file; omit new_string "
+                "to delete those lines.";
     else
         note += ".";
     return note;
