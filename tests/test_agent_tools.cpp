@@ -290,6 +290,59 @@ TEST(edit_file_line_range_rejects_stale_line_numbers) {
     CHECK(slurp(d + "/s.dart") == orig);
 }
 
+TEST(edit_checks_reject_breaking_changes_but_allow_repairs) {
+    // Stand-in for `dart format -o none {file}`: a file "parses" unless it
+    // contains SYNTAX_ERROR. The L4r portfolio run left a missing comma that
+    // this check would have bounced in the same step.
+    std::string d = fresh_dir("editcheck");
+    std::vector<EditCheck> checks{{".dart", "! grep -q SYNTAX_ERROR {file}"}};
+    ToolHandler ed = with_edit_checks(make_edit_file_handler(d), d, checks);
+    ToolHandler wr = with_edit_checks(make_write_file_handler(d), d, checks);
+    put(d + "/a.dart", "line one\nline two\n");
+    // 1. Breaking a clean file: undone, file unchanged.
+    std::string r = ed(mk("edit_file", {{"path", "a.dart"}, {"old_string", "line two"}, {"new_string", "SYNTAX_ERROR"}}));
+    CHECK_MSG(has(r, "error: change rejected") && has(r, "restored unchanged"), r);
+    CHECK(slurp(d + "/a.dart") == "line one\nline two\n");
+    // 2. Overwriting a clean file with broken content: also undone.
+    r = wr(mk("write_file", {{"path", "a.dart"}, {"content", "SYNTAX_ERROR\n"}}));
+    CHECK_MSG(has(r, "change rejected"), r);
+    CHECK(slurp(d + "/a.dart") == "line one\nline two\n");
+    // 3. Already-broken file: an unrelated edit goes through, with a warning.
+    put(d + "/b.dart", "SYNTAX_ERROR\nkeep\n");
+    r = ed(mk("edit_file", {{"path", "b.dart"}, {"old_string", "keep"}, {"new_string", "kept"}}));
+    CHECK_MSG(has(r, "ok: replaced") && has(r, "does not parse yet"), r);
+    CHECK(slurp(d + "/b.dart") == "SYNTAX_ERROR\nkept\n");
+    // 4. The repair itself goes through cleanly.
+    r = ed(mk("edit_file", {{"path", "b.dart"}, {"old_string", "SYNTAX_ERROR"}, {"new_string", "fixed"}}));
+    CHECK_MSG(has(r, "ok: replaced") && !has(r, "does not parse"), r);
+    // 5. A new broken file is kept (nothing to restore), with a warning.
+    r = wr(mk("write_file", {{"path", "c.dart"}, {"content", "SYNTAX_ERROR"}}));
+    CHECK_MSG(has(r, "ok: wrote") && has(r, "does not parse yet"), r);
+    // 6. Other extensions are not checked; tool errors pass through untouched.
+    r = wr(mk("write_file", {{"path", "n.txt"}, {"content", "SYNTAX_ERROR"}}));
+    CHECK_MSG(has(r, "ok: wrote") && !has(r, "parse"), r);
+    r = ed(mk("edit_file", {{"path", "a.dart"}, {"old_string", "absent"}, {"new_string", "x"}}));
+    CHECK_MSG(has(r, "error: old_string not found"), r);
+}
+
+TEST(read_file_page_size_and_last_line_guard) {
+    std::string d = fresh_dir("readpage");
+    std::string big;
+    for (int i = 1; i <= 400; ++i) big += "line number " + std::to_string(i) + " of a medium sized dart file\n";
+    put(d + "/m.dart", big);
+    // Default 5000-byte page cannot show all 400 lines; a 32 KB page can.
+    CHECK(has(make_read_file_handler(d)(mk("read_file", {{"path", "m.dart"}})), "use offset="));
+    std::string all = make_read_file_handler(d, 32000)(mk("read_file", {{"path", "m.dart"}}));
+    CHECK_MSG(has(all, "400\tline number 400") && !has(all, "use offset="), all.substr(all.size() - 200));
+    // last_line must match end_line's current text, or nothing changes.
+    ToolHandler ed = make_edit_file_handler(d);
+    std::string r = ed(mk("edit_file", {{"path", "m.dart"}, {"start_line", "2"}, {"end_line", "3"},
+                                        {"first_line", "line number 2 of a medium sized dart file"},
+                                        {"last_line", "line number 4 of a medium sized dart file"}}));
+    CHECK_MSG(has(r, "not your last_line") && has(r, "Nothing was changed"), r);
+    CHECK(slurp(d + "/m.dart") == big);
+}
+
 int main() {
     printf("== test_agent_tools ==\n");
     return llmtest::run_all();

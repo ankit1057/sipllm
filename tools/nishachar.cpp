@@ -61,6 +61,10 @@ static void print_usage(const char* prog) {
             "  --log FILE       append one JSON line of stats per step\n"
             "  --transcript F   write the full conversation as JSON lines (one per step)\n"
             "  --require-tool   nudge once if the model answers before using any tool\n"
+            "  --read-page N    read_file bytes per call (default: 5000; raises --tool-cap to fit)\n"
+            "  --edit-check E:C after write_file/edit_file on *E run shell command C ({file} =\n"
+            "                   path; exit 0 = parses); a change that breaks parsing is undone.\n"
+            "                   Repeatable. e.g. --edit-check '.dart:dart format -o none {file}'\n"
             "  --help, -h       Show this help message\n",
             prog);
 }
@@ -312,6 +316,7 @@ int main(int argc, char** argv) {
     size_t ram_budget = 0;
     int max_new = 2048, tool_timeout = 600;
     size_t tool_cap = 6000;
+    SystemToolOptions tool_opts;
     std::string log_path, transcript_path;
     bool require_tool = false;
 
@@ -343,6 +348,16 @@ int main(int argc, char** argv) {
             tool_timeout = std::stoi(argv[++i]);
         } else if (a == "--tool-cap" && i + 1 < argc) {
             tool_cap = (size_t)std::stoll(argv[++i]);
+        } else if (a == "--read-page" && i + 1 < argc) {
+            tool_opts.read_page_bytes = (size_t)std::stoll(argv[++i]);
+        } else if (a == "--edit-check" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            const size_t colon = v.find(':');
+            if (colon == std::string::npos || colon == 0 || colon + 1 >= v.size()) {
+                fprintf(stderr, "error: --edit-check expects EXT:COMMAND, got '%s'\n", v.c_str());
+                return 1;
+            }
+            tool_opts.edit_checks.push_back({v.substr(0, colon), v.substr(colon + 1)});
         } else if (a == "--log" && i + 1 < argc) {
             log_path = argv[++i];
         } else if (a == "--transcript" && i + 1 < argc) {
@@ -355,6 +370,9 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+
+    // A read_file page must survive the tool-result cap intact.
+    if (tool_cap < tool_opts.read_page_bytes + 1000) tool_cap = tool_opts.read_page_bytes + 1000;
 
     std::error_code ec;
     if (!std::filesystem::exists(model_path, ec)) {
@@ -438,7 +456,7 @@ int main(int argc, char** argv) {
             native_defs.push_back(def_copy);
             native_handlers[tool_name] = wrapped;
             agent.add_tool(std::move(def), std::move(wrapped));
-        }, workdir);
+        }, workdir, tool_opts);
 
         AgentConfig cfg;
         cfg.max_steps = max_steps;

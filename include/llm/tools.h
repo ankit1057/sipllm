@@ -183,4 +183,31 @@ void register_system_tools(ToolRegistry& reg,
 void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
                            const std::string& workdir = ".");
 
+// ---- Agent harness options --------------------------------------------------
+// A syntax check run after every successful write_file/edit_file on a path
+// ending in `ext`; `cmd` is a shell command with {file} replaced by the file's
+// path, exit code 0 = the file parses (e.g. {".dart", "dart format -o none {file}"}).
+struct EditCheck {
+    std::string ext;
+    std::string cmd;
+};
+
+struct SystemToolOptions {
+    size_t read_page_bytes = 5000;         // read_file per-call output cap
+    std::vector<EditCheck> edit_checks;    // post-edit syntax checks
+};
+
+// read_file with a custom per-call output cap (the default overload uses 5000).
+ToolHandler make_read_file_handler(const std::string& workdir, size_t max_out_bytes);
+
+// Wraps write_file/edit_file: after a successful change runs the matching
+// EditCheck. If the file parsed before and not after, the change is undone and
+// an "error: change rejected" result returned with the checker output; if it
+// did not parse before either (or is new), the change is kept and the output
+// appended as a warning, so repairs of an already-broken file go through.
+ToolHandler with_edit_checks(ToolHandler inner, const std::string& workdir, std::vector<EditCheck> checks);
+
+void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
+                           const std::string& workdir, const SystemToolOptions& opt);
+
 } // namespace llm

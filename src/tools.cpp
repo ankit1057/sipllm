@@ -18,6 +18,7 @@
 
 #if !defined(_WIN32)
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace llm {
@@ -494,7 +495,11 @@ ToolDef make_read_file_tool() {
 }
 
 ToolHandler make_read_file_handler(const std::string& workdir) {
-    return [workdir](const ToolCall& call) -> std::string {
+    return make_read_file_handler(workdir, 5000);
+}
+
+ToolHandler make_read_file_handler(const std::string& workdir, size_t max_out_bytes) {
+    return [workdir, max_out_bytes](const ToolCall& call) -> std::string {
         std::string raw_path = call.get("path", call.get("file_path", ""));
         if (raw_path.empty()) {
             return "error: 'path' argument is required";
@@ -513,10 +518,10 @@ ToolHandler make_read_file_handler(const std::string& workdir) {
         if (!f.is_open()) {
             return "error: failed to open file: " + raw_path;
         }
-        // Kept under the Nishachar CLI's ~6000-char tool-result cap so a page
+        // Kept under the Nishachar CLI's tool-result cap (--tool-cap) so a page
         // is never middle-truncated and the paging note always survives.
-        constexpr long long DEFAULT_LIMIT = 200;
-        constexpr size_t MAX_OUT_BYTES = 5000;   // per-call output cap
+        const size_t MAX_OUT_BYTES = max_out_bytes;   // per-call output cap
+        const long long DEFAULT_LIMIT = std::max<long long>(200, (long long)(max_out_bytes / 25));   // 200 at the default 5000
         constexpr size_t MAX_LINE_CHARS = 2000;
         long long offset = tool_int_arg(call, "offset");
         long long limit = tool_int_arg(call, "limit");
@@ -616,7 +621,8 @@ ToolDef make_edit_file_tool() {
     d.name = "edit_file";
     d.description = "Edit a file. Either replace exact text (old_string must match exactly once unless replace_all=true), "
                     "or replace a line range by number: start_line + end_line (1-based, inclusive, as shown by read_file) "
-                    "plus first_line = the exact current text of start_line (guards against stale line numbers), "
+                    "plus first_line = the exact current text of start_line (guards against stale line numbers; "
+                    "optional last_line checks end_line too), "
                     "with new_string; omit new_string to DELETE those lines.";
     d.params.push_back({"path", ToolParamType::String, true, "", ""});
     d.params.push_back({"old_string", ToolParamType::String, false, "", ""});
@@ -625,6 +631,7 @@ ToolDef make_edit_file_tool() {
     d.params.push_back({"start_line", ToolParamType::Int, false, "", ""});
     d.params.push_back({"end_line", ToolParamType::Int, false, "", ""});
     d.params.push_back({"first_line", ToolParamType::String, false, "", ""});
+    d.params.push_back({"last_line", ToolParamType::String, false, "", ""});
     return d;
 }
 
@@ -690,6 +697,11 @@ ToolHandler make_edit_file_handler(const std::string& workdir) {
                     msg += " Use read_file to get current line numbers.";
                 return msg;
             }
+            if (call.has("last_line") && trim(line_at(b)) != trim(call.get("last_line")))
+                return "error: line " + std::to_string(b) + " is \"" + trim(line_at(b)) + "\", not your last_line \"" +
+                       trim(call.get("last_line")) + "\"; the range does not end where you think. Nothing was changed. "
+                       "Lines " + std::to_string(a) + "-" + std::to_string(std::min(b + 2, n_lines)) + " currently are:\n" +
+                       numbered_lines(text, (size_t)a, (size_t)std::min(b + 2, n_lines));
             const size_t from = starts[(size_t)a - 1];
             const size_t to = b < n_lines ? starts[(size_t)b] : text.size();
             const std::string removed_first = trim(line_at(a)), removed_last = trim(line_at(b));
@@ -1047,11 +1059,89 @@ ToolHandler make_grep_search_handler(const std::string& workdir) {
     };
 }
 
+// ---- Post-edit syntax checks ------------------------------------------------
+
+static std::string shell_quote(const std::string& v) {
+    std::string q = "'";
+    for (char c : v) q += (c == '\'') ? std::string("'\\''") : std::string(1, c);
+    return q + "'";
+}
+
+// Runs `check.cmd` with {file} -> quoted path; returns its exit code (output in `out`).
+static int run_edit_check(const EditCheck& check, const std::filesystem::path& file, std::string& out) {
+    std::string cmd = check.cmd;
+    const std::string q = shell_quote(file.string());
+    for (size_t k; (k = cmd.find("{file}")) != std::string::npos;) cmd.replace(k, 6, q);
+    out.clear();
+    FILE* pipe = popen(("(" + cmd + ") 2>&1").c_str(), "r");
+    if (!pipe) { out = "could not start checker"; return -1; }
+    char buf[4096];
+    for (size_t n; (n = fread(buf, 1, sizeof(buf), pipe)) > 0;)
+        if (out.size() < 16384) out.append(buf, n);
+    const int st = pclose(pipe);
+    if (out.size() > 1500) out = out.substr(0, 1500) + "\n[...]";
+#if !defined(_WIN32)
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+#else
+    return st;
+#endif
+}
+
+ToolHandler with_edit_checks(ToolHandler inner, const std::string& workdir, std::vector<EditCheck> checks) {
+    if (checks.empty()) return inner;
+    return [inner = std::move(inner), workdir, checks = std::move(checks)](const ToolCall& call) -> std::string {
+        const std::string raw_path = call.get("path", call.get("file_path", ""));
+        std::filesystem::path p;
+        std::string err;
+        const EditCheck* chk = nullptr;
+        if (!raw_path.empty() && resolve_tool_path(raw_path, workdir, p, err)) {
+            const std::string ps = p.string();
+            for (const auto& c : checks)
+                if (ps.size() >= c.ext.size() && ps.compare(ps.size() - c.ext.size(), c.ext.size(), c.ext) == 0) {
+                    chk = &c;
+                    break;
+                }
+        }
+        if (!chk) return inner(call);
+        std::string before;
+        const bool existed = slurp_file(p, before);
+        std::string result = inner(call);
+        if (result.compare(0, 3, "ok:") != 0) return result;      // the tool itself refused
+        std::string out;
+        if (run_edit_check(*chk, p, out) == 0) return result;      // still parses
+        // The changed file no longer parses. Only undo if it parsed before, so
+        // edits that repair an already-broken file are never blocked.
+        bool parsed_before = false;
+        if (existed) {
+            std::error_code ec;
+            const auto tmp = std::filesystem::temp_directory_path(ec) /
+                             ("nishachar_check_" + std::to_string((long long)getpid()) + chk->ext);
+            { std::ofstream t(tmp, std::ios::binary); t << before; }
+            std::string prev_out;
+            parsed_before = run_edit_check(*chk, tmp, prev_out) == 0;
+            std::filesystem::remove(tmp, ec);
+        }
+        if (parsed_before) {
+            std::ofstream f(p, std::ios::binary | std::ios::trunc);
+            f.write(before.data(), (std::streamsize)before.size());
+            return "error: change rejected: it would make " + raw_path + " fail to parse, so the file was "
+                   "restored unchanged. Checker output:\n" + out +
+                   "\nRedo the change without that mistake (often a missing comma, bracket or semicolon).";
+        }
+        return result + "\nwarning: " + raw_path + " does not parse yet. Checker output:\n" + out;
+    };
+}
+
 void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
                            const std::string& workdir) {
-    registrar(make_read_file_tool(), make_read_file_handler(workdir));
-    registrar(make_write_file_tool(), make_write_file_handler(workdir));
-    registrar(make_edit_file_tool(), make_edit_file_handler(workdir));
+    register_system_tools(std::move(registrar), workdir, SystemToolOptions{});
+}
+
+void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
+                           const std::string& workdir, const SystemToolOptions& opt) {
+    registrar(make_read_file_tool(), make_read_file_handler(workdir, opt.read_page_bytes));
+    registrar(make_write_file_tool(), with_edit_checks(make_write_file_handler(workdir), workdir, opt.edit_checks));
+    registrar(make_edit_file_tool(), with_edit_checks(make_edit_file_handler(workdir), workdir, opt.edit_checks));
     registrar(make_list_dir_tool(), make_list_dir_handler(workdir));
     registrar(make_bash_tool(), make_bash_handler(workdir));
     registrar(make_grep_search_tool(), make_grep_search_handler(workdir));
