@@ -17,6 +17,26 @@
 
 namespace llm {
 
+int FailedCallTracker::record(const std::string& tool, const std::string& result) {
+    if (result.compare(0, 6, "error:") != 0) return 0;
+    const std::string key = tool + "\n" + result.substr(0, result.find('\n'));
+    for (auto& f : fails_)
+        if (f.first == key) return ++f.second;
+    fails_.emplace_back(key, 1);
+    return 1;
+}
+
+std::string repeat_failure_note(const std::string& tool, int n) {
+    std::string note = " NOTE: this is failure #" + std::to_string(n) + " of " + tool +
+                       " with this same error in this run. Stop retrying it; take a different approach";
+    if (tool == "edit_file")
+        note += ": delete or replace lines by number instead — edit_file{path, start_line, end_line} "
+                "using the line numbers from read_file, and omit new_string to delete those lines.";
+    else
+        note += ".";
+    return note;
+}
+
 const char* agent_stop_name(AgentStop s) {
     switch (s) {
         case AgentStop::Done:      return "done";

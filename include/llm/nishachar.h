@@ -82,6 +82,22 @@ struct AgentCallParse {
 
 AgentCallParse parse_agent_tool_call(const std::string& text, const ToolRegistry& reg);
 
+// Counts tool failures over a whole run, keyed by tool name + the first line
+// of the error, so a model fixated on one broken call is caught even when it
+// interleaves other calls (re-reading, re-running analyze) between retries.
+// record() returns how many times this tool has now failed with this error
+// (1 on the first failure), or 0 when `result` is not an error.
+class FailedCallTracker {
+public:
+    int record(const std::string& tool, const std::string& result);
+private:
+    std::vector<std::pair<std::string, int>> fails_;
+};
+
+// Text appended to a repeated failure's tool result (n >= 2): tells the model
+// to change approach, with a tool-specific way out for edit_file.
+std::string repeat_failure_note(const std::string& tool, int n);
+
 // Structured run report (a slice of the #58 "structured run report" deliverable).
 struct AgentResult {
     std::string            goal;

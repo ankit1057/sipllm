@@ -195,8 +195,7 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
                        "<turn|>\n<|turn>model\n";
     rt.reset();
     const double t0 = now_sec();
-    std::string prev_sig;
-    int repeats = 0;
+    FailedCallTracker fail_tracker;
     for (int step = 0; step < cfg.max_steps; ++step) {
         printf("\033[1;35m--- [Step %d / %d] ---\033[0m\n", step + 1, cfg.max_steps);
         std::string acc, last_piece, rut;
@@ -268,17 +267,14 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
             }
         }
         if (!err.empty()) tool_result = "error: " + err + ". Call exactly one tool as <|tool_call>call:NAME{arg:<|\"|>text<|\"|>}<tool_call|>.";
-        // Repeat guard: the same call failing again means the model is stuck
-        // on one idea; say so explicitly so it changes approach.
-        const std::string sig = tc == std::string::npos ? std::string() : out.substr(tc);
-        const bool failed = !ok || tool_result.compare(0, 6, "error:") == 0;
-        if (failed && !sig.empty() && sig == prev_sig) {
-            ++repeats;
-            tool_result += " NOTE: you have now made this exact same call " + std::to_string(repeats + 1) +
-                           " times and it failed every time. Do NOT repeat it. Re-read the error above and "
-                           "do something different (e.g. read_file the lines first, or use a different edit).";
-        } else repeats = 0;
-        prev_sig = failed ? sig : std::string();
+        // Repeat guard: the same tool failing with the same error again means
+        // the model is stuck on one idea (even with other calls in between).
+        const int n_fail = fail_tracker.record(call.name.empty() ? "?" : call.name, tool_result);
+        if (n_fail >= 2) {
+            tool_result += repeat_failure_note(call.name.empty() ? "?" : call.name, n_fail);
+            printf("\033[1;33m[repeat guard: failure #%d of %s with the same error]\033[0m\n", n_fail,
+                   call.name.empty() ? "?" : call.name.c_str());
+        }
         s.had_tool_call = true;
         s.tool_name = call.name.empty() ? "?" : call.name;
         s.tool_args_json = call.raw_json;

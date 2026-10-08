@@ -326,6 +326,23 @@ TEST(report_mentions) {
     CHECK(rep.find("echo") != std::string::npos);
 }
 
+TEST(failed_call_tracker_counts_across_interleaved_calls) {
+    // The L4 portfolio run: the same no-op edit_file failed 7 times with a
+    // successful bash (flutter analyze) in between; the old guard reset there.
+    FailedCallTracker t;
+    const std::string same = "error: old_string and new_string are identical, so nothing changed.\nmore";
+    CHECK(t.record("edit_file", same) == 1);
+    CHECK(t.record("bash", "No issues found! [exit code: 0]") == 0);   // success: not counted
+    CHECK(t.record("edit_file", same) == 2);                          // still counted after it
+    CHECK(t.record("edit_file", "error: old_string not found in a.dart") == 1);  // different error
+    CHECK(t.record("read_file", same) == 1);                          // different tool
+    CHECK(t.record("edit_file", same) == 3);
+    std::string note = repeat_failure_note("edit_file", 3);
+    CHECK(note.find("failure #3") != std::string::npos);
+    CHECK(note.find("start_line") != std::string::npos);
+    CHECK(repeat_failure_note("bash", 2).find("start_line") == std::string::npos);
+}
+
 int main() {
     printf("== test_nishachar ==\n");
     return llmtest::run_all();
