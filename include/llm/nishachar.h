@@ -19,9 +19,11 @@
 
 #include "llm/tools.h"
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace llm {
@@ -97,6 +99,76 @@ private:
 // Text appended to a repeated failure's tool result (n >= 2): tells the model
 // to change approach, with a tool-specific way out for edit_file.
 std::string repeat_failure_note(const std::string& tool, int n);
+
+// Degeneration ("rut") detector for streamed model output: returns the unit
+// that the tail of `text` repeats (e.g. "\x2d\x2e\x20", or Gemma 4's empty
+// "<|channel>thought\n<channel|>" emitted thousands of times), or "" if the
+// tail looks healthy. Units of 1-24 chars need >= 10 repeats (and >= 96 chars),
+// units of 25-160 chars need >= 6 repeats. A long run of one space, newline,
+// '-', '=' or '/' is treated as legitimate.
+std::string degenerate_tail_unit(const std::string& text);
+
+// ---- Gemma 4 native tool loop: step logic (pure, unit-tested) ----------------
+// What one generated step of the native loop amounts to.
+enum class NativeStepKind {
+    ToolCall,    // a complete <|tool_call>...<tool_call|>
+    CutInCall,   // a call was opened but not closed (token cap or full context)
+    Rut,         // the degeneration detector fired
+    CutNoCall,   // token cap or full context hit with no call and no end of turn
+    Final,       // the turn ended with real text and no call
+    JunkFinal,   // the turn ended with no call and only empty thought markers (or nothing)
+};
+
+struct NativeStep {
+    NativeStepKind kind = NativeStepKind::Final;
+    bool in_call = false;        // "<|tool_call>" appears in the output
+    std::string final_text;      // Final: the answer, thought markers stripped
+};
+
+// `out` = generated text; `call_closed` = "<tool_call|>" was seen; `rut` = the
+// detector's unit ("" if healthy); `hit_cap` = the step ended at --max-new or a
+// full context rather than at an end-of-turn token.
+NativeStep classify_native_step(const std::string& out, bool call_closed, const std::string& rut, bool hit_cap);
+
+// Harness-authored text fed back to the model must not contain Gemma control
+// tokens: the tokenizer matches "<|channel>", "<|tool_call>" ... literally, so
+// quoting them feeds real specials. "<|x>" -> "<x>", "<x|>" -> "<x>".
+std::string strip_control_tokens(std::string s);
+
+// Closes the model's turn and opens a user turn carrying `msg` (sanitised),
+// then the next model turn. generate() never feeds the end-of-turn token, so
+// this is the only "<turn|>" for the model's turn.
+std::string native_user_turn(const std::string& msg);
+
+struct LoopGuardConfig {
+    std::vector<std::string> check_patterns;  // a bash command containing one of these is a check; empty = any bash
+    int steps_left_warning = 3;               // note when this many steps remain (0 = off)
+    int max_junk_nudges = 2;                  // empty answers nudged before giving up
+};
+
+// Nudges for the native loop: no accepting empty "final answers", and one
+// reminder to run the checks when files changed after the last check.
+class LoopGuards {
+public:
+    explicit LoopGuards(LoopGuardConfig cfg = {}) : cfg_(std::move(cfg)) {}
+    // After every executed tool call (bash_command: the command for "bash", else "").
+    void on_tool(const std::string& tool, const std::string& bash_command, bool ok, const std::string& result);
+    // For a Final / JunkFinal / CutNoCall step: the message to feed instead of
+    // finishing, or "" to accept a Final. *give_up is set when empty answers
+    // exceeded the cap: stop as Empty, never as Done.
+    std::string on_no_call(const NativeStep& step, bool* give_up);
+    // " NOTE: N steps left ..." exactly when steps_left == the warning threshold, else "".
+    std::string steps_left_note(int steps_left) const;
+    bool edited_since_check() const { return edited_since_check_; }
+private:
+    LoopGuardConfig cfg_;
+    bool edited_since_check_ = false;
+    bool verify_nudged_ = false;
+    int junk_nudges_ = 0;
+};
+
+// Per-step sampler seed: a different, reproducible stream for every step.
+uint64_t native_step_seed(uint64_t base, int step);
 
 // Structured run report (a slice of the #58 "structured run report" deliverable).
 struct AgentResult {

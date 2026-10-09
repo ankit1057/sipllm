@@ -343,6 +343,90 @@ TEST(failed_call_tracker_counts_across_interleaved_calls) {
     CHECK(repeat_failure_note("bash", 2).find("start_line") == std::string::npos);
 }
 
+TEST(degenerate_tail_unit_catches_long_units) {
+    // v6-r1 L3: Gemma 4 emitted the 28-char empty-thought marker for 8192
+    // tokens; the old detector only looked at units of <= 24 chars.
+    std::string junk = "<|tool_call>call:edit_file{";
+    for (int i = 0; i < 9; ++i) junk += "<|channel>thought\n<channel|>";
+    CHECK(degenerate_tail_unit(junk) == "<|channel>thought\n<channel|>" ||
+          degenerate_tail_unit(junk).size() == 28);
+    // The original short case still caught.
+    std::string dots = "RegExp(r'^[a-z";
+    for (int i = 0; i < 40; ++i) dots += "\\x2d\\x2e\\x20";
+    CHECK(!degenerate_tail_unit(dots).empty());
+    // Healthy code: similar-looking but not identical lines are not a rut.
+    std::string code;
+    const char* names[] = {"about", "skills", "projects", "contact", "experience", "footer", "hero"};
+    for (const char* n : names) code += std::string("      _section('") + n + "', const SizedBox(height: 300)),\n";
+    CHECK_MSG(degenerate_tail_unit(code).empty(), degenerate_tail_unit(code));
+    // Seven identical long lines is under the 8-repeat bar for long units.
+    std::string seven;
+    for (int i = 0; i < 7; ++i) seven += "            const SizedBox(height: 16, width: 8),\n";
+    CHECK(degenerate_tail_unit(seven).empty());
+    // Padding runs are legitimate.
+    CHECK(degenerate_tail_unit("x" + std::string(500, ' ')).empty());
+}
+
+TEST(native_step_classification) {
+    const std::string th = "<|channel>thought\n<channel|>";
+    // Complete call / call cut off at the cap / rut wins over everything.
+    CHECK(classify_native_step(th + "<|tool_call>call:bash{command:<|\"|>ls<|\"|>}<tool_call|>", true, "", false).kind ==
+          NativeStepKind::ToolCall);
+    CHECK(classify_native_step(th + "<|tool_call>call:write_file{content:<|\"|>...", false, "", true).kind ==
+          NativeStepKind::CutInCall);
+    CHECK(classify_native_step(th + th + th, false, th, false).kind == NativeStepKind::Rut);
+    // v6-r1 L3 step 8: 8192 tokens, no call, no end of turn -> NOT a final answer.
+    CHECK(classify_native_step(th + "I will now carefully think about", false, "", true).kind == NativeStepKind::CutNoCall);
+    // End of turn with only markers / nothing -> junk; with text -> final, markers stripped.
+    CHECK(classify_native_step(th + th + "\n", false, "", false).kind == NativeStepKind::JunkFinal);
+    CHECK(classify_native_step("", false, "", false).kind == NativeStepKind::JunkFinal);
+    NativeStep f = classify_native_step(th + "Done: added the theme toggle.\n", false, "", false);
+    CHECK(f.kind == NativeStepKind::Final && f.final_text == "Done: added the theme toggle.");
+}
+
+TEST(native_feed_strings_have_no_control_tokens) {
+    CHECK(strip_control_tokens("<|channel>thought\n<channel|>") == "<channel>thought\n<channel>");
+    CHECK(strip_control_tokens("<|tool_call>call:x{a:<|\"|>v<|\"|>}<tool_call|>") ==
+          "<tool_call>call:x{a:<\">v<\">}<tool_call>");
+    CHECK(strip_control_tokens("x |> f, a <| b, List<int> y") == "x |> f, a <| b, List<int> y");   // code untouched
+    // One <turn|> closes the model turn (generate() never feeds end-of-turn).
+    const std::string u = native_user_turn("stuck on '<|channel>'");
+    CHECK(u == "<turn|>\n<|turn>user\nstuck on '<channel>'<turn|>\n<|turn>model\n");
+}
+
+TEST(loop_guards_nudges_and_caps) {
+    LoopGuardConfig gc;
+    gc.check_patterns = {"flutter analyze", "flutter test"};
+    LoopGuards g(gc);
+    bool give_up = false;
+    NativeStep fin;  fin.kind = NativeStepKind::Final;  fin.final_text = "done";
+    NativeStep junk; junk.kind = NativeStepKind::JunkFinal;
+    NativeStep cut;  cut.kind = NativeStepKind::CutNoCall;
+    CHECK(g.on_no_call(fin, &give_up).empty() && !give_up);              // nothing edited: accept
+    g.on_tool("edit_file", "", true, "ok: replaced 1 occurrence(s)");
+    g.on_tool("bash", "ls -la", true, "[exit code: 0]");                // not a check
+    CHECK(g.edited_since_check());
+    std::string n = g.on_no_call(fin, &give_up);
+    CHECK_MSG(n.find("run the checks") != std::string::npos, n);        // one reminder...
+    CHECK(g.on_no_call(fin, &give_up).empty());                         // ...then accept
+    g.on_tool("bash", "cd portfolio && flutter analyze && flutter test", true, "[exit code: 0]");
+    CHECK(!g.edited_since_check());
+    g.on_tool("edit_file", "", false, "error: old_string not found");    // failed edit: still checked
+    CHECK(!g.edited_since_check());
+    CHECK(g.on_no_call(cut, &give_up).find("cut off") != std::string::npos && !give_up);
+    CHECK(!g.on_no_call(junk, &give_up).empty() && !give_up);
+    CHECK(!g.on_no_call(junk, &give_up).empty() && !give_up);
+    CHECK(g.on_no_call(junk, &give_up).empty() && give_up);             // 3rd empty answer: give up, not Done
+    CHECK(g.steps_left_note(3).find("3 steps left") != std::string::npos);
+    CHECK(g.steps_left_note(4).empty() && g.steps_left_note(2).empty());
+}
+
+TEST(native_step_seeds_differ_per_step_and_reproduce) {
+    CHECK(native_step_seed(42, 0) != native_step_seed(42, 1));
+    CHECK(native_step_seed(42, 7) == native_step_seed(42, 7));
+    CHECK(native_step_seed(42, 3) != native_step_seed(43, 3));
+}
+
 int main() {
     printf("== test_nishachar ==\n");
     return llmtest::run_all();

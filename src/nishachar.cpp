@@ -6,6 +6,7 @@
 // Model-agnostic: never touches the engine (runtime.h), so it links standalone.
 #include "llm/nishachar.h"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -36,6 +37,128 @@ std::string repeat_failure_note(const std::string& tool, int n) {
     else
         note += ".";
     return note;
+}
+
+std::string degenerate_tail_unit(const std::string& text) {
+    for (size_t p = 1; p <= 160; ++p) {
+        const size_t need = p <= 24 ? std::max<size_t>(96, p * 10) : p * 8;
+        if (text.size() < need) continue;
+        const char* t = text.data() + text.size() - need;
+        bool periodic = true;
+        for (size_t i = p; i < need && periodic; ++i) periodic = t[i] == t[i - p];
+        if (!periodic) continue;
+        std::string unit(t, p);
+        // A long run of one whitespace/punctuation char is legitimate (padding,
+        // rules) — at any period, since "  " repeats as cleanly as " ".
+        const bool one_char = unit.find_first_not_of(unit[0]) == std::string::npos;
+        if (one_char && std::string(" \n-=/").find(unit[0]) != std::string::npos) continue;
+        return unit;
+    }
+    return "";
+}
+
+static const char* kEmptyThought = "<|channel>thought\n<channel|>";
+
+NativeStep classify_native_step(const std::string& out, bool call_closed, const std::string& rut, bool hit_cap) {
+    NativeStep r;
+    r.in_call = out.find("<|tool_call>") != std::string::npos;
+    if (!rut.empty()) { r.kind = NativeStepKind::Rut; return r; }
+    if (r.in_call) { r.kind = call_closed ? NativeStepKind::ToolCall : NativeStepKind::CutInCall; return r; }
+    if (hit_cap) { r.kind = NativeStepKind::CutNoCall; return r; }
+    std::string fin = out;
+    const std::string ch = kEmptyThought;
+    for (size_t k; (k = fin.find(ch)) != std::string::npos;) fin.erase(k, ch.size());
+    const size_t a = fin.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) { r.kind = NativeStepKind::JunkFinal; return r; }
+    const size_t b = fin.find_last_not_of(" \t\r\n");
+    r.final_text = fin.substr(a, b - a + 1);
+    r.kind = NativeStepKind::Final;
+    return r;
+}
+
+// Only control-token-shaped strings are rewritten — "<|word>", "<word|>", "<|word|>",
+// word = 1..24 of [A-Za-z0-9_"] — so code such as `x |> f` is left alone.
+std::string strip_control_tokens(std::string s) {
+    auto is_word = [](char c) { return std::isalnum((unsigned char)c) || c == '_' || c == '"'; };
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        if (s[i] == '<') {
+            const bool open_form = i + 1 < s.size() && s[i + 1] == '|';   // <|word>
+            size_t j = i + (open_form ? 2 : 1);
+            const size_t w0 = j;
+            while (j < s.size() && j - w0 < 24 && is_word(s[j])) ++j;
+            if (j > w0) {
+                if (open_form && j < s.size() && s[j] == '>') {                       // <|word>
+                    out += "<" + s.substr(w0, j - w0) + ">";
+                    i = j + 1;
+                    continue;
+                }
+                if (open_form && j + 1 < s.size() && s[j] == '|' && s[j + 1] == '>') {  // <|word|>, e.g. <|"|>
+                    out += "<" + s.substr(w0, j - w0) + ">";
+                    i = j + 2;
+                    continue;
+                }
+                if (!open_form && j + 1 < s.size() && s[j] == '|' && s[j + 1] == '>') {   // <word|>
+                    out += "<" + s.substr(w0, j - w0) + ">";
+                    i = j + 2;
+                    continue;
+                }
+            }
+        }
+        out += s[i++];
+    }
+    return out;
+}
+
+std::string native_user_turn(const std::string& msg) {
+    return "<turn|>\n<|turn>user\n" + strip_control_tokens(msg) + "<turn|>\n<|turn>model\n";
+}
+
+void LoopGuards::on_tool(const std::string& tool, const std::string& bash_command, bool ok, const std::string& result) {
+    if (!ok || result.compare(0, 6, "error:") == 0) return;
+    if (tool == "write_file" || tool == "edit_file") {
+        edited_since_check_ = true;
+        verify_nudged_ = false;          // new unchecked edits earn a new reminder
+    } else if (tool == "bash") {
+        bool is_check = cfg_.check_patterns.empty();
+        for (const auto& pat : cfg_.check_patterns)
+            if (bash_command.find(pat) != std::string::npos) { is_check = true; break; }
+        if (is_check) edited_since_check_ = false;
+    }
+}
+
+std::string LoopGuards::on_no_call(const NativeStep& step, bool* give_up) {
+    if (give_up) *give_up = false;
+    if (step.kind == NativeStepKind::CutNoCall)
+        return "Your reply was cut off (token limit) with no tool call and no summary, and was discarded. "
+               "Make one tool call now, or reply with a short summary if the task is done and verified.";
+    if (step.kind == NativeStepKind::JunkFinal) {
+        if (junk_nudges_ >= cfg_.max_junk_nudges) { if (give_up) *give_up = true; return ""; }
+        ++junk_nudges_;
+        return "Your last turn had no tool call and no summary. Continue the task: make the next tool call, "
+               "or, if everything is done and verified, reply with a short summary.";
+    }
+    if (step.kind == NativeStepKind::Final && edited_since_check_ && !verify_nudged_) {
+        verify_nudged_ = true;
+        return "You changed files after your last check. Before finishing, run the checks the goal asks for "
+               "and fix any failures; then reply with a short summary.";
+    }
+    return "";
+}
+
+std::string LoopGuards::steps_left_note(int steps_left) const {
+    if (cfg_.steps_left_warning <= 0 || steps_left != cfg_.steps_left_warning) return "";
+    return " NOTE: only " + std::to_string(steps_left) + " steps left. Run your checks now and finish "
+           "(reply with a short summary once they pass).";
+}
+
+uint64_t native_step_seed(uint64_t base, int step) {
+    uint64_t z = base + 0x9E3779B97F4A7C15ULL * (uint64_t)(step + 1);   // splitmix64
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z ^= z >> 31;
+    return z ? z : 1;
 }
 
 const char* agent_stop_name(AgentStop s) {

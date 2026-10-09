@@ -62,6 +62,12 @@ static void print_usage(const char* prog) {
             "  --transcript F   write the full conversation as JSON lines (one per step)\n"
             "  --require-tool   nudge once if the model answers before using any tool\n"
             "  --read-page N    read_file bytes per call (default: 5000; raises --tool-cap to fit)\n"
+            "  --seed N         base sampler seed (each step derives its own stream)\n"
+            "  --check-pattern S  bash commands containing S count as running the checks\n"
+            "                   (repeatable; default: any bash call)\n"
+            "  --steps-left-warning N  remind the agent when N steps remain (default 3, 0 = off)\n"
+            "  --start-cmd C    run shell command C in the workdir first and show its output\n"
+            "                   to the agent with the goal (e.g. the project's checks)\n"
             "  --edit-check E:C after write_file/edit_file on *E run shell command C ({file} =\n"
             "                   path; exit 0 = parses); a change that breaks parsing is undone.\n"
             "                   Repeatable. e.g. --edit-check '.dart:dart format -o none {file}'\n"
@@ -162,29 +168,10 @@ static bool parse_native_call(const std::string& s, ToolCall& call, std::string&
     return true;
 }
 
-// Degeneration ("rut") detector: the tail of the output is one short unit
-// repeated many times (e.g. "\x2d\x2e\x20" forever under greedy decoding).
-// Returns the repeating unit, or "" if the tail looks healthy.
-static std::string rut_unit(const std::string& acc) {
-    for (size_t p = 1; p <= 24; ++p) {
-        const size_t need = std::max<size_t>(96, p * 10);
-        if (acc.size() < need) continue;
-        const char* t = acc.data() + acc.size() - need;
-        bool periodic = true;
-        for (size_t i = p; i < need && periodic; ++i) periodic = t[i] == t[i - p];
-        if (periodic) {
-            std::string unit(t, p);
-            // a long run of one whitespace/punctuation char is legitimate (padding, rules)
-            if (p == 1 && (unit == " " || unit == "\n" || unit == "-" || unit == "=" || unit == "/")) continue;
-            return unit;
-        }
-    }
-    return "";
-}
-
 static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, const AgentConfig& cfg,
                                      const std::string& goal, const std::vector<ToolDef>& defs,
-                                     const std::map<std::string, ToolHandler>& handlers, FILE* logf) {
+                                     const std::map<std::string, ToolHandler>& handlers, FILE* logf,
+                                     const LoopGuardConfig& guard_cfg, uint64_t seed_base) {
     AgentResult result;
     result.goal = goal;
     result.stop = AgentStop::MaxSteps;
@@ -200,18 +187,27 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
     rt.reset();
     const double t0 = now_sec();
     FailedCallTracker fail_tracker;
+    LoopGuards guards(guard_cfg);
+    auto log_event = [&](int step, const char* kind, const std::string& text) {
+        if (!logf) return;
+        fprintf(logf, "{\"step\":%d,\"event\":\"%s\",\"text\":%s}\n", step, kind, json_str(text).c_str());
+        fflush(logf);
+    };
     for (int step = 0; step < cfg.max_steps; ++step) {
         printf("\033[1;35m--- [Step %d / %d] ---\033[0m\n", step + 1, cfg.max_steps);
+        const int steps_left = cfg.max_steps - (step + 1);
         std::string acc, last_piece, rut;
         bool stopped = false;
         GenStats st;
         std::string out;
+        SamplerConfig sc = scfg;
+        sc.seed = native_step_seed(seed_base, step);   // a fresh, reproducible stream per step
         try {
-            out = rt.generate(feed, cfg.max_new_tokens, scfg, [&](const std::string& piece, int64_t) {
+            out = rt.generate(feed, cfg.max_new_tokens, sc, [&](const std::string& piece, int64_t) {
                 fputs(piece.c_str(), stdout); fflush(stdout);
                 acc += piece; last_piece = piece;
                 if (acc.find("<tool_call|>") != std::string::npos) { stopped = true; return false; }
-                if (!(rut = rut_unit(acc)).empty()) return false;
+                if (!(rut = degenerate_tail_unit(acc)).empty()) return false;
                 return true;
             }, &st);
         } catch (const std::exception& e) {
@@ -220,6 +216,8 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
             break;
         }
         printf("\n");
+        const bool hit_cap = !stopped && rut.empty() &&
+                             (st.gen_tokens >= cfg.max_new_tokens || (st.ctx_max > 0 && st.ctx_used >= st.ctx_max));
         fprintf(stderr, "\033[2m[step %d] prefill %d tok in %.1fs | gen %d tok @ %.2f tok/s | ctx %d/%d | t=%.0fs\033[0m\n",
                 step + 1, st.processed_tokens, st.prefill_s, st.gen_tokens, st.decode_tok_s, st.ctx_used, st.ctx_max,
                 now_sec() - t0);
@@ -233,25 +231,53 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
         AgentStep s;
         s.index = step;
         s.model_output = out;
-        const size_t tc = out.find("<|tool_call>");
-        if (tc == std::string::npos && rut.empty()) {
-            // No call: the turn ended (EOG) — final answer. Strip channel noise.
-            std::string fin = out;
-            const std::string ch = "<|channel>thought\n<channel|>";
-            if (fin.compare(0, ch.size(), ch) == 0) fin = fin.substr(ch.size());
-            result.final_text = fin;
-            result.stop = out.empty() ? AgentStop::Empty : AgentStop::Done;
+        const NativeStep ns = classify_native_step(out, stopped, rut, hit_cap);
+
+        // ---- No tool call: an answer, an empty answer, a cut-off reply, or a rut outside a call.
+        if (!ns.in_call) {
+            std::string msg;
+            if (ns.kind == NativeStepKind::Rut) {
+                printf("\n\033[1;31m[rut detected outside a tool call: output repeats '%s' — discarded]\033[0m\n",
+                       rut.c_str());
+                msg = "Your last output got stuck repeating the same text and was discarded; no tool call was "
+                      "made. Continue the task with the next tool call.";
+            } else {
+                bool give_up = false;
+                msg = guards.on_no_call(ns, &give_up);
+                if (give_up) {
+                    printf("\n\033[1;31m[harness: repeated empty answers — stopping]\033[0m\n");
+                    log_event(step + 1, "give_up", "repeated empty answers");
+                    result.stop = AgentStop::Empty;
+                    result.steps.push_back(std::move(s));
+                    break;
+                }
+                if (msg.empty()) {                        // a real final answer
+                    result.final_text = ns.final_text;
+                    result.stop = AgentStop::Done;
+                    result.steps.push_back(std::move(s));
+                    break;
+                }
+            }
+            msg += guards.steps_left_note(steps_left);
+            printf("\n\033[1;33m[harness nudge] %s\033[0m\n", msg.c_str());
+            log_event(step + 1, "nudge", msg);
+            s.nudged = true;
+            s.tool_result = "[harness] " + msg;
             result.steps.push_back(std::move(s));
-            break;
+            feed = native_user_turn(msg);
+            continue;
         }
+
+        // ---- Inside a tool call.
+        const size_t tc = out.find("<|tool_call>");
         ToolCall call;
         std::string err, tool_result;
         bool ok = false;
-        if (!rut.empty()) {
+        if (ns.kind == NativeStepKind::Rut) {
             printf("\n\033[1;31m[rut detected: output repeats '%s' — step aborted]\033[0m\n", rut.c_str());
-            err = "your output got stuck repeating '" + rut + "' and the call was discarded. "
+            err = "your output got stuck repeating '" + strip_control_tokens(rut) + "' and the call was discarded. "
                   "Make the call again from the start, writing simpler code at that point";
-        } else if (!stopped) {
+        } else if (ns.kind == NativeStepKind::CutInCall) {
             // Hit the per-step token cap mid-call: say so concretely, or the
             // model just retries the same oversized write and hits it again.
             printf("\n\033[1;31m[step hit --max-new %d tokens before <tool_call|> — call discarded]\033[0m\n",
@@ -261,8 +287,7 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
                   ") and was discarded, so nothing was written. Do NOT retry the same large call. "
                   "Split the work: put widgets in separate smaller files (e.g. lib/widgets/*.dart) with one "
                   "write_file each, or change an existing file with edit_file";
-        }
-        else if (parse_native_call(out.substr(tc), call, err)) {
+        } else if (parse_native_call(out.substr(tc), call, err)) {
             auto it = handlers.find(call.name);
             if (it == handlers.end()) err = "unknown tool '" + call.name + "'";
             else {
@@ -270,24 +295,27 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
                 catch (const std::exception& e) { tool_result = std::string("error: ") + e.what(); }
             }
         }
-        if (!err.empty()) tool_result = "error: " + err + ". Call exactly one tool as <|tool_call>call:NAME{arg:<|\"|>text<|\"|>}<tool_call|>.";
+        if (!err.empty()) tool_result = "error: " + err + ". Make exactly one tool call in the native tool-call format.";
         // Repeat guard: the same tool failing with the same error again means
         // the model is stuck on one idea (even with other calls in between).
-        const int n_fail = fail_tracker.record(call.name.empty() ? "?" : call.name, tool_result);
+        const std::string tool_key = call.name.empty() ? "?" : call.name;
+        const int n_fail = fail_tracker.record(tool_key, tool_result);
         if (n_fail >= 2) {
-            tool_result += repeat_failure_note(call.name.empty() ? "?" : call.name, n_fail);
-            printf("\033[1;33m[repeat guard: failure #%d of %s with the same error]\033[0m\n", n_fail,
-                   call.name.empty() ? "?" : call.name.c_str());
+            tool_result += repeat_failure_note(tool_key, n_fail);
+            printf("\033[1;33m[repeat guard: failure #%d of %s with the same error]\033[0m\n", n_fail, tool_key.c_str());
         }
+        guards.on_tool(call.name, call.name == "bash" ? call.get("command", call.get("cmd", "")) : std::string(),
+                       ok, tool_result);
+        tool_result += guards.steps_left_note(steps_left);
         s.had_tool_call = true;
-        s.tool_name = call.name.empty() ? "?" : call.name;
+        s.tool_name = tool_key;
         s.tool_args_json = call.raw_json;
         s.tool_result = tool_result;
         s.tool_ok = ok;
         result.steps.push_back(std::move(s));
         // The stop token (<tool_call|>) was sampled but not fed: re-feed it,
         // then the response; the model continues in the same turn.
-        std::string body = tool_result;
+        std::string body = strip_control_tokens(tool_result);
         for (size_t k; (k = body.find(kQ)) != std::string::npos;) body.replace(k, 5, "\"");
         feed = (stopped ? last_piece : std::string("<tool_call|>")) + "<|tool_response>response:" +
                (call.name.empty() ? std::string("error") : call.name) + "{value:" + kQ + body + kQ + "}<tool_response|>";
@@ -317,6 +345,9 @@ int main(int argc, char** argv) {
     int max_new = 2048, tool_timeout = 600;
     size_t tool_cap = 6000;
     SystemToolOptions tool_opts;
+    LoopGuardConfig guard_cfg;
+    uint64_t seed_base = SamplerConfig{}.seed;
+    std::string start_cmd;
     std::string log_path, transcript_path;
     bool require_tool = false;
 
@@ -348,6 +379,14 @@ int main(int argc, char** argv) {
             tool_timeout = std::stoi(argv[++i]);
         } else if (a == "--tool-cap" && i + 1 < argc) {
             tool_cap = (size_t)std::stoll(argv[++i]);
+        } else if (a == "--seed" && i + 1 < argc) {
+            seed_base = (uint64_t)std::stoull(argv[++i]);
+        } else if (a == "--check-pattern" && i + 1 < argc) {
+            guard_cfg.check_patterns.push_back(argv[++i]);
+        } else if (a == "--steps-left-warning" && i + 1 < argc) {
+            guard_cfg.steps_left_warning = std::stoi(argv[++i]);
+        } else if (a == "--start-cmd" && i + 1 < argc) {
+            start_cmd = argv[++i];
         } else if (a == "--read-page" && i + 1 < argc) {
             tool_opts.read_page_bytes = (size_t)std::stoll(argv[++i]);
         } else if (a == "--edit-check" && i + 1 < argc) {
@@ -552,7 +591,20 @@ int main(int argc, char** argv) {
 
         printf("\033[1;32m[Starting Nishachar Execution Loop]\033[0m\n\n");
         if (cfg.style == ChatTemplateStyle::Gemma4 && !getenv("NISHACHAR_JSON_TOOLS")) {
-            AgentResult r = run_gemma4_native(rt, scfg, cfg, goal, native_defs, native_handlers, logf);
+            std::string goal_in = goal;
+            if (!start_cmd.empty() && native_handlers.count("bash")) {
+                // Repo health at the start of the session: the raw output of the
+                // project's own checks (generic; nothing task- or test-specific).
+                ToolCall sc;
+                sc.name = "bash";
+                sc.args.push_back({"command", start_cmd});
+                std::string o = native_handlers["bash"](sc);
+                if (o.size() > 3000) o = "[...]\n" + o.substr(o.size() - 3000);
+                goal_in += "\n\nState of the project at the start of this session (output of `" + start_cmd +
+                           "`):\n" + o;
+            }
+            AgentResult r = run_gemma4_native(rt, scfg, cfg, goal_in, native_defs, native_handlers, logf,
+                                              guard_cfg, seed_base);
             print_result(r);
             return (r.stop == AgentStop::Done) ? 0 : 1;
         }
