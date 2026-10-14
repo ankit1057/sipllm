@@ -6,6 +6,7 @@
 #include "llm/neon.h"
 #include "llm/mem_plan.h"
 #include "llm/plugin.h"
+#include "llm/semantic_cache.h"
 #include "llm/session.h"
 
 #include <cstdio>
@@ -73,6 +74,16 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx, kv_precision);
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
     tok_ = Tokenizer::from_source(*src_);
+}
+
+
+void Runtime::enable_semantic_cache(size_t max_bytes) {
+    if (kv_->precision() != KVPrecision::FP32) {
+        throw std::runtime_error("Semantic Cache only supports FP32 KV Cache");
+    }
+    if (!semantic_cache_) {
+        semantic_cache_ = std::make_unique<SemanticCache>(max_bytes, cfg_.n_layers, cfg_.kv_dim());
+    }
 }
 
 std::string Runtime::generate(const std::string& prompt, int max_new,
@@ -161,7 +172,23 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     }
     st.processed_tokens = (int)((int64_t)prompt_ids.size() - reuse_r);
 
+
+    // ---- Semantic Cache (Global Radix Tree) ----
+    if (semantic_cache_) {
+        std::vector<float> cached_k, cached_v;
+        int hit_len = semantic_cache_->find_longest_prefix(prompt_ids, cached_k, cached_v);
+        if (hit_len > pos_) {
+            int64_t stride = hit_len * cfg_.kv_dim();
+            for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+                kv_->inject(l, cached_k.data() + l * stride, cached_v.data() + l * stride, hit_len);
+            }
+            pos_ = hit_len;
+            st.semantic_cache_hits = hit_len;
+        }
+    }
+    
     // ---- prefill (RFC-007: single-pass batched) ----
+
     // One batched sweep streams the whole model ONCE for the entire prompt,
     // instead of the old loop that called tf_->forward() per token — which
     // re-streamed every layer for every prompt token (P full-model streams).
@@ -180,6 +207,7 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         next = sampler.sample(logits, vocab);
     }
     if (rtk) rtk->on_prefill(kv_view());
+
     double t_prefill_done = now_sec();
     st.prefill_s = t_prefill_done - t_start;
     st.ttft_s = st.prefill_s;   // first token emerges right after prefill
@@ -202,6 +230,7 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         committed_.push_back(next);
         ++pos_;
         if (rtk) rtk->on_step(kv_view());
+
         if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
         next = sampler.sample(logits, vocab);
     }
@@ -209,6 +238,11 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     double t_end = now_sec();
     st.decode_s = t_end - t_decode_start;
     st.decode_tok_s = st.decode_s > 0 ? st.gen_tokens / st.decode_s : 0;
+
+    // Commit the fully generated sequence to the semantic cache once at the end.
+    if (semantic_cache_ && pos_ > 0) {
+        semantic_cache_->commit(committed_, (const float*)kv_->k_ptr_layer(0), (const float*)kv_->v_ptr_layer(0), kv_->capacity());
+    }
 
     st.weights_resident_bytes = loader_->resident_bytes();
     st.pinned_layers = loader_->pinned_layers();
