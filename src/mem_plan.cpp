@@ -108,18 +108,28 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
         int n_pinned;
         size_t total_rss;
         MemLedger ledger;
-        int score() const {
-            // Score priorities:
-            // 1. higher ctx is better (up to requested)
-            // 2. resident head > streamed head
-            // 3. n_pinned is higher
-            // 4. n_buffers 2 > 1
-            int s = 0;
-            s += ctx * 10000;
-            if (n_pinned == 0 && n_buffers == 0) s += 500000; // All layers pinned
-            else s += n_pinned * 1000;
-            if (!stream_lm_head) s += 5000;
-            if (n_buffers > 1) s += 100;
+        long long score() const {
+            // Strict tiers, highest first (each tier outweighs every lower one):
+            // 1. higher ctx (up to requested)        — 1e6 per token, 128-token steps
+            // 2. every layer pinned (no streaming)   — 5e7
+            // 3. resident lm_head > streamed head    — 5e6
+            // 4. a 2-deep streaming ring > 1 buffer  — 1e6
+            // 5. more pinned layers                  — 1e3 each
+            //
+            // Tier 4 above tier 5 is MEASURED, not a preference (TinyLlama Q4_K_M,
+            // Apple M3, 2026-10-19): with one buffer every streamed layer's I/O
+            // is serial with its compute (~5.8 ms/layer) while two buffers
+            // overlap them (~3.7 ms/layer, I/O-bound). Trading the second
+            // buffer for one more pinned layer (~2.1 ms) therefore LOSES until
+            // all but ~2 layers are pinned: budgets 128M–512M decoded at
+            // 8.1–13.7 tok/s with 1 buffer vs 12.4 tok/s pure streaming. The
+            // all-pinned candidate (tier 2) still wins when it fits.
+            long long s = 0;
+            s += (long long)ctx * 1000000LL;
+            if (n_buffers == 0 && n_pinned > 0) s += 50000000LL;      // all layers pinned
+            if (!stream_lm_head) s += 5000000LL;
+            if (n_buffers > 1) s += 1000000LL;
+            s += (long long)n_pinned * 1000LL;
             return s;
         }
     };
