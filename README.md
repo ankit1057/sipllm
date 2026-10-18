@@ -1,17 +1,30 @@
 # sipllm
 
-[![Status: Stable v1.0.0](https://img.shields.io/badge/status-stable--v1.0.0-brightgreen.svg)](#status)
-[![Release: v1.0.0](https://img.shields.io/badge/release-v1.0.0-blue.svg)](https://github.com/ankit1057/sipllm/releases)
+[![Release](https://img.shields.io/github/v/release/ankit1057/sipllm?label=release)](https://github.com/ankit1057/sipllm/releases)
 [![CI](https://github.com/ankit1057/sipllm/actions/workflows/ci.yml/badge.svg)](https://github.com/ankit1057/sipllm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-**A production-grade, bounded-memory AI runtime that enables models larger than available RAM to execute efficiently with mathematical precision on edge devices.**
-SipLLM *sips* weights off storage — one transformer layer at a time — so peak RAM tracks a single resident layer, not the whole model: measured far below comparable runtimes (~120 MB vs ~1.35 GB for llama.cpp on TinyLlama), and the gap widens with model size. Numerically validated across all standard quantization formats and 16 model architectures.
+**A bounded-memory LLM runtime: models larger than available RAM run under a hard, configurable peak-RSS ceiling, CPU-first, with zero dependencies.**
+SipLLM *sips* weights off storage — one transformer layer at a time — so peak RAM tracks a single resident layer, not the whole model: measured at 122 MB vs 1323 MB for llama.cpp on the same TinyLlama Q4_K_M file (10.8× less), and the gap widens with model size. Numerically validated across all standard quantization formats and 16 model architectures.
 
-> ### Status: Production Ready (v1.0.0)
-> **Stable, production-grade release.** SipLLM delivers mathematical precision, deterministic memory bounds, and hardened execution across diverse edge platforms. Memory safety is rigorously enforced: the entire uninitialized-read class is eliminated at the source, verified by continuous Valgrind, ASan/UBSan, TSan, and fuzz testing in CI. Output accuracy is mathematically validated against reference implementations (cosine similarity `1.000000` on F16). Peak RSS, TTFT, and throughput are measured and reproducible across consumer laptops, cloud servers, single-board computers, and mobile devices (Android/Termux).
+> ### Status
+> **Latest tagged release: v0.5.0.** `main` is the 1.0 candidate and carries everything
+> below (REPL, tools, agent server, `--spec`, memory planner); the one-line installer
+> builds it from source until the next release is cut. Every number in this README is a
+> measurement with its date, hardware and source file named; the authoritative,
+> per-wave-refreshed figures are the **North Star scorecard** at the top of
+> [`CHANGELOG.md`](CHANGELOG.md). Memory safety: the uninitialized-read class is
+> eliminated at the source and gated in CI by Valgrind, ASan/UBSan, TSan and a fuzzer.
+> Output accuracy is validated against reference implementations (cosine similarity
+> `1.000000` on F16).
+>
+> **What a user on a phone (ARM) or an AMD laptop still cannot do:** see a SipLLM
+> number measured on their hardware. Everything here is Apple M3. The 4-bit integer
+> kernels (`--fast`, Q4_K/Q6_K) are verified on ARM NEON; the AVX2 path for AMD is
+> cross-compiled only and has never been run. On M3, resident 4-bit decode is now 67%
+> of llama.cpp in half the RAM; streaming is I/O-bound at 10.8× less RAM.
 
 **Edge-first, and therefore CPU-first.** This engine targets phones, SBCs, and
 other edge hardware — where there's plenty of storage but very little RAM and
@@ -20,8 +33,8 @@ deterministically and is optimized on CPU (hand-written ARM64 NEON kernels,
 x86_64 AVX2/FMA vector paths, scalar fallbacks elsewhere). The optional Vulkan
 backend provides GPU offload where hardware permits. No PyTorch, no ONNX, no
 ggml inference runtime dependency, no BLAS — just standard C++17 and `pthread`.
-Built and tested on mobile edge hardware (Termux / Android, Dimensity & Snapdragon)
-and fully portable to any Linux or macOS ARM or x86 host.
+Builds and runs on Termux / Android and on any Linux or macOS ARM or x86 host;
+all performance numbers below were measured on Apple M3 unless stated otherwise.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ankit1057/sipllm/main/install.sh | sh
@@ -30,15 +43,30 @@ sipllm run tinyllama -p "The capital of France is"
 
 ---
 
-## Demo — half the RAM, comparable speed
+## Demo — the RAM↔speed dial, measured
 
-Same model, same prompt, CPU-only, Apple M3 (4 threads). SipLLM's opt-in
-`--fast` int8 kernel brings decode close to llama.cpp, while `--ram-budget`
-holds peak memory far below it — SipLLM streams and pins weights under a hard
-ceiling instead of loading the whole model resident.
+Same model file, same prompt, CPU-only, Apple M3 (4 threads), warm cache. Peak RSS
+is the OS figure from `/usr/bin/time -l` (authoritative, cross-runtime).
 
-**TinyLlama-1.1B, Q8_0, `--ctx 512`, greedy, warm cache.** Peak RSS from
-`/usr/bin/time -l` (authoritative, cross-runtime); decode is the median of 3:
+**TinyLlama-1.1B Q4_K_M (669 MB) — the 4-bit file a phone would run.** Measured
+2026-10-19 (`bench/results/*2026-10-19.json`), `--ctx 512`, greedy, median of 3–5:
+
+| runtime | peak RSS | decode | vs llama.cpp |
+|:--------|---------:|-------:|:-------------|
+| llama.cpp (CPU, `-ngl 0 -t 4`, ggml 0.27)   | 1323 MB | 88 tok/s | baseline |
+| **SipLLM** `--fast --ram-budget 768M` (22/22 pinned) | **645 MB** | **59.6 tok/s** | **2.05× less RAM**, 67% of the speed |
+| **SipLLM** `--ram-budget 768M` (exact fp32 dequant) | 645 MB | 21.0 tok/s | 2.05× less RAM, 24% |
+| **SipLLM** `--fast --ram-budget 512M` (13/22 pinned) | **482 MB** | 23.8 tok/s | 2.7× less RAM |
+| **SipLLM** streaming (`--ram-budget 0`)       | **122 MB** | 11.7 tok/s | **10.8× less RAM**, I/O-bound |
+| **SipLLM** streaming `--spec 5`, copy-heavy output | 133 MB | 30.7 tok/s | 10× less RAM, 3.2× plain |
+
+`--fast` routes Q4_K and Q6_K projections through int8 dot kernels (NEON `sdot`;
+AVX2 on x86-64) with the activation quantized per 32-block — the same approximation
+llama.cpp uses. First greedy token matched the exact fp32 path on 6/6 prompts, full
+48-token continuations on 5/6. The exact path stays the default.
+
+**TinyLlama-1.1B Q8_0 (1.17 GB), `--fast`, `--ctx 512`, greedy.** Measured
+2026-07-27 at v0.4.0 (`bench/results/demo-v0.4-*.json`), median of 3:
 
 | runtime | peak RSS | decode | vs llama.cpp |
 |:--------|---------:|-------:|:-------------|
@@ -46,8 +74,8 @@ ceiling instead of loading the whole model resident.
 | **SipLLM** `--fast --ram-budget 1200M` (resident) | **1113 MB** | ~50 tok/s | **2.1× less RAM**, ~12% slower |
 | **SipLLM** `--fast` (streaming)        | **175 MB**  | 6.8 tok/s | **13.3× less RAM** |
 
-At full residency SipLLM uses **2.1× less memory** at ~88% of llama.cpp's decode
-(within 20%); drop the budget and the *same model* runs in **175 MB — 13× less
+On Q8_0 with `--fast`, full residency uses **2.1× less memory** at ~88% of
+llama.cpp's decode; drop the budget and the *same model* runs in **175 MB — 13× less
 RAM**, streamed one layer at a time. It's a smooth RAM↔speed dial, not a fixed
 point. Output is numerically equivalent (int8-activation dot — the same technique
 llama.cpp uses; first-token predictions match, and the exact fp32 path stays the
@@ -60,7 +88,11 @@ M=~/.sipllm/models/tinyllama-q8_0.gguf
 ./build/llm "$M" -p "Once upon a time" -n 32 --greedy --ctx 512 --fast                      # streaming: 13x less RAM
 ```
 
-> **Kernel Acceleration.** The `--fast` flag accelerates **Q8_0** and **K-quants (Q4_K, Q5_K, Q6_K)** via SIMD dot-product kernels (ARM64 NEON `sdot`/`i8mm` and x86_64 AVX2/FMA), providing immediate decode speedups while maintaining strict numerical equivalence to reference outputs.
+> **Kernel acceleration, precisely.** `--fast` routes **Q8_0, Q4_K and Q6_K**
+> projections through int8 dot kernels: ARM64 NEON `sdot` (verified on Apple M3) and
+> x86-64 AVX2 `maddubs` (cross-compiled, **not yet run on real x86 hardware**). Other
+> quant types, and hosts without SDOT/AVX2, take the exact fp32-dequant path. On
+> TinyLlama Q4_K_M resident: 21.0 → 59.6 tok/s; streaming is unchanged (I/O-bound).
 
 ## Bigger than RAM — the defining capability
 
@@ -242,7 +274,7 @@ SipLLM is engineered as a universal, dependency-free, edge-first AI runtime:
 │       In-Memory Graph (SipModel)   ·   Binary On-Disk (SIPR)           │
 ├────────────────────────────────────────────────────────────────────────┤
 │                   Host Compute & SIMD Acceleration                     │
-│    ARM64 NEON (sdot / i8mm)   ·   x86_64 AVX2 / FMA   ·   Vulkan GPU   │
+│ ARM64 NEON sdot (Q8_0/Q4_K/Q6_K) · x86_64 AVX2 (untested) · Vulkan: detect only │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -272,10 +304,10 @@ Nishachar is SipLLM's reference goal-driven autonomous agent runtime (`goal -> p
 
 ### 5. Cross-Platform Edge Performance
 Built specifically for edge and resource-constrained environments:
-- **ARM64 NEON Kernels**: Hand-tuned SIMD kernels using `sdot` and `i8mm` instructions for accelerated dot products across Q8_0 and K-quants (Q4_K, Q5_K, Q6_K).
+- **ARM64 NEON Kernels**: int8 `sdot` dot-product kernels for Q8_0, Q4_K and Q6_K (`--fast`), NEON-assisted fp32 dequantization for the exact path, NEON fp16→fp32 conversion.
 - **x86_64 AVX2 / FMA Vector Paths**: Optimized vector dot products with automatic CPU runtime detection and portable scalar fallbacks.
 - **Hardware-Calibrated Auto-Tuning**: `AutoTuner` and `DeviceProfile` automatically benchmark the host hardware on first launch, selecting the optimal thread count and scheduling policy.
-- **Mobile & Embedded Ready**: First-class support for Android/Termux (tested on Dimensity 8300 and Snapdragon platforms), Apple Silicon (M1–M4), and Linux SBCs.
+- **Mobile & Embedded**: builds on Android/Termux, Apple Silicon and Linux SBCs. No phone performance numbers are published yet — they do not exist; on-device measurement is open work.
 
 ## Validated against llama.cpp
 
@@ -320,10 +352,10 @@ See [`golden/README.md`](golden/README.md) for the full methodology.
 - **Production-Grade GGUF & Safetensors Loading** — Loads unmodified GGUF v2/v3 and Hugging Face Safetensors natively without external conversion.
 - **16 Model Architectures** — Native execution for Llama (2/3/3.1/3.2/3.3), Mistral, Qwen2/2.5, Gemma 2/3/4, Phi-2/3/4, Mixtral MoE, GPT-2, StarCoder 2, DeepSeek, Kimi, Yi, and Baichuan families.
 - **Complete Quantization Matrix** — Full support for `F32`, `F16`, `BF16`, `Q4_0/1`, `Q5_0/1`, `Q8_0`, and all K-quants (`Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, plus `IQ4_NL`).
-- **SIMD Vector Acceleration** — Hand-crafted ARM64 NEON (`sdot`/`i8mm` for Q8_0 & K-quants) and x86_64 AVX2/FMA vector paths with automatic runtime detection.
+- **SIMD Vector Acceleration** — int8 kernels for Q8_0 / Q4_K / Q6_K on ARM64 NEON `sdot` and x86_64 AVX2 (`--fast`; AVX2 untested on hardware), plus fp32 NEON / AVX2+FMA vector paths.
 - **Bounded-Memory Layer Streaming** — Synchronous `pread`, double-buffered async prefetcher, and zero-copy `mmap` options keeping peak resident memory pinned to a single layer.
 - **Inviolable RAM Budget Ceiling (`--ram-budget`)** — Dynamic layer pinning with a smooth RAM↔speed dial.
-- **Kosh Context Intelligence** — Zero-cost prefix reuse (`--reuse`), persistent SIPS v1 session checkpointing (`--save-session`/`--load-session`), speculative decoding, and semantic cache.
+- **Kosh Context Intelligence** — Zero-cost prefix reuse (`--reuse`), persistent SIPS v1 session checkpointing (`--save-session`/`--load-session`), prompt-lookup speculative decoding (`--spec N`, proven token-identical to plain decoding), and a semantic (radix-tree) prefix cache.
 - **Quantized KV Cache (`--kv-q8`)** — 8-bit KV cache with dynamic grow-on-demand allocation cutting memory footprint in half.
 - **Nishachar Autonomous Agent** — Reference goal-driven agent (`goal -> plan -> act -> verify`) with built-in zero-dependency tool calling across CLI (Path A) and OpenAI-compatible server (Path B).
 - **Ollama-Style CLI & OpenAI Server** — Interactive multi-turn chat REPL, positional prompts, piped stdin, and streaming HTTP Server-Sent Events.
@@ -334,7 +366,7 @@ See [`golden/README.md`](golden/README.md) for the full methodology.
 
 ```
 sipllm               Ollama-style CLI wrapper (run / pull / serve / list / rm / which)
-install.sh           One-line cross-platform production installer (v1.0.0)
+install.sh           One-line installer (prebuilt bundle when a release has one, else source build)
 include/llm/         Public engine headers (runtime, sip_ir, kosh, rtk, nishachar, tools)
 src/                 Core runtime engine (transformer, loader, quant, simd, scheduler, tokenizer)
 tools/               ir_dump, gguf_to_sipir, nishachar_demo, bench, inspect_gguf, dump_logits
@@ -369,15 +401,26 @@ must keep the golden validation matrix green. Please adhere to the [Code of Cond
 
 ## Roadmap
 
-### Completed in v1.0.0
+### Shipped on `main` (1.0 candidate; latest tag v0.5.0)
 - [x] Bounded-memory transformer layer streaming with `--ram-budget` peak-RSS ceiling.
 - [x] Full support for 16 model architectures across Global and Asian model families.
-- [x] Hand-optimized ARM64 NEON (`sdot`/`i8mm`) and x86_64 AVX2/FMA SIMD kernels for Q8_0 and K-quants.
+- [x] Int8 `--fast` kernels for Q8_0, Q4_K and Q6_K: ARM64 NEON `sdot` (verified), x86_64 AVX2 (cross-compiled only).
 - [x] Sip IR stable intermediate representation, binary format (`SIPR`), and inspection tools (`ir_dump`).
 - [x] Kosh context reuse (`--reuse`) and persistent SIPS v1 session serialization.
 - [x] Nishachar goal-driven autonomous agent runtime (Path A CLI & Path B OpenAI-compatible server).
 - [x] Full Ollama-style CLI experience (interactive REPL, piped stdin, positional prompt) and OpenAI API server.
 - [x] Verified crash-hardened memory safety (zero uninitialized reads; continuous Valgrind/ASan/TSan).
+- [x] Prompt-lookup speculative decoding (`--spec N`) with a token-identity proof against plain decoding.
+
+### Current wave — the standing goal
+Run LLMs **better than LiteRT / MediaPipe LLM Inference on ARM and AMD CPUs**: an
+order of magnitude less RAM at competitive speed. The RAM half is measured; the speed
+half needs:
+- [x] Integer K-quant kernels (Q4_K, Q6_K × int8 activations): resident 4-bit decode 24% → 67% of llama.cpp on M3.
+- [ ] Run and verify the AVX2 path on a real AMD/Intel host (`make test`, then the bench).
+- [ ] On-device numbers from a real phone (Snapdragon / Dimensity) — none exist yet.
+- [ ] Same-hardware head-to-head against LiteRT-LM (published anchor, S24 Ultra CPU, not ours: Gemma3-1B int4 at 50–55 tok/s in ~1 GB).
+- [ ] Remaining M3 gap (67% → parity): fp32 attention/KV path, prefill (73 vs 266 tok/s).
 
 ### Future Horizons
 - [ ] First-class mobile bindings (Flutter / Android JNI / iOS Swift framework).

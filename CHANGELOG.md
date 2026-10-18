@@ -6,37 +6,38 @@ Rule 1). Peak RSS is the authoritative cross-runtime number from `/usr/bin/time 
 
 ```
 ============================
-SipLLM North Star   (measured 2026-07-27 · Apple M3 · warm cache · median-of-3)
+SipLLM North Star   (measured 2026-10-19 · Apple M3 · 4 thr · ctx 512 · warm · load-guarded)
 ============================
-Peak RSS:              tinyllama 121 MB (stream) … 644 MB (fully resident)
-                       smollm2    54 MB (stream) … 161 MB (fully resident)
-                       vs llama.cpp CPU: 1356 MB / 546 MB  → 10–11× smaller at min budget
+Peak RSS:              tinyllama Q4_K_M (669 MB file): 122 MB (stream) … 645 MB (fully resident)
+                       smollm2-135m Q8_0: 54 MB (stream) … 162 MB (resident)
+                       vs llama.cpp CPU (ggml 0.27.0): 1323 MB / 515 MB → 10.8× / 9.5× smaller at min budget
 Resident Weights:      FLAT 1.5 MB across 4/16/32 toy layers (streaming thesis holds)
                        real: 37.6 MB (smollm2 1-layer) / 106.5 MB (tinyllama 1-layer)
                        pinned dial: up to 143 MB (smollm2) / 630 MB (tinyllama)
-Decode tok/s:          Q8 `--fast` resident: smollm2 62→171 · tinyllama **50 vs llama.cpp 57**
-                       RAM-budget dial (exact fp32): smollm2 53→66 · tinyllama 11→22
-TTFT:                  smollm2 ~0.10 s · tinyllama ~0.68 s   vs llama.cpp 0.003 / 0.021 s
-Prefill Throughput:    smollm2 50–67 tok/s · tinyllama 7–23 tok/s  vs llama.cpp 1680 / 238
-Expansion Factor:      2.7× (smollm2) · 5.5× (tinyllama)  = disk / peak-RSS at min budget
-Largest Runnable Model:MEASURED — Llama-2-13B (7.87 GB Q4) in **317 MB** peak RSS
-                       (25×); Llama-3.1-8B (4.92 GB Q4) in 204 MB (24×), on a
-                       16 GB Mac with ~3 GB free. Bounded by layer, not model size.
+Decode tok/s:          tinyllama Q4_K_M resident: fp32 21.0 → `--fast` int8 **59.6** (llama.cpp 88.3 → 67%)
+                       tinyllama Q4_K_M stream (122 MB): 11.7 (I/O-bound); `--spec 5` on copy-heavy output: 30.7
+                       smollm2 Q8_0 stream 58.9 / resident 67.6 (llama.cpp 366)
+TTFT:                  tinyllama 123 ms stream · 68 ms resident `--fast`   vs llama.cpp 28 ms
+Prefill Throughput:    tinyllama 37–51 (stream) · 73 (resident `--fast`) tok/s   vs llama.cpp 266
+Expansion Factor:      5.5× (tinyllama Q4_K_M) · 2.7× (smollm2)  = disk / peak-RSS at min budget
+Largest Runnable Model:MEASURED 2026-07-27 — Llama-2-13B (7.87 GB Q4) in 317 MB peak RSS (25×);
+                       Llama-3.1-8B (4.92 GB Q4) in 204 MB (24×). Bounded by layer, not model size.
 Energy / Token:        N/A (needs `sudo powermetrics`; never fabricated)
 
-Current Largest Bottleneck:  Two fronts now that Q8 `--fast` is within ~12% of
-                       llama.cpp. (1) 4-bit (Q4_K) models: the int-dot path does
-                       not apply yet, so K-quant decode still uses fp32 dequant.
-                       (2) Streaming (exceeds-RAM) regime: decode is disk-bandwidth
-                       -bound (arithmetic intensity Θ(1)).
-Estimated Gain if Fixed:  K-quant int-dot → Q8-class speed on 4-bit models = the
-                       biggest RAM headline. Speculative streaming → amortizes
-                       weight movement in the exceeds-RAM regime.
-Why this is the next priority:  v0.4 proves the thesis (2.1× less RAM at ~88%
-                       speed on a real 1.1B model). The Q4 int-dot path is the
-                       strongest next demo; streaming speed is the long-term moat.
-Confidence:            High — v0.4 numbers measured vs llama.cpp on tinyllama Q8;
-                       re-validate at the start of the next wave.
+Current Largest Bottleneck:  Two measured gaps against the standing goal (beat LiteRT /
+                       MediaPipe on ARM + AMD CPUs). (1) No on-device number exists:
+                       nothing has run on a phone or an AMD host; the AVX2 K-quant
+                       path is cross-compiled only. (2) Resident 4-bit decode is 67% of
+                       llama.cpp: remaining cost is the fp32 attention/KV path and
+                       per-token lm_head (Q6_K, now int8) plus prefill at 73 vs 266.
+Estimated Gain if Fixed:  (1) turns the RAM thesis into a competitor claim or kills
+                       it — the only step that can. (2) ~1.3× decode (to ~parity), 3× prefill.
+Why this is the next priority:  The runtime now has the kernel it lacked; what it
+                       lacks is evidence on the hardware the goal names. A number on a
+                       Snapdragon/Dimensity phone and on a Zen laptop decides the
+                       roadmap more than any further M3 tuning.
+Confidence:            High on every number above (quiet CPU, load recorded, 3–5 reps,
+                       JSON committed). Zero on phone/AMD — not measured.
 ```
 
 ## [0.5.0] — Plugin runtime + persistent context (2026-08-13)
@@ -188,6 +189,142 @@ byte-identical greedy output for 24 tokens).
 `1e-3`/bit-identical correctness tests are unchanged (no regressions).
 
 ## [Unreleased]
+
+### Wave 12 — edge truth: K-quant integer kernels, `--spec`, planner fix, honest claims (2026-10-19)
+
+Standing goal set by the maintainer this session: SipLLM is complete when it is a
+*scientific utility* that runs LLMs better than LiteRT / MediaPipe LLM Inference on
+ARM and AMD CPUs — an order of magnitude less RAM at competitive speed, on the bet
+that storage is cheap and RAM/VRAM are not. Every number below is Apple M3,
+4 threads, `--ctx 512`, greedy, warm cache, peak RSS from `/usr/bin/time -l`,
+commit named in the JSON. Model: **TinyLlama-1.1B Q4_K_M (669 MB)** — the 4-bit
+file a phone runs — unless stated.
+
+**Measured first (pre-change baseline, `bench/results/*2026-10-19.json`):**
+
+| runtime | peak RSS | decode | prefill | TTFT |
+|:--|--:|--:|--:|--:|
+| llama.cpp CPU (`-ngl 0 -t 4`, ggml 0.27.0) | 1323 MB | 88.3 tok/s | 266 tok/s | 28 ms |
+| SipLLM streaming (`--ram-budget 0`) | 122 MB | 11.7 tok/s | 40.5 tok/s | 123 ms |
+| SipLLM resident (`--ram-budget 768M`, 22/22) | 645 MB | 21.5 tok/s | — | — |
+
+RAM: 10.8× less streaming, 2.05× less resident. Speed at equal residency: 24% of
+llama.cpp — the 4-bit path dequantized to fp32. That gap is the named hard part.
+
+**Added**
+- **Q4_K and Q6_K × int8-activation kernels** (`matmul_q4_K_i8`, `matmul_q6_K_i8`,
+  `src/neon.cpp`) under the existing opt-in `--fast` gate. Activation quantized once per
+  token to per-32 int8 (shared with the Q8_0 kernel); each sub-block is an SDOT on the
+  raw nibbles plus two scalar FMAs (`xs·(d·sc·Σq·xq − dmin·m·Σxq)`); Q6_K takes the
+  dot per 16-wide scale group with the −32 offset folded into a scalar term. ARM NEON
+  `vdotq_s32`; x86-64 AVX2 via `_mm256_maddubs_epi16` (its (u8,s8) contract is exactly
+  nibbles × int8; pair sums ≤ 16002, no saturation). Every quantized projection in a
+  Q4_K_M file (135 Q4_K + 21 Q6_K tensors) now runs an integer dot with `--fast`.
+  **Default path byte-for-byte unchanged**; fp32 dequant stays the oracle.
+  - Correctness: `test_neon` (7 cases) — synthetic well-formed K-quant rows vs the exact
+    fp32 dequant of the same bytes within the int8-activation bound; threaded ≡ single
+    bit-identical; 6-bit scale/min packing round-trips. Real model, greedy 48 tokens,
+    `--fast` vs fp32: first token identical 6/6 prompts, full continuation identical
+    5/6, the sixth diverging at a near-tie 56 chars in (same class as Q8_0 `--fast`).
+  - **AVX2 path is cross-compiled only (clang `-target x86_64`), NOT run — no x86 host
+    here.** The AMD half of the goal is unverified until someone runs `make test` on one.
+  - Measured, 48 tokens, median of 3:
+
+    | `--ram-budget` | pinned | fp32 dequant | **`--fast` int8** | gain | peak RSS | prefill (fp32 → fast) |
+    |:--|--:|--:|--:|--:|--:|--:|
+    | 768M (resident) | 22/22 | 21.0 tok/s | **59.6 tok/s** | **2.83×** | 645 MB | 44 → 73 tok/s |
+    | 512M | 13/22 | 16.5 tok/s | 23.8 tok/s | 1.45× | 482 MB | 37 → 58 tok/s |
+    | 0 (streaming) | 0/22 | 11.7 tok/s | 11.9 tok/s | I/O-bound | 122 MB | 37 → 51 tok/s |
+
+    Resident Q4_K_M now decodes at **67% of llama.cpp (59.6 vs 88.3 tok/s) in 2.05× less
+    RAM**, up from 24%. TTFT 113 → 68 ms. Peak RSS unchanged (the kernel adds one int8
+    copy of the activation, ~2–6 KB). `.claude-artifacts/fast-q4km-2026-10-19.tsv`,
+    median of 3, load₁ₘ 3.6–5.0 at each point.
+- **`--spec N` — prompt-lookup speculative decoding reachable from the CLI** (the
+  Runtime API from 77cf035 had no flag). Verify loop hardened: EOS inside an accepted
+  draft now stops; `max_new` honoured inside the run; one `++pos_` per consumed batch
+  element with the KV truncated on first rejection; `GenStats` reports drafted /
+  accepted / verify passes. `test_spec_equiv` (5 cases) proves greedy output is
+  token-for-token identical to plain decoding for K=1/3/5 with drafts actually
+  verified, `max_new` respected, a seeded sampling run identical (one RNG draw per
+  verify step), stop callback honoured. Real model: greedy output identical with and
+  without `--spec 5`.
+  - Measured, streaming regime (`--ram-budget 0`, 122–133 MB, copy-continuation
+    prompt, 48 tok, quiet CPU): plain 9.7 → `--spec 3` **27.8 tok/s**, 33/36 drafts
+    accepted in 12 verify passes → `--spec 5` **30.7 tok/s (3.2×)**, 37/42 accepted in
+    9 passes. Free text ("Once upon a time"): 1/7 accepted, 12.1 vs 11.7 — no gain, no
+    loss. Each verify pass streams every layer **once** for K+1 positions — the
+    "speculative streaming" item from the roadmap, now real for copy-heavy output
+    (code edits, summaries, retrieval-grounded answers).
+    Resident regime (fp32 dequant path, `--ram-budget 768M`), same run, copy-heavy
+    prompt: plain 12.4 → `--spec 3` 21.9 → `--spec 5` **32.5 tok/s (2.6× within-run)**.
+    Absolute numbers in that block are depressed — the fp32 resident baseline read
+    21.0 tok/s twenty minutes earlier and 12.4–15.6 here (thermal drift on a fanless
+    M3; the load guard catches foreign load, not heat) — so only the within-run ratio
+    is claimed. The gain is real because the verify pass goes through the batched
+    matmul, which dequantizes each weight row **once** for all K+1 positions; on the
+    fp32 path that dequant is the dominant per-token cost. Free text: no change.
+
+**Fixed**
+- **`--ram-budget` dial was non-monotonic below ~512M** (planner `src/mem_plan.cpp`):
+  it scored "one more pinned layer" above "two stream buffers", so every partial
+  budget traded the async double-buffer for a pinned layer and lost: 128M → 8.1,
+  256M → 9.2, 384M → 10.9, 512M → 13.7 tok/s, **all slower than pure streaming at
+  12.4 tok/s in 122 MB**. Model fitted from the sweep: 1 buffer ≈ 5.8 ms/layer
+  (I/O serial with compute), 2 buffers ≈ 3.7 ms (overlapped), pinned ≈ 2.1 ms, so one
+  buffer only wins when ≤ 2 layers remain streamed. Scoring is now strict 64-bit
+  tiers (ctx > all-pinned > resident head > 2 buffers > pinned count); `--ram-budget
+  0` never consults the planner and is unchanged. Three new planner tests.
+  Re-sweep after the fix (quiet CPU, same run, `bench/results/ram-budget-*2026-10-19.json`
+  at b262811), tinyllama Q4_K_M decode vs the unbounded stream in the same run:
+
+  | `--ram-budget` | before: pinned / buffers / tok/s / vs stream | after: pinned / buffers / tok/s / vs stream |
+  |:--|:--|:--|
+  | 128M | 1 / 1 / 8.1 / −34% | 0 / 1 / 9.7 / −10% (a 2-deep ring does not fit in 128M; ceiling honoured) |
+  | 256M | 4 / 1 / 9.2 / −26% | 3 / 2 / 10.6 / −1% |
+  | 384M | 9 / 1 / 10.9 / −12% | 8 / 2 / 12.9 / **+20%** |
+  | 512M | 14 / 1 / 13.7 / +11% | 13 / 2 / 14.7 / **+36%** |
+  | 768M | 22 / all / 21.5 | 22 / all / 21.6 |
+
+  The dial is monotonic from 256M up; smollm2 at 128M went 54.1 → 60.8 tok/s (now
+  above its own stream rate of 58.9). Peak RSS stays under every budget.
+- `test_spec_decoder` had been **red since 77cf035** (expected a 2-token draft where
+  standard prompt lookup returns 3); the tree is green again with four more cases.
+- `scripts/bench.sh` toy-scaling rows at 32 layers recorded **0 generated tokens /
+  0 tok/s** as if measured (greedy on random weights hits EOS at step one); toy rows
+  now use seeded sampling.
+- `install.sh` claimed `VERSION=1.0.0`, a release that does not exist, so every
+  install silently fell back to a source build; it now says `0.6.0-dev` and why.
+
+**Measurement validity (new harness guard)**
+- `bench.sh` and `bench_ram_budget.sh` record the 1-minute load average and the
+  hungriest foreign process in the JSON `meta`, and **refuse to run when load exceeds
+  the thread count** (`LOAD_OVERRIDE=1` tags the run `contended`). Mid-session a
+  foreign JVM and then Spotlight owned the CPU and produced "resident decode 6.4
+  tok/s" — a 3× regression that did not exist. Discarded; numbers above are from quiet
+  runs.
+
+**Claims brought back to evidence**
+- README: no more "Production Ready v1.0.0" (latest tag is v0.5.0; `main` is the 1.0
+  candidate); release badge is now GitHub's live one; demo table rebuilt from today's
+  Q4_K_M measurements with date + JSON named; the Q8_0 `--fast` table kept with its
+  2026-07-27 provenance; "K-quant SIMD `sdot`/`i8mm`" claims rewritten to what exists;
+  Vulkan marked detect-only; no phone numbers claimed (none exist); a standing "what a
+  phone / AMD user still cannot do" line.
+- Published competitor anchor, **not our hardware** (hf.co/litert-community/Gemma3-1B-IT,
+  Samsung S24 Ultra CPU, XNNPACK 4 threads): Gemma3-1B dynamic_int4 — MediaPipe 138 pp /
+  50 tg tok/s in 982 MB; LiteRT-LM int4-QAT 379 pp / 55 tg in 1009 MB; model files
+  529–657 MB. They hold 1.5–1.9× the model in RAM; SipLLM streaming holds 0.18×.
+
+**Still cannot (one line, per the standing goal):** a phone user has no SipLLM number
+at all yet (no on-device run); an AMD user has an untested AVX2 path; on M3 the
+resident 4-bit decode is 67% of llama.cpp, prefill 27%, TTFT 2.4× longer, and no
+same-hardware LiteRT-LM head-to-head has been run — so "better than LiteRT /
+MediaPipe" is a RAM claim with evidence and a speed claim without it.
+
+**Deferred:** same-hardware head-to-head vs LiteRT-LM (its macOS CLI exists; not run);
+Q5_K / Q8_K integer paths; VNNI (Zen4+) fast path; batched lm_head projection in
+`spec_forward` (streams the head K+1× per pass today).
 
 ### Architecture — data-driven BlockSpec unification (PR #49 merged)
 

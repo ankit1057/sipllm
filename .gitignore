@@ -34,3 +34,4 @@ CLAUDE.md
 docs/superpowers/
 __pycache__/
 *.pyc
+/build-android/

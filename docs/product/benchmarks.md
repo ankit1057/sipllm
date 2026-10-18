@@ -1,6 +1,6 @@
 # Benchmarks &amp; validation
 
-<div class="hero"><p class="lead"><strong>Correctness is a measurement, not a claim; footprint is a measurement, not a claim.</strong> Every number here is Apple M3, CPU-only, warm cache, median-of-3, measured 2026-07-27. Peak RSS is the authoritative cross-runtime figure from <code>/usr/bin/time -l</code>. All figures are committed as JSON under <code>bench/results/</code>.</p></div>
+<div class="hero"><p class="lead"><strong>Correctness is a measurement, not a claim; footprint is a measurement, not a claim.</strong> Every number here is Apple M3, CPU-only, warm cache, median-of-3 or 5, measured 2026-10-19 unless dated otherwise; the harness now records the CPU load and refuses to run on a contended machine. Peak RSS is the authoritative cross-runtime figure from <code>/usr/bin/time -l</code>. All figures are committed as JSON under <code>bench/results/</code>.</p></div>
 
 > [!MEASURED] Host, not device
 > These are measured on **host (Apple M3)**. Android on-device numbers are **pending** — the Flutter/FFI layer (Wave 8) is host-verified only. No phone/watch figure is quoted anywhere in these docs because none has been measured yet.
@@ -11,14 +11,15 @@ The project's single measured source of truth, refreshed at the end of every opt
 
 | Metric | Value |
 |:-------|:------|
-| Peak RSS — tinyllama | 121 MB (stream) … 644 MB (fully resident) |
-| Peak RSS — smollm2 | 54 MB (stream) … 161 MB (fully resident) |
-| vs llama.cpp CPU | 1356 MB (tinyllama) / 546 MB (smollm2) → **10–11× smaller at min budget** |
+| Peak RSS — tinyllama Q4_K_M (669 MB file) | 122 MB (stream) … 645 MB (fully resident) |
+| Peak RSS — smollm2-135m Q8_0 | 54 MB (stream) … 162 MB (fully resident) |
+| vs llama.cpp CPU (ggml 0.27.0) | 1323 MB (tinyllama) / 515 MB (smollm2) → **10.8× / 9.5× smaller at min budget** |
 | Resident weights | FLAT ~1.5 MB across toy 4/16/32 layers; real 37.6 MB (smollm2 1-layer) / 106.5 MB (tinyllama 1-layer); pinned dial up to 143 MB (smollm2) / 630 MB (tinyllama) |
-| Decode tok/s (Q8 `--fast`, resident) | smollm2 62→171 · tinyllama 50 (vs llama.cpp 57) |
-| Decode tok/s (RAM-budget dial, exact fp32) | smollm2 53→66 · tinyllama 11→22 |
-| TTFT | smollm2 ~0.10 s · tinyllama ~0.68 s (vs llama.cpp 0.003 / 0.021 s) |
-| Prefill throughput | smollm2 50–67 · tinyllama 7–23 tok/s (vs llama.cpp 1680 / 238) |
+| Decode tok/s — tinyllama Q4_K_M resident | exact fp32 21.0 → **`--fast` int8 59.6** (llama.cpp 88.3 → **67%**) |
+| Decode tok/s — tinyllama Q4_K_M streaming (122 MB) | 11.7 (I/O-bound); `--spec 5` on copy-heavy output 30.7 |
+| Decode tok/s — smollm2 Q8_0 | 58.9 stream · 67.6 resident (llama.cpp 366) |
+| TTFT | tinyllama 123 ms stream · 68 ms resident `--fast` (llama.cpp 28 ms) |
+| Prefill throughput | tinyllama 37–51 stream · 73 resident `--fast` tok/s (llama.cpp 266) |
 | Expansion factor (disk ÷ peak-RSS, min budget) | 2.7× (smollm2) · 5.5× (tinyllama) |
 | Largest runnable | Llama-2-13B (7.87 GB Q4) in **317 MB (25×)**; Llama-3.1-8B (4.92 GB Q4) in 204 MB (24×) |
 | Energy / token | **N/A** (needs `sudo powermetrics`; never fabricated) |
@@ -38,7 +39,25 @@ The project's single measured source of truth, refreshed at the end of every opt
 
 Peak RSS grows with layer *width*, never model depth/total size. See [Bigger than RAM](j-bigger-than-ram.html).
 
-## Half the RAM, comparable speed
+## The RAM↔speed dial on a 4-bit file (2026-10-19)
+
+TinyLlama-1.1B **Q4_K_M** (669 MB), `--ctx 512`, greedy, 4 threads, warm cache, 48 tokens, median of 3 — the file a phone would run:
+
+| Runtime | Peak RSS | Decode | vs llama.cpp |
+|:--------|---------:|-------:|:-------------|
+| llama.cpp (CPU, ggml 0.27.0) | 1323 MB | 88.3 tok/s | baseline |
+| SipLLM `--fast --ram-budget 768M` (22/22 pinned) | **645 MB** | **59.6 tok/s** | 2.05× less RAM, 67% |
+| SipLLM `--ram-budget 768M` (exact fp32) | 645 MB | 21.0 tok/s | 2.05× less RAM, 24% |
+| SipLLM `--fast --ram-budget 512M` (13/22) | 482 MB | 23.8 tok/s | 2.7× less RAM |
+| SipLLM streaming (`--ram-budget 0`) | **122 MB** | 11.7 tok/s | **10.8× less RAM**, I/O-bound |
+| SipLLM streaming `--spec 5`, copy-heavy output | 133 MB | 30.7 tok/s | 10× less RAM, 3.2× plain |
+
+`--fast` now covers Q4_K and Q6_K (int8 activations × SDOT on ARM NEON; AVX2 on x86-64, **cross-compiled only, not yet run on x86**). Greedy first token matched the exact path on 6/6 prompts, full 48-token continuations on 5/6.
+
+> [!WARNING] Competitor anchor is published, not measured here
+> LiteRT-LM / MediaPipe publish Gemma3-1B dynamic-int4 on a Samsung S24 Ultra CPU (XNNPACK, 4 threads) at 50–55 tok/s decode in 982–1009 MB (model file 529–657 MB). Different model, different hardware — quoted only to size the target. They hold 1.5–1.9× the model in RAM; SipLLM streaming holds 0.18×. No same-hardware head-to-head exists yet.
+
+## Half the RAM, comparable speed (Q8_0, measured 2026-07-27 at v0.4.0)
 
 TinyLlama-1.1B Q8_0, `--ctx 512`, greedy, 4 threads, warm cache:
 
