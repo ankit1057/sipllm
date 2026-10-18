@@ -15,7 +15,7 @@ The project's single measured source of truth, refreshed at the end of every opt
 | Peak RSS — smollm2-135m Q8_0 | 54 MB (stream) … 162 MB (fully resident) |
 | vs llama.cpp CPU (ggml 0.27.0) | 1323 MB (tinyllama) / 515 MB (smollm2) → **10.8× / 9.5× smaller at min budget** |
 | Resident weights | FLAT ~1.5 MB across toy 4/16/32 layers; real 37.6 MB (smollm2 1-layer) / 106.5 MB (tinyllama 1-layer); pinned dial up to 143 MB (smollm2) / 630 MB (tinyllama) |
-| Decode tok/s — tinyllama Q4_K_M resident | exact fp32 21.0 → **`--fast` int8 59.6** (llama.cpp 88.3 → **67%**) |
+| Decode tok/s — tinyllama Q4_K_M resident | exact fp32 21.0 → **`--fast` int8 59.6** (llama.cpp 88–96 → **62–67%**) |
 | Decode tok/s — tinyllama Q4_K_M streaming (122 MB) | 11.7 (I/O-bound); `--spec 5` on copy-heavy output 30.7 |
 | Decode tok/s — smollm2 Q8_0 | 58.9 stream · 67.6 resident (llama.cpp 366) |
 | TTFT | tinyllama 123 ms stream · 68 ms resident `--fast` (llama.cpp 28 ms) |
@@ -45,8 +45,8 @@ TinyLlama-1.1B **Q4_K_M** (669 MB), `--ctx 512`, greedy, 4 threads, warm cache, 
 
 | Runtime | Peak RSS | Decode | vs llama.cpp |
 |:--------|---------:|-------:|:-------------|
-| llama.cpp (CPU, ggml 0.27.0) | 1323 MB | 88.3 tok/s | baseline |
-| SipLLM `--fast --ram-budget 768M` (22/22 pinned) | **645 MB** | **59.6 tok/s** | 2.05× less RAM, 67% |
+| llama.cpp (CPU, ggml 0.27.0) | 1323 MB | 88–96 tok/s | baseline (two quiet runs) |
+| SipLLM `--fast --ram-budget 768M` (22/22 pinned) | **645 MB** | **59.6 tok/s** | 2.05× less RAM, 62–67% |
 | SipLLM `--ram-budget 768M` (exact fp32) | 645 MB | 21.0 tok/s | 2.05× less RAM, 24% |
 | SipLLM `--fast --ram-budget 512M` (13/22) | 482 MB | 23.8 tok/s | 2.7× less RAM |
 | SipLLM streaming (`--ram-budget 0`) | **122 MB** | 11.7 tok/s | **10.8× less RAM**, I/O-bound |

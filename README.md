@@ -23,7 +23,7 @@ SipLLM *sips* weights off storage — one transformer layer at a time — so pea
 > **What a user on a phone (ARM) or an AMD laptop still cannot do:** see a SipLLM
 > number measured on their hardware. Everything here is Apple M3. The 4-bit integer
 > kernels (`--fast`, Q4_K/Q6_K) are verified on ARM NEON; the AVX2 path for AMD is
-> cross-compiled only and has never been run. On M3, resident 4-bit decode is now 67%
+> cross-compiled only and has never been run. On M3, resident 4-bit decode is now 62–67%
 > of llama.cpp in half the RAM; streaming is I/O-bound at 10.8× less RAM.
 
 **Edge-first, and therefore CPU-first.** This engine targets phones, SBCs, and
@@ -53,8 +53,8 @@ is the OS figure from `/usr/bin/time -l` (authoritative, cross-runtime).
 
 | runtime | peak RSS | decode | vs llama.cpp |
 |:--------|---------:|-------:|:-------------|
-| llama.cpp (CPU, `-ngl 0 -t 4`, ggml 0.27)   | 1323 MB | 88 tok/s | baseline |
-| **SipLLM** `--fast --ram-budget 768M` (22/22 pinned) | **645 MB** | **59.6 tok/s** | **2.05× less RAM**, 67% of the speed |
+| llama.cpp (CPU, `-ngl 0 -t 4`, ggml 0.27)   | 1323 MB | 88–96 tok/s | baseline (two quiet runs) |
+| **SipLLM** `--fast --ram-budget 768M` (22/22 pinned) | **645 MB** | **59.6 tok/s** | **2.05× less RAM**, 62–67% of the speed |
 | **SipLLM** `--ram-budget 768M` (exact fp32 dequant) | 645 MB | 21.0 tok/s | 2.05× less RAM, 24% |
 | **SipLLM** `--fast --ram-budget 512M` (13/22 pinned) | **482 MB** | 23.8 tok/s | 2.7× less RAM |
 | **SipLLM** streaming (`--ram-budget 0`)       | **122 MB** | 11.7 tok/s | **10.8× less RAM**, I/O-bound |
@@ -416,11 +416,11 @@ must keep the golden validation matrix green. Please adhere to the [Code of Cond
 Run LLMs **better than LiteRT / MediaPipe LLM Inference on ARM and AMD CPUs**: an
 order of magnitude less RAM at competitive speed. The RAM half is measured; the speed
 half needs:
-- [x] Integer K-quant kernels (Q4_K, Q6_K × int8 activations): resident 4-bit decode 24% → 67% of llama.cpp on M3.
+- [x] Integer K-quant kernels (Q4_K, Q6_K × int8 activations): resident 4-bit decode 24% → 62–67% of llama.cpp on M3.
 - [ ] Run and verify the AVX2 path on a real AMD/Intel host (`make test`, then the bench).
 - [ ] On-device numbers from a real phone (Snapdragon / Dimensity) — none exist yet.
 - [ ] Same-hardware head-to-head against LiteRT-LM (published anchor, S24 Ultra CPU, not ours: Gemma3-1B int4 at 50–55 tok/s in ~1 GB).
-- [ ] Remaining M3 gap (67% → parity): fp32 attention/KV path, prefill (73 vs 266 tok/s).
+- [ ] Remaining M3 gap (62–67% → parity): fp32 attention/KV path, prefill (73 vs 266 tok/s).
 
 ### Future Horizons
 - [ ] First-class mobile bindings (Flutter / Android JNI / iOS Swift framework).

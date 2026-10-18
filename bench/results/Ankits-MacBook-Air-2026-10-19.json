@@ -1,0 +1,1506 @@
+{
+  "meta": {
+    "host": "Ankits-MacBook-Air",
+    "date": "2026-10-19",
+    "os": "macOS 27.0.1",
+    "cpu": "Apple M3",
+    "cores": "8",
+    "threads": 4,
+    "gen_tokens": 16,
+    "prompt": "Once upon a time",
+    "median_of_n": 5,
+    "cache_state": "warm",
+    "cache_note": "warm page cache (models read at least once before timing)",
+    "power_note": "N/A (sudo unavailable \u2014 'sudo powermetrics' requires privileges; never fabricated)",
+    "llama_cpp_note": "llama.cpp @ /private/tmp/claude-501/-Users-mobile-Desktop-Dev-sipllm/079f954d-7c29-41f5-954d-5794df08f1f9/scratchpad/llamacpp/src/build/bin (version: 0.7.0-dev (build 1, commit ff5a233)); CPU-only (-ngl 0) for a like-for-like comparison vs SipLLM (CPU streaming, no GPU).",
+    "git_commit": "e4a5b24",
+    "load_1m_at_start": 2.83,
+    "load_state": "quiet",
+    "top_foreign_process_at_start": "21.0% /usr/libexec/textunderstandingd",
+    "models_dir": "/Users/mobile/.sipllm/models",
+    "peak_rss_source": "/usr/bin/time -l 'maximum resident set size' (bytes) \u2014 authoritative, cross-runtime",
+    "reproduce": "./scripts/bench.sh   (knobs: N NGEN PROMPT THREADS LLAMA_BIN PURGE; see script header)"
+  },
+  "sipllm": [
+    {
+      "section": "real",
+      "runtime": "sipllm",
+      "model": "smollm2-135m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/smollm2-135m.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 59.64,
+      "_samples": {
+        "decode_tok_s": [
+          62.52,
+          58.73,
+          59.65,
+          59.55,
+          59.64
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          2.9,
+          2.9,
+          2.9,
+          2.9,
+          2.9
+        ],
+        "peak_rss_mb": [
+          55.3,
+          54.1,
+          54.1,
+          54.2,
+          54.2
+        ],
+        "prefetch_hits": [
+          480,
+          509,
+          509,
+          509,
+          509
+        ],
+        "prefetch_misses": [
+          30,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          62.71,
+          210.46,
+          210.67,
+          213.2,
+          214.06
+        ],
+        "prompt_tokens": [
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "streamed_mb": [
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8
+        ],
+        "streamed_mb_per_token": [
+          91.6,
+          91.6,
+          91.6,
+          91.6,
+          91.6
+        ],
+        "ttft_ms": [
+          80.0,
+          24.0,
+          24.0,
+          23.0,
+          23.0
+        ],
+        "weights_resident_mb": [
+          37.6,
+          37.6,
+          37.6,
+          37.6,
+          37.6
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 2.9,
+      "load_ms": null,
+      "peak_rss_mb": 54.2,
+      "prefetch_hits": 509,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 210.67,
+      "prompt_tokens": 5,
+      "streamed_mb": 1923.8,
+      "streamed_mb_per_token": 91.6,
+      "ttft_ms": 24.0,
+      "weights_resident_mb": 37.6,
+      "disk_mb": 144.8
+    },
+    {
+      "section": "real",
+      "runtime": "sipllm",
+      "model": "tinyllama-q4_k_m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/tinyllama-q4_k_m.gguf",
+      "quant": "Q4_K_M",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 10.89,
+      "_samples": {
+        "decode_tok_s": [
+          10.94,
+          10.67,
+          10.89,
+          11.36,
+          10.7
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          2.9,
+          2.9,
+          2.9,
+          2.9,
+          2.9
+        ],
+        "peak_rss_mb": [
+          122.5,
+          122.5,
+          122.5,
+          122.7,
+          122.5
+        ],
+        "prefetch_hits": [
+          29,
+          37,
+          35,
+          37,
+          36
+        ],
+        "prefetch_misses": [
+          345,
+          337,
+          339,
+          337,
+          338
+        ],
+        "prefill_tok_s": [
+          32.03,
+          40.63,
+          38.07,
+          39.19,
+          40.91
+        ],
+        "prompt_tokens": [
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "streamed_mb": [
+          9827.5,
+          9827.5,
+          9827.5,
+          9827.5,
+          9827.5
+        ],
+        "streamed_mb_per_token": [
+          468.0,
+          468.0,
+          468.0,
+          468.0,
+          468.0
+        ],
+        "ttft_ms": [
+          156.0,
+          123.0,
+          131.0,
+          128.0,
+          122.0
+        ],
+        "weights_resident_mb": [
+          106.5,
+          106.5,
+          106.5,
+          106.5,
+          106.5
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 2.9,
+      "load_ms": null,
+      "peak_rss_mb": 122.5,
+      "prefetch_hits": 36,
+      "prefetch_misses": 338,
+      "prefill_tok_s": 39.19,
+      "prompt_tokens": 5,
+      "streamed_mb": 9827.5,
+      "streamed_mb_per_token": 468.0,
+      "ttft_ms": 128.0,
+      "weights_resident_mb": 106.5,
+      "disk_mb": 668.8
+    }
+  ],
+  "toy_scaling": [
+    {
+      "section": "toy",
+      "runtime": "sipllm",
+      "model": "toy_4L_c64.gguf",
+      "model_path": "/var/folders/dq/2q2dsq056m53jyscdgt50g1h0000gn/T//sipllm_bench.IGVpyu/toy/toy_4L_c64.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 4,
+      "ctx": 64,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 2057.22,
+      "_samples": {
+        "decode_tok_s": [
+          1619.6,
+          2083.48,
+          2162.16,
+          2057.22,
+          1858.41
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.5
+        ],
+        "peak_rss_mb": [
+          4.7,
+          4.7,
+          4.7,
+          4.7,
+          4.7
+        ],
+        "prefetch_hits": [
+          67,
+          67,
+          67,
+          67,
+          67
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          1277.0,
+          1666.55,
+          1713.43,
+          1758.63,
+          1668.29
+        ],
+        "prompt_tokens": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "streamed_mb": [
+          48.2,
+          48.2,
+          48.2,
+          48.2,
+          48.2
+        ],
+        "streamed_mb_per_token": [
+          2.8,
+          2.8,
+          2.8,
+          2.8,
+          2.8
+        ],
+        "ttft_ms": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "weights_resident_mb": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 0.5,
+      "load_ms": null,
+      "peak_rss_mb": 4.7,
+      "prefetch_hits": 67,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 1668.29,
+      "prompt_tokens": 1,
+      "streamed_mb": 48.2,
+      "streamed_mb_per_token": 2.8,
+      "ttft_ms": 1.0,
+      "weights_resident_mb": 1.5,
+      "disk_mb": 3.1
+    },
+    {
+      "section": "toy",
+      "runtime": "sipllm",
+      "model": "toy_16L_c64.gguf",
+      "model_path": "/var/folders/dq/2q2dsq056m53jyscdgt50g1h0000gn/T//sipllm_bench.IGVpyu/toy/toy_16L_c64.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 16,
+      "ctx": 64,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 472.63,
+      "_samples": {
+        "decode_tok_s": [
+          438.43,
+          472.63,
+          475.97,
+          485.84,
+          469.39
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          2.1,
+          2.1,
+          2.1,
+          2.1,
+          2.1
+        ],
+        "peak_rss_mb": [
+          6.3,
+          6.3,
+          6.3,
+          6.4,
+          6.3
+        ],
+        "prefetch_hits": [
+          271,
+          271,
+          271,
+          271,
+          271
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          400.08,
+          535.7,
+          533.84,
+          538.93,
+          537.73
+        ],
+        "prompt_tokens": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "streamed_mb": [
+          190.7,
+          190.7,
+          190.7,
+          190.7,
+          190.7
+        ],
+        "streamed_mb_per_token": [
+          11.2,
+          11.2,
+          11.2,
+          11.2,
+          11.2
+        ],
+        "ttft_ms": [
+          2.0,
+          2.0,
+          2.0,
+          2.0,
+          2.0
+        ],
+        "weights_resident_mb": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 2.1,
+      "load_ms": null,
+      "peak_rss_mb": 6.3,
+      "prefetch_hits": 271,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 535.7,
+      "prompt_tokens": 1,
+      "streamed_mb": 190.7,
+      "streamed_mb_per_token": 11.2,
+      "ttft_ms": 2.0,
+      "weights_resident_mb": 1.5,
+      "disk_mb": 11.5
+    },
+    {
+      "section": "toy",
+      "runtime": "sipllm",
+      "model": "toy_32L_c64.gguf",
+      "model_path": "/var/folders/dq/2q2dsq056m53jyscdgt50g1h0000gn/T//sipllm_bench.IGVpyu/toy/toy_32L_c64.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 32,
+      "ctx": 64,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 237.53,
+      "_samples": {
+        "decode_tok_s": [
+          231.46,
+          240.36,
+          237.53,
+          232.83,
+          240.47
+        ],
+        "gen_tokens": [
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "kv_mb": [
+          4.2,
+          4.2,
+          4.2,
+          4.2,
+          4.2
+        ],
+        "peak_rss_mb": [
+          8.5,
+          8.4,
+          8.5,
+          8.5,
+          8.5
+        ],
+        "prefetch_hits": [
+          159,
+          159,
+          159,
+          159,
+          159
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          201.99,
+          272.49,
+          279.38,
+          268.02,
+          272.97
+        ],
+        "prompt_tokens": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "streamed_mb": [
+          112.4,
+          112.4,
+          112.4,
+          112.4,
+          112.4
+        ],
+        "streamed_mb_per_token": [
+          22.5,
+          22.5,
+          22.5,
+          22.5,
+          22.5
+        ],
+        "ttft_ms": [
+          5.0,
+          4.0,
+          4.0,
+          4.0,
+          4.0
+        ],
+        "weights_resident_mb": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5
+        ]
+      },
+      "gen_tokens": 4,
+      "kv_mb": 4.2,
+      "load_ms": null,
+      "peak_rss_mb": 8.5,
+      "prefetch_hits": 159,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 272.49,
+      "prompt_tokens": 1,
+      "streamed_mb": 112.4,
+      "streamed_mb_per_token": 22.5,
+      "ttft_ms": 4.0,
+      "weights_resident_mb": 1.5,
+      "disk_mb": 22.7
+    },
+    {
+      "section": "toy",
+      "runtime": "sipllm",
+      "model": "toy_4L_c512.gguf",
+      "model_path": "/var/folders/dq/2q2dsq056m53jyscdgt50g1h0000gn/T//sipllm_bench.IGVpyu/toy/toy_4L_c512.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 4,
+      "ctx": 512,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 1758.95,
+      "_samples": {
+        "decode_tok_s": [
+          1462.52,
+          1754.41,
+          1758.95,
+          1875.88,
+          1789.03
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.5
+        ],
+        "peak_rss_mb": [
+          4.7,
+          4.7,
+          4.7,
+          4.7,
+          4.7
+        ],
+        "prefetch_hits": [
+          67,
+          67,
+          67,
+          67,
+          67
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          1281.02,
+          1469.96,
+          1341.08,
+          1503.57,
+          1615.62
+        ],
+        "prompt_tokens": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "streamed_mb": [
+          48.2,
+          48.2,
+          48.2,
+          48.2,
+          48.2
+        ],
+        "streamed_mb_per_token": [
+          2.8,
+          2.8,
+          2.8,
+          2.8,
+          2.8
+        ],
+        "ttft_ms": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "weights_resident_mb": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 0.5,
+      "load_ms": null,
+      "peak_rss_mb": 4.7,
+      "prefetch_hits": 67,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 1469.96,
+      "prompt_tokens": 1,
+      "streamed_mb": 48.2,
+      "streamed_mb_per_token": 2.8,
+      "ttft_ms": 1.0,
+      "weights_resident_mb": 1.5,
+      "disk_mb": 3.1
+    },
+    {
+      "section": "toy",
+      "runtime": "sipllm",
+      "model": "toy_16L_c512.gguf",
+      "model_path": "/var/folders/dq/2q2dsq056m53jyscdgt50g1h0000gn/T//sipllm_bench.IGVpyu/toy/toy_16L_c512.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 16,
+      "ctx": 512,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 466.82,
+      "_samples": {
+        "decode_tok_s": [
+          466.82,
+          487.42,
+          490.86,
+          447.83,
+          460.41
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          2.1,
+          2.1,
+          2.1,
+          2.1,
+          2.1
+        ],
+        "peak_rss_mb": [
+          6.3,
+          6.3,
+          6.3,
+          6.3,
+          6.3
+        ],
+        "prefetch_hits": [
+          271,
+          271,
+          271,
+          271,
+          271
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          402.14,
+          510.26,
+          507.6,
+          507.51,
+          469.16
+        ],
+        "prompt_tokens": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "streamed_mb": [
+          190.7,
+          190.7,
+          190.7,
+          190.7,
+          190.7
+        ],
+        "streamed_mb_per_token": [
+          11.2,
+          11.2,
+          11.2,
+          11.2,
+          11.2
+        ],
+        "ttft_ms": [
+          2.0,
+          2.0,
+          2.0,
+          2.0,
+          2.0
+        ],
+        "weights_resident_mb": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 2.1,
+      "load_ms": null,
+      "peak_rss_mb": 6.3,
+      "prefetch_hits": 271,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 507.51,
+      "prompt_tokens": 1,
+      "streamed_mb": 190.7,
+      "streamed_mb_per_token": 11.2,
+      "ttft_ms": 2.0,
+      "weights_resident_mb": 1.5,
+      "disk_mb": 11.5
+    },
+    {
+      "section": "toy",
+      "runtime": "sipllm",
+      "model": "toy_32L_c512.gguf",
+      "model_path": "/var/folders/dq/2q2dsq056m53jyscdgt50g1h0000gn/T//sipllm_bench.IGVpyu/toy/toy_32L_c512.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 32,
+      "ctx": 512,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 224.85,
+      "_samples": {
+        "decode_tok_s": [
+          241.28,
+          250.94,
+          224.85,
+          221.19,
+          220.15
+        ],
+        "gen_tokens": [
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "kv_mb": [
+          4.2,
+          4.2,
+          4.2,
+          4.2,
+          4.2
+        ],
+        "peak_rss_mb": [
+          8.5,
+          8.5,
+          8.5,
+          8.5,
+          8.5
+        ],
+        "prefetch_hits": [
+          159,
+          159,
+          159,
+          159,
+          159
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          209.31,
+          265.69,
+          272.78,
+          234.57,
+          247.74
+        ],
+        "prompt_tokens": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "streamed_mb": [
+          112.4,
+          112.4,
+          112.4,
+          112.4,
+          112.4
+        ],
+        "streamed_mb_per_token": [
+          22.5,
+          22.5,
+          22.5,
+          22.5,
+          22.5
+        ],
+        "ttft_ms": [
+          5.0,
+          4.0,
+          4.0,
+          4.0,
+          4.0
+        ],
+        "weights_resident_mb": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5
+        ]
+      },
+      "gen_tokens": 4,
+      "kv_mb": 4.2,
+      "load_ms": null,
+      "peak_rss_mb": 8.5,
+      "prefetch_hits": 159,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 247.74,
+      "prompt_tokens": 1,
+      "streamed_mb": 112.4,
+      "streamed_mb_per_token": 22.5,
+      "ttft_ms": 4.0,
+      "weights_resident_mb": 1.5,
+      "disk_mb": 22.7
+    }
+  ],
+  "llama_cpp": [
+    {
+      "section": "real",
+      "runtime": "llama_bench",
+      "model": "smollm2-135m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/smollm2-135m.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 1,
+      "decode_tok_s": 398.85,
+      "peak_rss_mb": 324.4,
+      "prefill_prompt_tokens": 5,
+      "prefill_tok_s": 1670.65,
+      "ttft_ms": 2.99,
+      "disk_mb": 144.8
+    },
+    {
+      "section": "real",
+      "runtime": "llama_cli",
+      "model": "smollm2-135m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/smollm2-135m.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 381.9,
+      "_samples": {
+        "decode_tok_s": [
+          389.5,
+          360.0,
+          377.7,
+          381.9,
+          389.9
+        ],
+        "peak_rss_mb": [
+          516.5,
+          515.1,
+          515.2,
+          515.2,
+          515.2
+        ],
+        "prefill_tok_s": [
+          2679.1,
+          2813.6,
+          2930.8,
+          2916.5,
+          3324.2
+        ]
+      },
+      "peak_rss_mb": 515.2,
+      "prefill_tok_s": 2916.5,
+      "disk_mb": 144.8
+    },
+    {
+      "section": "real",
+      "runtime": "llama_bench",
+      "model": "tinyllama-q4_k_m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/tinyllama-q4_k_m.gguf",
+      "quant": "Q4_K_M",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 1,
+      "decode_tok_s": 95.37,
+      "peak_rss_mb": 1318.1,
+      "prefill_prompt_tokens": 5,
+      "prefill_tok_s": 232.03,
+      "ttft_ms": 21.55,
+      "disk_mb": 668.8
+    },
+    {
+      "section": "real",
+      "runtime": "llama_cli",
+      "model": "tinyllama-q4_k_m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/tinyllama-q4_k_m.gguf",
+      "quant": "Q4_K_M",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 95.5,
+      "_samples": {
+        "decode_tok_s": [
+          95.2,
+          95.5,
+          95.5,
+          95.5,
+          93.8
+        ],
+        "peak_rss_mb": [
+          1322.5,
+          1323.6,
+          1323.3,
+          1323.7,
+          1323.7
+        ],
+        "prefill_tok_s": [
+          351.8,
+          278.5,
+          280.6,
+          270.8,
+          295.6
+        ]
+      },
+      "peak_rss_mb": 1323.6,
+      "prefill_tok_s": 280.6,
+      "disk_mb": 668.8
+    }
+  ],
+  "thread_sweep": [
+    {
+      "section": "sweep",
+      "runtime": "sipllm",
+      "model": "smollm2-135m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/smollm2-135m.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 1,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 22.67,
+      "_samples": {
+        "decode_tok_s": [
+          22.35,
+          22.67,
+          22.69,
+          22.68,
+          22.67
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          2.9,
+          2.9,
+          2.9,
+          2.9,
+          2.9
+        ],
+        "peak_rss_mb": [
+          54.0,
+          54.0,
+          54.0,
+          54.0,
+          54.0
+        ],
+        "prefetch_hits": [
+          509,
+          509,
+          509,
+          509,
+          509
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          69.25,
+          76.36,
+          76.3,
+          74.46,
+          75.49
+        ],
+        "prompt_tokens": [
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "streamed_mb": [
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8
+        ],
+        "streamed_mb_per_token": [
+          91.6,
+          91.6,
+          91.6,
+          91.6,
+          91.6
+        ],
+        "ttft_ms": [
+          72.0,
+          65.0,
+          66.0,
+          67.0,
+          66.0
+        ],
+        "weights_resident_mb": [
+          37.6,
+          37.6,
+          37.6,
+          37.6,
+          37.6
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 2.9,
+      "load_ms": null,
+      "peak_rss_mb": 54.0,
+      "prefetch_hits": 509,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 75.49,
+      "prompt_tokens": 5,
+      "streamed_mb": 1923.8,
+      "streamed_mb_per_token": 91.6,
+      "ttft_ms": 66.0,
+      "weights_resident_mb": 37.6,
+      "disk_mb": 144.8
+    },
+    {
+      "section": "sweep",
+      "runtime": "sipllm",
+      "model": "smollm2-135m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/smollm2-135m.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 2,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 40.15,
+      "_samples": {
+        "decode_tok_s": [
+          40.17,
+          40.14,
+          40.15,
+          40.16,
+          40.13
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          2.9,
+          2.9,
+          2.9,
+          2.9,
+          2.9
+        ],
+        "peak_rss_mb": [
+          54.0,
+          54.1,
+          54.1,
+          54.0,
+          54.1
+        ],
+        "prefetch_hits": [
+          509,
+          509,
+          509,
+          509,
+          509
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          133.89,
+          134.37,
+          134.34,
+          134.82,
+          134.02
+        ],
+        "prompt_tokens": [
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "streamed_mb": [
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8
+        ],
+        "streamed_mb_per_token": [
+          91.6,
+          91.6,
+          91.6,
+          91.6,
+          91.6
+        ],
+        "ttft_ms": [
+          37.0,
+          37.0,
+          37.0,
+          37.0,
+          37.0
+        ],
+        "weights_resident_mb": [
+          37.6,
+          37.6,
+          37.6,
+          37.6,
+          37.6
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 2.9,
+      "load_ms": null,
+      "peak_rss_mb": 54.1,
+      "prefetch_hits": 509,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 134.34,
+      "prompt_tokens": 5,
+      "streamed_mb": 1923.8,
+      "streamed_mb_per_token": 91.6,
+      "ttft_ms": 37.0,
+      "weights_resident_mb": 37.6,
+      "disk_mb": 144.8
+    },
+    {
+      "section": "sweep",
+      "runtime": "sipllm",
+      "model": "smollm2-135m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/smollm2-135m.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 4,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 59.7,
+      "_samples": {
+        "decode_tok_s": [
+          59.57,
+          59.95,
+          59.7,
+          59.65,
+          61.03
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          2.9,
+          2.9,
+          2.9,
+          2.9,
+          2.9
+        ],
+        "peak_rss_mb": [
+          54.2,
+          54.2,
+          54.2,
+          54.2,
+          54.1
+        ],
+        "prefetch_hits": [
+          509,
+          509,
+          509,
+          509,
+          509
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          218.76,
+          212.42,
+          204.86,
+          202.79,
+          205.22
+        ],
+        "prompt_tokens": [
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "streamed_mb": [
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8
+        ],
+        "streamed_mb_per_token": [
+          91.6,
+          91.6,
+          91.6,
+          91.6,
+          91.6
+        ],
+        "ttft_ms": [
+          23.0,
+          24.0,
+          24.0,
+          25.0,
+          24.0
+        ],
+        "weights_resident_mb": [
+          37.6,
+          37.6,
+          37.6,
+          37.6,
+          37.6
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 2.9,
+      "load_ms": null,
+      "peak_rss_mb": 54.2,
+      "prefetch_hits": 509,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 205.22,
+      "prompt_tokens": 5,
+      "streamed_mb": 1923.8,
+      "streamed_mb_per_token": 91.6,
+      "ttft_ms": 24.0,
+      "weights_resident_mb": 37.6,
+      "disk_mb": 144.8
+    },
+    {
+      "section": "sweep",
+      "runtime": "sipllm",
+      "model": "smollm2-135m.gguf",
+      "model_path": "/Users/mobile/.sipllm/models/smollm2-135m.gguf",
+      "quant": "Q8_0",
+      "backend": "pread",
+      "layers": 0,
+      "ctx": null,
+      "threads": 8,
+      "gen_tokens_requested": 16,
+      "n_runs": 5,
+      "decode_tok_s": 60.85,
+      "_samples": {
+        "decode_tok_s": [
+          59.94,
+          61.96,
+          60.2,
+          60.85,
+          61.06
+        ],
+        "gen_tokens": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ],
+        "kv_mb": [
+          2.9,
+          2.9,
+          2.9,
+          2.9,
+          2.9
+        ],
+        "peak_rss_mb": [
+          54.5,
+          54.4,
+          54.5,
+          54.4,
+          54.4
+        ],
+        "prefetch_hits": [
+          509,
+          509,
+          509,
+          509,
+          509
+        ],
+        "prefetch_misses": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "prefill_tok_s": [
+          238.89,
+          237.43,
+          228.76,
+          243.88,
+          225.64
+        ],
+        "prompt_tokens": [
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "streamed_mb": [
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8,
+          1923.8
+        ],
+        "streamed_mb_per_token": [
+          91.6,
+          91.6,
+          91.6,
+          91.6,
+          91.6
+        ],
+        "ttft_ms": [
+          21.0,
+          21.0,
+          22.0,
+          21.0,
+          22.0
+        ],
+        "weights_resident_mb": [
+          37.6,
+          37.6,
+          37.6,
+          37.6,
+          37.6
+        ]
+      },
+      "gen_tokens": 16,
+      "kv_mb": 2.9,
+      "load_ms": null,
+      "peak_rss_mb": 54.4,
+      "prefetch_hits": 509,
+      "prefetch_misses": 1,
+      "prefill_tok_s": 237.43,
+      "prompt_tokens": 5,
+      "streamed_mb": 1923.8,
+      "streamed_mb_per_token": 91.6,
+      "ttft_ms": 21.0,
+      "weights_resident_mb": 37.6,
+      "disk_mb": 144.8
+    }
+  ]
+}

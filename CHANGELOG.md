@@ -14,7 +14,7 @@ Peak RSS:              tinyllama Q4_K_M (669 MB file): 122 MB (stream) … 645 M
 Resident Weights:      FLAT 1.5 MB across 4/16/32 toy layers (streaming thesis holds)
                        real: 37.6 MB (smollm2 1-layer) / 106.5 MB (tinyllama 1-layer)
                        pinned dial: up to 143 MB (smollm2) / 630 MB (tinyllama)
-Decode tok/s:          tinyllama Q4_K_M resident: fp32 21.0 → `--fast` int8 **59.6** (llama.cpp 88.3 → 67%)
+Decode tok/s:          tinyllama Q4_K_M resident: fp32 21.0 → `--fast` int8 **59.6** (llama.cpp 88–96 → 62–67%)
                        tinyllama Q4_K_M stream (122 MB): 11.7 (I/O-bound); `--spec 5` on copy-heavy output: 30.7
                        smollm2 Q8_0 stream 58.9 / resident 67.6 (llama.cpp 366)
 TTFT:                  tinyllama 123 ms stream · 68 ms resident `--fast`   vs llama.cpp 28 ms
@@ -27,7 +27,7 @@ Energy / Token:        N/A (needs `sudo powermetrics`; never fabricated)
 Current Largest Bottleneck:  Two measured gaps against the standing goal (beat LiteRT /
                        MediaPipe on ARM + AMD CPUs). (1) No on-device number exists:
                        nothing has run on a phone or an AMD host; the AVX2 K-quant
-                       path is cross-compiled only. (2) Resident 4-bit decode is 67% of
+                       path is cross-compiled only. (2) Resident 4-bit decode is 62–67% of
                        llama.cpp: remaining cost is the fp32 attention/KV path and
                        per-token lm_head (Q6_K, now int8) plus prefill at 73 vs 266.
 Estimated Gain if Fixed:  (1) turns the RAM thesis into a competitor claim or kills
@@ -204,7 +204,7 @@ file a phone runs — unless stated.
 
 | runtime | peak RSS | decode | prefill | TTFT |
 |:--|--:|--:|--:|--:|
-| llama.cpp CPU (`-ngl 0 -t 4`, ggml 0.27.0) | 1323 MB | 88.3 tok/s | 266 tok/s | 28 ms |
+| llama.cpp CPU (`-ngl 0 -t 4`, ggml 0.27.0) | 1323 MB | 88.3 tok/s (95.5 in the final quiet run) | 266 tok/s | 28 ms |
 | SipLLM streaming (`--ram-budget 0`) | 122 MB | 11.7 tok/s | 40.5 tok/s | 123 ms |
 | SipLLM resident (`--ram-budget 768M`, 22/22) | 645 MB | 21.5 tok/s | — | — |
 
@@ -236,7 +236,7 @@ llama.cpp — the 4-bit path dequantized to fp32. That gap is the named hard par
     | 512M | 13/22 | 16.5 tok/s | 23.8 tok/s | 1.45× | 482 MB | 37 → 58 tok/s |
     | 0 (streaming) | 0/22 | 11.7 tok/s | 11.9 tok/s | I/O-bound | 122 MB | 37 → 51 tok/s |
 
-    Resident Q4_K_M now decodes at **67% of llama.cpp (59.6 vs 88.3 tok/s) in 2.05× less
+    Resident Q4_K_M now decodes at **62–67% of llama.cpp (59.6 vs 88.3–95.5 tok/s across two quiet runs) in 2.05× less
     RAM**, up from 24%. TTFT 113 → 68 ms. Peak RSS unchanged (the kernel adds one int8
     copy of the activation, ~2–6 KB). `.claude-artifacts/fast-q4km-2026-10-19.tsv`,
     median of 3, load₁ₘ 3.6–5.0 at each point.
@@ -318,9 +318,19 @@ llama.cpp — the 4-bit path dequantized to fp32. That gap is the named hard par
 
 **Still cannot (one line, per the standing goal):** a phone user has no SipLLM number
 at all yet (no on-device run); an AMD user has an untested AVX2 path; on M3 the
-resident 4-bit decode is 67% of llama.cpp, prefill 27%, TTFT 2.4× longer, and no
+resident 4-bit decode is 62–67% of llama.cpp, prefill 27%, TTFT 2.4× longer, and no
 same-hardware LiteRT-LM head-to-head has been run — so "better than LiteRT /
 MediaPipe" is a RAM claim with evidence and a speed claim without it.
+
+**Android:** the engine and the kernel tests cross-compile for arm64 Android with
+the NDK (`make CXX=.../aarch64-linux-android29-clang++ ARCHFLAGS="-march=armv8.2-a+dotprod+fp16"`;
+the Makefile now drops `-lpthread` for Android targets, where bionic has no
+libpthread). Build-only — **nothing has run on a phone**.
+
+**Final harness run at e4a5b24** (quiet, load 2.83): tinyllama stream 10.9 tok/s /
+122.5 MB / TTFT 128 ms; llama.cpp 95.5 tok/s / 1324 MB (88.3 in the earlier quiet
+run — the 88–96 range above). Toy 32-layer rows now generate 4 tokens (seeded
+sampling hits EOS early); their peak-RSS rows are the point and stay flat.
 
 **Deferred:** same-hardware head-to-head vs LiteRT-LM (its macOS CLI exists; not run);
 Q5_K / Q8_K integer paths; VNNI (Zen4+) fast path; batched lm_head projection in

@@ -118,7 +118,7 @@ CPUs — an order of magnitude less RAM at competitive speed. Measured on TinyLl
 
 | | before (fp32 dequant) | after (`--fast` int8 K-quant) | llama.cpp |
 |:--|--:|--:|--:|
-| resident decode (645 MB) | 21.0 tok/s | **59.6 tok/s** | 88.3 tok/s (1323 MB) |
+| resident decode (645 MB) | 21.0 tok/s | **59.6 tok/s** | 88–96 tok/s (1323 MB) |
 | resident prefill | 44 tok/s | 73 tok/s | 266 tok/s |
 | streaming decode (122 MB) | 11.7 | 11.9 (I/O-bound) | — |
 | streaming, copy-heavy output, `--spec 5` | 9.7 | **30.7** | — |
@@ -134,6 +134,6 @@ now refuse to run on a contended CPU and record the load in their JSON.
 
 Per the refreshed scorecard: (1) **a number on the hardware the goal names** —
 nothing has run on a phone or an AMD host; the AVX2 K-quant path is cross-compiled
-only. (2) the remaining resident gap on M3 (67% → parity): fp32 attention/KV and
+only. (2) the remaining resident gap on M3 (62–67% → parity): fp32 attention/KV and
 prefill (73 vs 266 tok/s). (3) a same-hardware head-to-head against LiteRT-LM's
 CLI. See the [roadmap](roadmap.html).

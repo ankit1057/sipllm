@@ -72,6 +72,14 @@ LLAMA_CLI=""; LLAMA_BENCH=""
 
 # --- working area -----------------------------------------------------------
 
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/sipllm_bench.XXXXXX")"
+TOYDIR="$WORK/toy"
+mkdir -p "$TOYDIR" "$OUTDIR"
+MANIFEST="$WORK/manifest.tsv"
+: > "$MANIFEST"
+trap 'rm -rf "$WORK"' EXIT
+
+log() { printf '\033[36m[bench]\033[0m %s\n' "$*" >&2; }
 # ---- load guard (scientific validity) ---------------------------------------
 # A benchmark taken while another process owns the CPU is not a measurement.
 # Record the 1-minute load average and the hungriest foreign process in the
@@ -91,14 +99,7 @@ if awk -v l="$LOAD_1M" -v t="${THREADS:-4}" 'BEGIN{exit !(l > t)}'; then
     fi
 fi
 log "load guard: load1m=${LOAD_1M} threads=${THREADS:-4} state=${LOAD_STATE} top=${TOP_PROC}"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/sipllm_bench.XXXXXX")"
-TOYDIR="$WORK/toy"
-mkdir -p "$TOYDIR" "$OUTDIR"
-MANIFEST="$WORK/manifest.tsv"
-: > "$MANIFEST"
-trap 'rm -rf "$WORK"' EXIT
 
-log() { printf '\033[36m[bench]\033[0m %s\n' "$*" >&2; }
 
 # --- build ------------------------------------------------------------------
 if [ "$SKIP_BUILD" != "1" ]; then
