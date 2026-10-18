@@ -34,6 +34,7 @@ This is a live message board, not documentation. Keep it accurate as you go.
 
 ## Active claims  (newest first — append your row)
 
+| `edge-v1-truth` | Claude (Munmun) | `tests/test_spec_decoder.cpp`, `src/runtime.cpp` (spec-decode loop only), `include/llm/runtime.h`, `main.cpp` (`--spec` flag), `README.md`, `CHANGELOG.md`, `install.sh` (VERSION), `bench/results/*q4_k_m*`, `AGENTS.md` | IN PROGRESS: green tree (fix red `test_spec_decoder`), wire speculative decoding to CLI (default OFF, byte-identical), measure TinyLlama Q4_K_M at edge RAM budgets, make README/scorecard claims match measurements, prepare gap-closure → main merge. NOT touching: K-quant int-dot kernel, Vulkan, vision/semantic-cache/scheduler internals, Flutter bindings. |
 | `gap-closure` | Gemini | `include/llm/{semantic_cache,mem_manager,scheduler,vision}.h`, `src/{semantic_cache,mem_manager,scheduler,vision_encoder,multimodal_projector}.cpp`, `tests/{test_semantic_cache,test_mem_manager,test_scheduler,test_vision}.cpp`, `server/server.cpp`, `scripts/bench_matrix.sh` | ✅ DONE: Implementing SemanticCache, MemoryManager, Scheduler, VisionEncoder/MultimodalProjector, test suites, server integration |
 | `prod-stabilization` | Gemini (3 subagents) | `main.cpp`, `sipllm`, `include/llm/tools.h`, `src/tools.cpp`, `tools/nishachar.cpp`, `tools/remote_client.cpp`, `server/server.cpp`, `README.md`, `install.sh`, `AGENTS.md` | ✅ DONE: (1) Ollama-like interactive REPL & multi-turn chat in CLI, (2) Real production tools for Nishachar (fs/shell/grep) & server agent mode, (3) Complete documentation & v1.0 stabilization |
 | `issue-audit` | Gemini | GitHub Issues (#7, #50-#60) verification and closure | ✅ DONE: Audited repo state against open GitHub issues. Verified all deliverables across architectures (#7) and Phases 1-10 (#50-#60). Closed all 12 open issues with full resolution comments. Closed duplicate PR #65. |
@@ -74,6 +75,14 @@ privacy-first · **Sip IR** as the stable internal representation · **Kosh** =
 token/context optimization layer (not a bot) · **RTK** = token pipeline ·
 plugins only for *importing* external ecosystems (HF/PyTorch/ONNX/GGUF), never
 in the core runtime.
+
+**Standing goal (maintainer, 2026-10-19 — a target, not a measurement):** SipLLM is
+complete when it is a scientific utility — measured, reproducible, honest — that
+runs LLMs better than LiteRT and MediaPipe LLM Inference on ARM and AMD/x86-64
+CPUs. "Better" = markedly lower peak RAM for the same model at competitive
+decode/prefill, CPU-only. Thesis: storage is the cheap resource, RAM/VRAM are the
+expensive ones, so spend storage bandwidth to save RAM. Every wave states in one
+line what a phone (ARM) or AMD-laptop user still cannot do versus those two.
 
 **Newly locked in scope (2026-08-07):**
 - **Tool calling**: `ToolRegistry` + `ToolParser` (zero-dep JSON state machine) in `rtk.h`.
