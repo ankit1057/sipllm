@@ -20,6 +20,8 @@ inline void linear(float* y, const WeightRef& W, const float* x,
         matmul_q8_0_i8(y, W.data, x, W.n_out, W.n_in, pool);   // int8 SDOT (opt-in --fast)
     else if (W.dtype == DType::Q4_K && fast_quant_enabled() && (W.n_in % 256 == 0))
         matmul_q4_K_i8(y, W.data, x, W.n_out, W.n_in, pool);   // int8 SDOT on 4-bit (opt-in --fast)
+    else if (W.dtype == DType::Q6_K && fast_quant_enabled() && (W.n_in % 256 == 0))
+        matmul_q6_K_i8(y, W.data, x, W.n_out, W.n_in, pool);   // int8 SDOT on 6-bit (opt-in --fast)
     else
         matmul_quant(y, W.data, W.dtype, x, W.n_out, W.n_in, pool);
 }
@@ -39,6 +41,10 @@ inline void linear_batch(float* Y, const WeightRef& W, const float* X, int64_t b
     } else if (W.dtype == DType::Q4_K && fast_quant_enabled() && (W.n_in % 256 == 0)) {
         for (int64_t b = 0; b < bs; ++b) {
             matmul_q4_K_i8(Y + b * W.n_out, W.data, X + b * W.n_in, W.n_out, W.n_in, pool);
+        }
+    } else if (W.dtype == DType::Q6_K && fast_quant_enabled() && (W.n_in % 256 == 0)) {
+        for (int64_t b = 0; b < bs; ++b) {
+            matmul_q6_K_i8(Y + b * W.n_out, W.data, X + b * W.n_in, W.n_out, W.n_in, pool);
         }
     } else {
         matmul_quant_batch(Y, W.data, W.dtype, X, bs, W.n_out, W.n_in, pool);

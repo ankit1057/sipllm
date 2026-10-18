@@ -127,6 +127,52 @@ TEST(q4_K_sdot_matmul_threaded_matches_single) {
     for (int o = 0; o < n_out; ++o) APPROX(yN[o], y1[o], 0);   // row-parallel: bit-identical
 }
 
+// A well-formed random Q6_K row: ql/qh random bits, sc random int8 (6-bit
+// range keeps |w| <= 1 with the chosen d), d fp16. Reference is the exact
+// fp32 dequant of the same bytes.
+static void random_q6_K_row(std::mt19937& rng, uint8_t* row, int64_t n_in) {
+    std::uniform_int_distribution<int> byte(0, 255), scl(-64, 63);
+    for (int64_t k = 0; k < n_in / 256; ++k) {
+        uint8_t* p = row + k * 210;
+        for (int i = 0; i < 192; ++i) p[i] = (uint8_t)byte(rng);      // ql[128] + qh[64]
+        for (int i = 0; i < 16; ++i)  p[192 + i] = (uint8_t)(int8_t)scl(rng);
+        uint16_t dh = fp32_to_fp16(1.0f / (64.f * 32.f));              // |sc*(q-32)| <= 64*32
+        std::memcpy(p + 208, &dh, 2);
+    }
+}
+
+TEST(q6_K_sdot_matmul_approximates_fp32) {
+    std::mt19937 rng(13);
+    std::uniform_real_distribution<float> d(-1.f, 1.f);
+    const int n_out = 48, n_in = 512;
+    const int64_t rb = type_nbytes(DType::Q6_K, n_in);
+    CHECK(rb == 2 * 210);
+    std::vector<uint8_t> Wq((size_t)n_out * rb);
+    for (int o = 0; o < n_out; ++o) random_q6_K_row(rng, Wq.data() + o * rb, n_in);
+    std::vector<float> x(n_in), y_ref(n_out), y_i8(n_out);
+    for (auto& v : x) v = d(rng);
+    matmul_quant(y_ref.data(), Wq.data(), DType::Q6_K, x.data(), n_out, n_in);   // exact
+    matmul_q6_K_i8(y_i8.data(), Wq.data(), x.data(), n_out, n_in);
+    double xnorm = 0; for (float v : x) xnorm += v * v; xnorm = std::sqrt(xnorm);
+    for (int o = 0; o < n_out; ++o)
+        APPROX(y_i8[o], y_ref[o], 0.05 * xnorm + 0.05);
+}
+
+TEST(q6_K_sdot_matmul_threaded_matches_single) {
+    std::mt19937 rng(17);
+    std::uniform_real_distribution<float> d(-1.f, 1.f);
+    const int n_out = 96, n_in = 256;
+    const int64_t rb = type_nbytes(DType::Q6_K, n_in);
+    std::vector<uint8_t> Wq((size_t)n_out * rb);
+    for (int o = 0; o < n_out; ++o) random_q6_K_row(rng, Wq.data() + o * rb, n_in);
+    std::vector<float> x(n_in), y1(n_out), yN(n_out);
+    for (auto& v : x) v = d(rng);
+    matmul_q6_K_i8(y1.data(), Wq.data(), x.data(), n_out, n_in, nullptr);
+    ThreadPool pool(4);
+    matmul_q6_K_i8(yN.data(), Wq.data(), x.data(), n_out, n_in, &pool);
+    for (int o = 0; o < n_out; ++o) APPROX(yN[o], y1[o], 0);
+}
+
 int main() {
     printf("== test_neon == (dotprod=%d)\n", (int)neon_dotprod_available());
     return llmtest::run_all();
