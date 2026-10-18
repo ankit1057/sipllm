@@ -33,6 +33,19 @@ void dequantize_row(DType t, const void* src, float* dst, int64_t n);
 // whole number of blocks). Each row is dequantized into a small scratch buffer
 // and dotted with x — this keeps only one row's worth of fp32 live at a time,
 // which is why a whole layer can stay quantized in RAM.
+// Q4_K / Q5_K super-block scale+min unpack: 8 six-bit (scale, min) pairs packed
+// into 12 bytes. j in [0,8). Shared by the fp32 dequantizers (quant.cpp) and the
+// integer kernels (neon.cpp); one definition so the two paths cannot drift.
+inline void get_scale_min_k4(int j, const uint8_t* q, uint8_t& d, uint8_t& m) {
+    if (j < 4) {
+        d = q[j] & 63;
+        m = q[j + 4] & 63;
+    } else {
+        d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        m = (q[j + 4] >>  4) | ((q[j - 0] >> 6) << 4);
+    }
+}
+
 void matmul_quant(float* y, const void* W, DType t, const float* x,
                   int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
 

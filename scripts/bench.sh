@@ -71,6 +71,26 @@ LLAMA_CLI=""; LLAMA_BENCH=""
 [ -n "$LLAMA_BIN" ] && [ -x "$LLAMA_BIN/llama-bench" ] && LLAMA_BENCH="$LLAMA_BIN/llama-bench"
 
 # --- working area -----------------------------------------------------------
+
+# ---- load guard (scientific validity) ---------------------------------------
+# A benchmark taken while another process owns the CPU is not a measurement.
+# Record the 1-minute load average and the hungriest foreign process in the
+# JSON meta, and refuse to run when load exceeds the thread count unless the
+# caller sets LOAD_OVERRIDE=1 (then the run is tagged "contended").
+LOAD_1M="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+TOP_PROC="$(ps -eo pcpu,comm 2>/dev/null | sort -rn | awk 'NR==2{printf "%s%% %s", $1, $2}')"
+LOAD_STATE="quiet"
+if awk -v l="$LOAD_1M" -v t="${THREADS:-4}" 'BEGIN{exit !(l > t)}'; then
+    if [ "${LOAD_OVERRIDE:-0}" = "1" ]; then
+        LOAD_STATE="contended"
+        log "WARNING: load ${LOAD_1M} > threads ${THREADS:-4} (top: ${TOP_PROC}); LOAD_OVERRIDE=1 → results tagged contended"
+    else
+        echo "FATAL: 1-min load average ${LOAD_1M} exceeds thread count ${THREADS:-4} (top: ${TOP_PROC})." >&2
+        echo "       Numbers taken now would be contention, not performance. Wait, or LOAD_OVERRIDE=1." >&2
+        exit 2
+    fi
+fi
+log "load guard: load1m=${LOAD_1M} threads=${THREADS:-4} state=${LOAD_STATE} top=${TOP_PROC}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sipllm_bench.XXXXXX")"
 TOYDIR="$WORK/toy"
 mkdir -p "$TOYDIR" "$OUTDIR"
@@ -216,6 +236,7 @@ HOST="$HOST" DATE="$DATE" OS_STR="$OS_STR" CPU_STR="$CPU_STR" CORES="$CORES" \
 THREADS="$THREADS" NGEN="$NGEN" PROMPT="$PROMPT" NREP="$N" \
 CACHE_STATE="$CACHE_STATE" CACHE_NOTE="$CACHE_NOTE" POWER_NOTE="$POWER_NOTE" \
 LLAMA_NOTE="$LLAMA_NOTE" GIT_COMMIT="$GIT_COMMIT" MODELS_DIR="$MODELS_DIR" \
+LOAD_1M="$LOAD_1M" LOAD_STATE="$LOAD_STATE" TOP_PROC="$TOP_PROC" \
 python3 "$SCRIPT_DIR/_assemble.py"
 
 log "done -> $OUT"
