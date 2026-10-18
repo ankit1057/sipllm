@@ -144,6 +144,10 @@ for idx in "${!REAL_MODELS[@]}"; do
 done
 
 # --- SipLLM: toy scaling (identical geometry, increasing depth) -------------
+# Toy weights are random, so greedy decoding can hit end-of-sequence on the very
+# first step (observed at 32 layers: every run recorded 0 generated tokens and a
+# 0 tok/s decode). Seeded sampling is equally reproducible and keeps generating,
+# so the per-depth decode and peak-RSS rows stay valid.
 # The core "bounded RSS" experiment. Fixed layer geometry (dim/heads/kv/ffn/
 # vocab); ONLY --layers varies, so on-disk size grows linearly with depth. We
 # sweep depth at TWO context lengths to separate two effects:
@@ -159,7 +163,7 @@ for C in 64 512; do
     ./build/make_toy_model "$toy" --gguf --q8 --layers "$L" --ctx "$C" "${TOY_GEOM[@]}" >/dev/null
     log "SipLLM toy: ${L} layers ctx=${C} x$N"
     record "toy" "$toy" "Q8_0" "pread" "$L" "sipllm" "$NGEN" "$THREADS" \
-      ./build/llm "$toy" -p "a b c" -n "$NGEN" --threads "$THREADS" --greedy
+      ./build/llm "$toy" -p "a b c" -n "$NGEN" --threads "$THREADS" --seed 1
   done
 done
 

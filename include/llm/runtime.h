@@ -51,6 +51,12 @@ struct GenStats {
     bool     kosh_active = false;
     int64_t  kosh_tokens_in = 0;
     int64_t  kosh_tokens_out = 0;
+    // Speculative decoding (prompt-lookup, opt-in via --spec N). All zero/false
+    // on the default path.
+    bool     spec_active = false;
+    int64_t  spec_batches = 0;   // verify passes that carried >= 1 draft token
+    int64_t  spec_drafted = 0;   // draft tokens proposed
+    int64_t  spec_accepted = 0;  // draft tokens accepted (= model-free tokens)
     bool     rtk_active = false;
     uint64_t rtk_steps = 0;
     int64_t  rtk_max_seq = 0;
@@ -125,6 +131,7 @@ public:
     
     // Enable Speculative Decoding (Prompt Lookup)
     void enable_speculative_decoding(int max_draft_len = 3);
+    bool speculative_enabled() const { return spec_decoder_ != nullptr; }
 
     bool save_session(const std::string& path) const;
     bool load_session(const std::string& path);

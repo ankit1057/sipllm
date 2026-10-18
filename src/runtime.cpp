@@ -233,8 +233,12 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         committed_.push_back(next);
         ++n;
 
+        // ---- speculative decoding (prompt lookup; opt-in, default OFF) ------
+        // When no draft is available this iteration is byte-identical to the
+        // plain path below: one forward, one sample.
         std::vector<int64_t> draft;
         if (spec_decoder_ && n < max_new && pos_ + max_draft_len_ < kv_->max_ctx()) {
+            st.spec_active = true;
             draft = spec_decoder_->draft(committed_, std::min(max_draft_len_, max_new - n));
         }
 
@@ -245,11 +249,18 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
             if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
             next = sampler.sample(logits, vocab);
         } else {
-            int K = (int)draft.size();
+            // One batched verify pass over [next, draft...] streams every layer
+            // ONCE for K+1 positions. Step i's logits are the model's prediction
+            // after consuming batch[i]; draft[i] is accepted iff the sampler
+            // would have produced it there, so every emitted token is still
+            // sampled from the model's own distribution given its true prefix.
+            const int K = (int)draft.size();
             std::vector<int64_t> batch;
             batch.reserve(K + 1);
             batch.push_back(next);
             batch.insert(batch.end(), draft.begin(), draft.end());
+            ++st.spec_batches;
+            st.spec_drafted += K;
 
             const float* spec_logits = tf_->spec_forward(batch.data(), K + 1, pos_);
             if (rtk) rtk->on_step(kv_view());
@@ -257,33 +268,31 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
 
             for (int i = 0; i <= K; ++i) {
                 const float* step_logits = spec_logits + (size_t)i * vocab;
-                int sampled = sampler.sample(step_logits, vocab);
-                
-                if (i < K) {
-                    if (sampled == draft[i]) {
-                        // Accept draft
-                        piece = tok_.decode_token(draft[i]);
-                        output += piece;
-                        ++st.gen_tokens;
-                        ++pos_;
-                        if (on_token && !on_token(piece, draft[i])) {
-                            next = -1;
-                            break;
-                        }
-                        committed_.push_back(draft[i]);
-                        ++n;
-                    } else {
-                        // Reject draft
-                        ++pos_;
-                        kv_->set_seq_len(pos_);
-                        next = sampled;
-                        break;
-                    }
-                } else {
-                    // All accepted, this is the prediction for the next step
-                    ++pos_;
+                int64_t sampled = sampler.sample(step_logits, vocab);
+                ++pos_;   // batch[i] is now consumed at position pos_-1
+
+                if (i == K) {
+                    // Every draft token verified; `sampled` is the prediction
+                    // for the next step, exactly as the plain path would have.
                     next = sampled;
+                    break;
                 }
+                if (sampled != draft[i]) {
+                    // Reject: KV written for draft[i..] is stale beyond pos_.
+                    kv_->set_seq_len(pos_);
+                    next = sampled;
+                    break;
+                }
+                // Accept draft[i]. Mirror the top-of-loop emission exactly,
+                // including the end-of-generation and context checks.
+                ++st.spec_accepted;
+                if (tok_.is_eog(draft[i]) || n >= max_new) { next = -1; break; }
+                piece = tok_.decode_token(draft[i]);
+                output += piece;
+                ++st.gen_tokens;
+                if (on_token && !on_token(piece, draft[i])) { next = -1; break; }
+                committed_.push_back(draft[i]);
+                ++n;
             }
         }
     }
