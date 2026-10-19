@@ -9,7 +9,7 @@ Rule 1). Peak RSS is the authoritative cross-runtime number from `/usr/bin/time 
 SipLLM North Star   (measured 2026-10-19, wave 16 · Apple M3 + Dimensity 900 phone (2x A78 + 6x A55) · ctx 512 · warm)
 ============================
 Peak RSS:              tinyllama Q4_K_M (669 MB file), fully resident `--fast` (interleaved): M3 667 MB vs llama.cpp
-                       CPU 1317 MB (same session, llama-bench) → 1.97× smaller; phone VmHWM 633–658 MB vs 1251–1280 MB.
+                       CPU 1317 MB (same session, llama-bench) → 1.97× smaller; phone (wave 15, same layout size) VmHWM 633–658 MB vs 1251–1280 MB.
                        Streaming floor (not re-measured this wave): 122 MB M3 / 118 MB phone.
 Resident Weights:      FLAT 1.5 MB across 4/16/32 toy layers; real pinned dial up to 630 MB (tinyllama).
 Decode tok/s:          M3 tinyllama `--fast` + SIPLLM_FAST_LAYOUT=il4: 68.0 (8 thr) vs llama.cpp CPU 92.8 (4 thr) → 73%.
@@ -18,7 +18,8 @@ Decode tok/s:          M3 tinyllama `--fast` + SIPLLM_FAST_LAYOUT=il4: 68.0 (8 t
 TTFT:                  135-token prompt: M3 0.49 s (8 thr) · phone 2.87 s (8 thr; wave 15 in the same rep: 3.69 s)
 Prefill Throughput:    M3: 274.7 tok/s (8 thr) vs llama.cpp CPU 386.8 → 71%  (native `--fast` 99.3; wave 12: 73)
                        PHONE (final build, rep at normal clocks): 47.0 (8 thr) / 42.4 (4) / 39.9 (2) vs llama.cpp 71.4 (8) / 52.5 (2) → 66%
-                       (wave 12 scorecard: 4.4–7.5 tok/s).
+                       (wave 12 scorecard: 4.4–7.5 tok/s, under the old protocol: niced, autotuner re-run per launch.
+                       Part of the gain since then is that measurement fix, not the kernels; wave 16 alone: +28%.)
 Expansion Factor:      5.5× (tinyllama Q4_K_M) · 2.7× (smollm2) = disk / peak-RSS at min budget (not re-measured)
 Largest Runnable Model:MEASURED 2026-07-27 — Llama-2-13B (7.87 GB Q4) in 317 MB peak RSS (25×);
                        Llama-3.1-8B (4.92 GB Q4) in 204 MB (24×). Bounded by layer, not model size.
@@ -27,15 +28,15 @@ Energy / Token:        N/A (needs `sudo powermetrics`; never fabricated)
 Current Largest Bottleneck:  Phone prefill is still 1.5× behind llama.cpp (47 vs 71 tok/s at
                        8 threads) and decode ~0.8×. Profile: >95% of prefill time is the
                        int8 matmuls; the Q4_K IL4 inner loop still spends ~8 float ops per
-                       16 SDOTs on per-32 activation scales. Second, a configuration gap:
-                       the library's default thread schedule (Proportional4, inherited by
-                       the Flutter app) decodes at 11.0 vs 15.0 tok/s with fixed16 on the
-                       phone at 4 threads.
+                       16 SDOTs on per-32 activation scales. Second, and bigger for users
+                       today, a configuration gap: the default thread schedule of the CLI
+                       and the Flutter plugin (Proportional2) decodes at 5.7–5.8 tok/s on the
+                       phone at 4–8 threads, against 13.5–14.3 with fixed16 (3 reps each).
 Estimated Gain if Fixed:  Per-256 activation scales with integer accumulation per super-block
                        (llama.cpp's Q8_K approach): ~20–25% fewer inner-loop instructions →
                        hypothesis +15–25% prefill (accuracy must be re-tested; it changes the
-                       numerics). Default schedule fixed16: measured +36% decode for app users
-                       at 4 threads, <3% cost on M3.
+                       numerics). Default schedule fixed16: measured 2.4× decode and +8–38%
+                       prefill on the phone at 4–8 threads, equal at 2 threads, within 2.5% on M3.
 Why this is the next priority:  TTFT is what a phone user waits on; RAM is already 2× better
                        than llama.cpp at every size, so prefill speed decides whether the RAM
                        win is usable.
@@ -86,7 +87,11 @@ which needs a llama.cpp reference build, was not re-run). Evidence: `bench/resul
 - **Phone end to end** (Dimensity 900, 135-token prompt, same-rep A/B vs wave 15):
   prefill +28% (8 threads), +31% (4), +33% (2); decode within −6…+5%
   (−5% at 2 threads). Known gap: single-token Q6_K IL4 is 13% slower than the
-  native kernel on Cortex-A55 (20% faster on A78).
+  native kernel on Cortex-A55 (20% faster on A78), so it fails the
+  both-core-types gate for ever becoming a default. Greedy output with Q6_K
+  interleaved first differs from native at generated token 10 on the phone
+  (a near-tie: native margin 0.048 logits, interleaved 0.016); the M3 matched
+  native for all 48 tokens.
 - **Fix:** `--no-autotune` applied `SchedulePolicy::Static` (the struct default)
   as if it were tuned; it now keeps the caller's default. Static is the slowest
   policy on big.LITTLE (phone decode 4.5–8.0 vs 11–15 tok/s).
@@ -94,9 +99,15 @@ which needs a llama.cpp reference build, was not re-run). Evidence: `bench/resul
   explicit `--schedule`. Without it, the phone (HOME=/ not writable from adb)
   re-ran the fp32 autotuner on every launch and could pick a different policy
   per run; earlier phone numbers carry that noise.
-- **Not changed (maintainer decision pending):** the library's default schedule
-  is `Proportional4`, which the Flutter app inherits; on the phone at 4 threads
-  it decodes at 11.0 tok/s vs 15.0 with `fixed16` (M3 spread across policies <5%).
+- **Not changed (maintainer decision pending):** the CLI and the Flutter plugin
+  default to `Proportional2` (`ThreadPool` itself defaults to `Proportional4`).
+  On the phone, `Proportional2` decodes at 5.7–5.8 tok/s at 4–8 threads against
+  13.5–14.3 with `fixed16` (3 reps each; equal at 2 threads). M3 spread <2.5%.
+- **Fix (macOS):** `get_hardware_info()` read `hw.pagesize` (8 bytes) into a
+  4-byte int, overwriting 4 bytes of stack on every macOS launch. Found by an
+  ASan run of the CLI on the M3; CI's sanitizers run on Linux and never compile
+  that branch. The IL4 kernels and an interleaved end-to-end run are clean
+  under ASan+UBSan and TSan on the M3.
 
 ## [0.5.0] — Plugin runtime + persistent context (2026-08-13)
 

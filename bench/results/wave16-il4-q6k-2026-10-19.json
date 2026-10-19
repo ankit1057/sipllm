@@ -13,7 +13,8 @@
    "w16:*": "first wave-16 build (per-chunk heap buffers)",
    "w16e:il4": "final wave-16 build, Q4_K + Q6_K interleaved",
    "w16e:il4-q4": "final wave-16 build, Q4_K only (wave-15 layout)"
-  }
+  },
+  "branch_head_note": "kernel commit dc9e177; docs/fixes follow on the same branch"
  },
  "finding_schedule_protocol": {
   "bug": "--no-autotune returned a default RuntimeProfile whose schedule_policy 0 = Static, which main.cpp applied as if tuned. Fixed in this wave (-1 = keep the caller's default).",
@@ -484,7 +485,108 @@
     ]
    }
   ],
-  "note": "Library default (ThreadPool) is Proportional4, the slowest dynamic policy on the phone at 4 threads (decode 11.0 vs 15.0 fixed16). M3 spread across policies <5%. Default NOT changed in this wave (maintainer decision)."
+  "note": "Default NOT changed in this wave (maintainer decision). Phone: Proportional2 (CLI/Flutter default) decodes 5.7-5.8 tok/s at 4-8 threads vs 13.5-14.3 fixed16; equal at 2 threads. M3 spread across policies <2.5%.",
+  "phone_default_policy_sweep": {
+   "note": "CLI (main.cpp) and Flutter plugin (C ABI + Dart defaults) default to Proportional2; ThreadPool's own default is Proportional4. Final wave-16 binary, il4, 3 reps, no throttling (battery 31.6-32.5 C).",
+   "rows": [
+    {
+     "threads": 2,
+     "policy": "fixed16",
+     "decode": [
+      13.74,
+      13.78,
+      13.69
+     ],
+     "prefill": [
+      37.48,
+      36.75,
+      37.1
+     ],
+     "decode_median": 13.74,
+     "prefill_median": 37.1
+    },
+    {
+     "threads": 2,
+     "policy": "proportional2",
+     "decode": [
+      13.8,
+      13.79,
+      13.88
+     ],
+     "prefill": [
+      36.46,
+      37.31,
+      37.1
+     ],
+     "decode_median": 13.8,
+     "prefill_median": 37.1
+    },
+    {
+     "threads": 4,
+     "policy": "fixed16",
+     "decode": [
+      14.04,
+      13.36,
+      13.51
+     ],
+     "prefill": [
+      42.01,
+      42.46,
+      40.96
+     ],
+     "decode_median": 13.51,
+     "prefill_median": 42.01
+    },
+    {
+     "threads": 4,
+     "policy": "proportional2",
+     "decode": [
+      9.76,
+      5.71,
+      5.67
+     ],
+     "prefill": [
+      40.07,
+      37.22,
+      38.96
+     ],
+     "decode_median": 5.71,
+     "prefill_median": 38.96
+    },
+    {
+     "threads": 8,
+     "policy": "fixed16",
+     "decode": [
+      14.27,
+      14.14,
+      14.25
+     ],
+     "prefill": [
+      47.16,
+      49.45,
+      45.17
+     ],
+     "decode_median": 14.25,
+     "prefill_median": 47.16
+    },
+    {
+     "threads": 8,
+     "policy": "proportional2",
+     "decode": [
+      5.77,
+      5.87,
+      5.81
+     ],
+     "prefill": [
+      35.18,
+      33.23,
+      34.27
+     ],
+     "decode_median": 5.81,
+     "prefill_median": 34.27
+    }
+   ]
+  }
  },
  "phone_e2e_first_build": [
   {
@@ -1280,12 +1382,13 @@
   "opbench_ns_per_op": "A78: sdot-vec 0.162 sdot-lane 0.111 sli 0.108 orr 0.104; A55: sdot-vec 0.258 sdot-lane 0.255 sli 0.190 orr 0.127"
  },
  "correctness": {
-  "q4k_il4_rewrite": "byte-identical (cmp) to the wave-15 kernel on real tensors, bs 1..33, pool and no pool: M3 and phone",
-  "q6k_il4_vs_row_major_real_tensors": "max rel diff 0.9e-6 .. 3.5e-6 (blk.1.ffn_down, blk.1.attn_v, output.weight; bs 1/7/32)",
+  "q4k_il4_rewrite": "byte-identical (cmp) to the wave-15 kernel on real tensors, bs 1..33, pool and no pool: M3 and phone, re-checked on the phone with the final kernel",
+  "q6k_il4_vs_row_major_real_tensors": "max rel diff 0.9e-6 .. 3.5e-6 (blk.1.ffn_down, blk.1.attn_v, output.weight; bs 1/7/32) on M3 and, with the final kernel, on the phone (same figures)",
   "q6k_il4_kernel_variants": "each later variant byte-identical to the first Q6_K IL4 kernel (integer-exact changes)",
   "fp16_vector_convert": "0 mismatches over all 65536 inputs vs scalar fcvt (M3 and phone)",
   "test_neon": "13/13 on M3 and phone (new: q6_K_il4_matches_row_major_int8)",
-  "greedy_output": "il4 (Q4_K+Q6_K) output differs from native after ~40 tokens (near-tie flip; float summation order); il4-q4 identical to native"
+  "greedy_output": "phone: il4 (Q4_K+Q6_K) greedy output first differs from native at generated token 10 (' the' vs ' loading'; native top1-top2 margin 0.048 logits, il4 0.016: near-tie). M3: identical to native for all 48 tokens. Native output hash is identical on M3 and phone; il4-q4 identical to native on both.",
+  "sanitizers_m3": "HARDEN off: ASan+UBSan test_neon 13/13, il4/il6 dump tools clean with identical output, end-to-end il4 (Q4_K+Q6_K) 8-thread generation clean after fixing a pre-existing macOS stack overflow in get_hardware_info (hw.pagesize into a 4-byte int); TSan test_neon + end-to-end clean"
  },
  "accuracy_sign_test": {
   "docs": 10,
