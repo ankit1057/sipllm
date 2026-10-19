@@ -5,6 +5,7 @@
 //       [--ctx N] [--threads N] [--seed S] [--greedy]
 //
 // Streams tokens to stdout as they are produced and prints a stats block.
+#include "llm/lan.h"
 #include "llm/runtime.h"
 #include "llm/device_profile.h"
 #include "llm/auto_tuner.h"
@@ -40,8 +41,10 @@ static void print_usage(const char* prog) {
         "          [--ram-budget BYTES|N{K,M,G}] [--fast] [--spec N]\n"
         "          [--kosh] [--kosh-max-run N] [--rtk] [--reuse]\n"
         "          [--save-session F] [--load-session F]\n"
+        "          [--nodes host:port:A-B,...]          (LAN: coordinator owns layers [0,A))\n"
+        "       %s <model> --worker --layers A:B --listen IP:PORT   (LAN worker; token in SIPLLM_LAN_TOKEN)\n"
         "          [--chat | -i]\n",
-        prog);
+        prog, prog);
 }
 
 static std::string trim(const std::string& s) {
@@ -99,6 +102,9 @@ int main(int argc, char** argv) {
     int  kosh_max_run = 8;
     bool use_reuse = false;
     int  spec_draft = 0;   // --spec N: prompt-lookup speculative decoding, N draft tokens (0 = off)
+    // Issue #70 (LAN pooling)
+    bool worker_mode = false;
+    std::string worker_layers, worker_listen, nodes_arg;
     std::string save_path, load_path;
 
     for (int i = 2; i < argc; ++i) {
@@ -157,6 +163,10 @@ int main(int argc, char** argv) {
         else if (a == "--rtk") use_rtk = true;
         else if (a == "--reuse") use_reuse = true;
         else if (a == "--spec") spec_draft = std::stoi(next("3"));
+        else if (a == "--worker") worker_mode = true;
+        else if (a == "--layers") worker_layers = next("");
+        else if (a == "--listen") worker_listen = next("");
+        else if (a == "--nodes") nodes_arg = next("");
         else if (a == "--save-session") { save_path = next(""); use_reuse = true; }
         else if (a == "--load-session") { load_path = next(""); use_reuse = true; }
         else if (a == "--profile-info") {
@@ -217,8 +227,47 @@ int main(int argc, char** argv) {
         
         auto src = open_model(model, opt.use_mmap);
         KVPrecision kv_precision = kv_q8 ? KVPrecision::Q8_0 : KVPrecision::FP32;
+
+        // ---- Issue #70: LAN worker -------------------------------------------
+        if (worker_mode) {
+            const size_t sep = worker_layers.find_first_of(":-");
+            const size_t colon = worker_listen.rfind(':');
+            if (sep == std::string::npos || colon == std::string::npos) {
+                fprintf(stderr, "--worker needs --layers A:B and --listen IP:PORT\n");
+                return 2;
+            }
+            opt.layer_begin = std::stoi(worker_layers.substr(0, sep));
+            opt.layer_end = std::stoi(worker_layers.substr(sep + 1));
+            lan::WorkerConfig wc;
+            wc.bind_ip = worker_listen.substr(0, colon);
+            wc.port = std::stoi(worker_listen.substr(colon + 1));
+            wc.token = lan::token_from_env();
+            Runtime wrt(std::move(src), opt, ctx, threads, ram_budget, force_budget, kv_precision);
+            if (wrt.thread_pool()) wrt.thread_pool()->set_policy(schedule_policy);
+            lan::serve_worker(wrt, wc);
+            return 0;
+        }
+        std::vector<lan::NodeSpec> nodes;
+        if (!nodes_arg.empty()) {
+            nodes = lan::parse_nodes(nodes_arg);
+            opt.layer_end = nodes.front().begin;   // coordinator owns [0, a)
+        }
+
         Runtime rt(std::move(src), opt, ctx, threads, ram_budget, force_budget, kv_precision);
         if (rt.thread_pool()) rt.thread_pool()->set_policy(schedule_policy);
+
+        std::vector<std::unique_ptr<lan::RemoteExecutor>> remotes;
+        if (!nodes.empty()) {
+            const std::string token = lan::token_from_env();
+            const lan::Fingerprint fp = lan::fingerprint(rt);
+            std::vector<RemoteSegment> segs;
+            for (const lan::NodeSpec& n : nodes) {
+                remotes.push_back(std::make_unique<lan::RemoteExecutor>(n, token, fp));
+                segs.push_back(RemoteSegment{n.begin, n.end, remotes.back().get()});
+            }
+            rt.set_remote_segments(std::move(segs));
+            fprintf(stderr, "coordinator: local layers [0, %d), %zu worker(s)\n", rt.layer_end(), remotes.size());
+        }
         double load_s = now_sec() - t0;
 
         // Optional plugin seam: Kosh (context) + RTK (runtime/KV). Default OFF
@@ -414,6 +463,13 @@ int main(int argc, char** argv) {
             fprintf(stderr, "spec decode:     %lld drafted, %lld accepted (%.1f%%), %lld verify passes\n",
                     (long long)st.spec_drafted, (long long)st.spec_accepted, acc,
                     (long long)st.spec_batches);
+        }
+        for (const auto& r : remotes) {   // Issue #70: what the network cost
+            const int toks = st.prompt_tokens + st.gen_tokens;
+            fprintf(stderr, "lan worker:      %llu calls, %.2f MB sent, %.2f MB received (%.1f KB/token), "
+                            "%.0f ms waiting on worker\n",
+                    (unsigned long long)r->calls(), r->bytes_sent() / 1e6, r->bytes_received() / 1e6,
+                    toks > 0 ? (r->bytes_sent() + r->bytes_received()) / 1024.0 / toks : 0.0, r->wait_ms());
         }
         if (st.kosh_active || st.rtk_active || st.reuse_active) {
             fprintf(stderr, "── plugins ───────────────\n");
