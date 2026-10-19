@@ -54,7 +54,7 @@ if((ANDROID AND ANDROID_ABI STREQUAL "arm64-v8a") OR
 endif()
 if(SIPLLM_AARCH64)
   set_source_files_properties("${SIPLLM_ENGINE_ROOT}/src/neon_sdot.cpp"
-    PROPERTIES COMPILE_OPTIONS "-march=armv8.2-a+dotprod")
+    PROPERTIES COMPILE_OPTIONS "-march=armv8.2-a+dotprod;-ffp-contract=on")
 endif()
 if(ANDROID)
   if(ANDROID_ABI STREQUAL "armeabi-v7a")

@@ -291,3 +291,29 @@ void matmul_q6_K_i8(float* y, const void* W, const float* x,
 }
 
 } // namespace llm
+
+// ---- batched forms (prefill) ---------------------------------------------
+namespace llm {
+
+#define LLM_I8_BATCH(NAME, SINGLE, SDOT_BATCH)                                          \
+void NAME(float* Y, const void* W, const float* X, int64_t bs,                          \
+          int64_t n_out, int64_t n_in, ThreadPool* pool) {                              \
+    LLM_I8_BATCH_ARM(SDOT_BATCH)                                                        \
+    for (int64_t b = 0; b < bs; ++b)                                                    \
+        SINGLE(Y + b * n_out, W, X + b * n_in, n_out, n_in, pool);                      \
+}
+#if defined(__aarch64__)
+#define LLM_I8_BATCH_ARM(SDOT_BATCH)                                                    \
+    if (cpu_has_dotprod()) { detail::SDOT_BATCH(Y, W, X, bs, n_out, n_in, pool); return; }
+#else
+#define LLM_I8_BATCH_ARM(SDOT_BATCH)
+#endif
+
+LLM_I8_BATCH(matmul_q8_0_i8_batch, matmul_q8_0_i8, matmul_q8_0_sdot_batch)
+LLM_I8_BATCH(matmul_q4_K_i8_batch, matmul_q4_K_i8, matmul_q4_K_sdot_batch)
+LLM_I8_BATCH(matmul_q6_K_i8_batch, matmul_q6_K_i8, matmul_q6_K_sdot_batch)
+
+#undef LLM_I8_BATCH_ARM
+#undef LLM_I8_BATCH
+
+} // namespace llm

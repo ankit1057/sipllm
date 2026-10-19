@@ -62,6 +62,14 @@ void matmul_q4_K_sdot(float* y, const void* W, const float* x,
                       int64_t n_out, int64_t n_in, ThreadPool* pool);
 void matmul_q6_K_sdot(float* y, const void* W, const float* x,
                       int64_t n_out, int64_t n_in, ThreadPool* pool);
+// Batched (prefill): Y[bs][n_out] = X[bs][n_in] . W^T, bit-identical per token
+// to the single-vector kernels above.
+void matmul_q8_0_sdot_batch(float* Y, const void* W, const float* X, int64_t bs,
+                            int64_t n_out, int64_t n_in, ThreadPool* pool);
+void matmul_q4_K_sdot_batch(float* Y, const void* W, const float* X, int64_t bs,
+                            int64_t n_out, int64_t n_in, ThreadPool* pool);
+void matmul_q6_K_sdot_batch(float* Y, const void* W, const float* X, int64_t bs,
+                            int64_t n_out, int64_t n_in, ThreadPool* pool);
 } // namespace detail
 
 } // namespace llm
