@@ -333,6 +333,8 @@ void serve_worker(Runtime& rt, const WorkerConfig& wc, const std::atomic<bool>* 
         // so a connected coordinator holds this worker until it disconnects.
         set_recv_timeout(fd, 0);
         const uint32_t max_run = kMaxPayload;
+        double compute_ms = 0;      // time inside run_layers: separates compute from network
+        uint64_t runs = 0;
         while (true) {
             if (!recv_frame(fd, &type, body, max_run, &err)) break;
             if (type == MSG_BYE) break;
@@ -346,15 +348,19 @@ void serve_worker(Runtime& rt, const WorkerConfig& wc, const std::atomic<bool>* 
             if (sp + n > mine.max_ctx) { send_error(fd, "RUN positions exceed the context window"); break; }
             float* resid = reinterpret_cast<float*>(body.data() + kRunHead);   // 24-byte offset: 4-aligned
             try {
+                const auto c0 = std::chrono::steady_clock::now();
                 rt.run_layers(b, e, resid, (int64_t)n, (int64_t)sp);
+                compute_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+                ++runs;
             } catch (const std::exception& ex) {
                 send_error(fd, std::string("worker error: ") + ex.what());
                 break;
             }
             if (!send_frame(fd, MSG_RESULT, resid, n * d * (uint32_t)sizeof(float))) break;
         }
-        fprintf(stderr, "worker: coordinator %s disconnected; peak RSS so far %.0f MB, now %.0f MB\n",
-                pip, peak_rss_mb(), current_rss_bytes() / 1e6);
+        fprintf(stderr, "worker: coordinator %s disconnected; %llu runs, %.0f ms computing; "
+                        "peak RSS so far %.0f MB, now %.0f MB\n",
+                pip, (unsigned long long)runs, compute_ms, peak_rss_mb(), current_rss_bytes() / 1e6);
         ::close(fd);
     }
     ::close(lfd);
