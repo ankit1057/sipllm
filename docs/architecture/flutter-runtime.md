@@ -91,7 +91,7 @@ Because **the engine applies no chat/prompt template** — inference is over raw
 
 ## Build
 
-`src/CMakeLists.txt` globs the engine's `src/*.cpp` plus `sipllm_ffi.cpp` into one shared `libsipllm_ffi` (C++17, `-O3`, hidden visibility, no deps beyond pthreads). The Android Gradle build runs it **once per ABI via the NDK**: `arm64-v8a` compiles with **`-march=armv8.2-a+dotprod`** — universal on the target SoCs (Dimensity 8300, Snapdragon W5) and what lights up the engine's int8 SDOT kernels — while `armeabi-v7a` gets `-mfpu=neon-vfpv4` and keeps the scalar fallback. `-DSIPLLM_VULKAN=ON` compiles the experimental backend, but with no SPIR-V shader it stays device-enumeration-only and matmul remains on CPU.
+`src/CMakeLists.txt` globs the engine's `src/*.cpp` plus `sipllm_ffi.cpp` into one shared `libsipllm_ffi` (C++17, `-O3`, hidden visibility, no deps beyond pthreads). The Android Gradle build runs it **once per ABI via the NDK**: `arm64-v8a` compiles the engine for the **baseline ARMv8.0 ISA**, so the library loads on every arm64 device including Cortex-A53 parts without SDOT (e.g. Snapdragon W5); only `src/neon_sdot.cpp` (the int8 SDOT kernels) is built with `-march=armv8.2-a+dotprod`, and the engine checks the CPU at runtime (`getauxval`) before calling it (Issue #68). `armeabi-v7a` gets `-mfpu=neon-vfpv4` and keeps the scalar fallback. `-DSIPLLM_VULKAN=ON` compiles the experimental backend, but with no SPIR-V shader it stays device-enumeration-only and matmul remains on CPU.
 
 ## Future work
 

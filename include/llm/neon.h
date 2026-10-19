@@ -17,13 +17,20 @@
 
 namespace llm {
 
-// True if built with SDOT (dot-product) support.
+// True if THIS CPU implements SDOT (asimddp). Detected at runtime (getauxval /
+// sysctl), not at compile time, so a baseline-ISA binary still uses the SDOT
+// kernels on cores that have them. SIPLLM_CPU=generic forces false.
 bool neon_dotprod_available();
 
-// Fast-quant kernel toggle. When enabled, linear() routes Q8_0 projections
-// through the int8 SDOT path (matmul_q8_0_i8) instead of exact fp32 dequant.
-// Off by default so the fp32-dequant path stays the correctness oracle; the
-// SDOT path quantizes the activation (numerically equivalent, like llama.cpp).
+// True if an int8 kernel exists for this CPU: SDOT on ARM (runtime), or a
+// binary built with AVX2 on x86.
+bool int8_kernels_available();
+
+// Fast-quant kernel toggle (--fast). fast_quant_enabled() is true only when it
+// was requested AND int8_kernels_available(); otherwise linear()/linear_batch()
+// take the exact fp32-dequant path for the whole batch. Off by default so the
+// exact path stays the correctness oracle; the int8 paths quantize the
+// activation (like llama.cpp).
 void set_fast_quant(bool on);
 bool fast_quant_enabled();
 

@@ -42,13 +42,22 @@ target_compile_options(sipllm_ffi PRIVATE
   -Wno-unused-parameter
 )
 
-# Per-ABI SIMD tuning. dotprod (Armv8.2) is universal on the target SoCs
-# (Dimensity 8300 A715/A510, Snapdragon W5 A53) and lights up the SDOT kernels
-# in the engine's simd.h; everything else keeps the scalar fallback.
+# Per-ABI SIMD (Issue #68). The library is built for the ABI's baseline ISA so
+# it loads on every arm64 device, including ARMv8.0 cores without SDOT
+# (Cortex-A53, e.g. Snapdragon W5). Only src/neon_sdot.cpp (the int8 SDOT
+# kernels) is built with dotprod; the engine asks the CPU at runtime
+# (getauxval) before calling into it.
+set(SIPLLM_AARCH64 OFF)
+if((ANDROID AND ANDROID_ABI STREQUAL "arm64-v8a") OR
+   (NOT ANDROID AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$"))
+  set(SIPLLM_AARCH64 ON)
+endif()
+if(SIPLLM_AARCH64)
+  set_source_files_properties("${SIPLLM_ENGINE_ROOT}/src/neon_sdot.cpp"
+    PROPERTIES COMPILE_OPTIONS "-march=armv8.2-a+dotprod")
+endif()
 if(ANDROID)
-  if(ANDROID_ABI STREQUAL "arm64-v8a")
-    target_compile_options(sipllm_ffi PRIVATE -march=armv8.2-a+dotprod)
-  elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+  if(ANDROID_ABI STREQUAL "armeabi-v7a")
     target_compile_options(sipllm_ffi PRIVATE -mfpu=neon-vfpv4)
   endif()
   find_library(log-lib log)
