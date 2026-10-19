@@ -1,0 +1,1485 @@
+{
+ "meta": {
+  "benchmark": "wave 16: IL4 kernel rewrite (exact) + Q6_K interleaved (opt-in SIPLLM_FAST_LAYOUT=il4) + thread-schedule protocol",
+  "date": "2026-10-19",
+  "branch": "wave16-il4-kernel",
+  "model": "tinyllama-1.1b Q4_K_M (134 Q4_K + 20 Q6_K dense layer matrices)",
+  "prompt": "prompt128 (135 tokens), -n 48 --greedy, ctx 512, --ram-budget 1G (all layers pinned), --fast",
+  "hardware": "OnePlus IV2201 / Dimensity 900 (2x Cortex-A78 2.4 GHz + 6x Cortex-A55 2.0 GHz) and Apple M3",
+  "compiler": "NDK 29 clang (android29, -march=armv8-a; kernels file armv8.2-a+dotprod), Apple clang",
+  "protocol": "Every SipLLM run passes --no-autotune AND an explicit --schedule (see finding below). Configs interleaved per rep, rotated order, 8 s gap, not niced. Medians of 3. llama.cpp = llama-bench (repack build) -p 128 -n 48 in the same rotation.",
+  "variants": {
+   "w15:il4": "wave 15 binary, Q4_K interleaved",
+   "w16:*": "first wave-16 build (per-chunk heap buffers)",
+   "w16e:il4": "final wave-16 build, Q4_K + Q6_K interleaved",
+   "w16e:il4-q4": "final wave-16 build, Q4_K only (wave-15 layout)"
+  }
+ },
+ "finding_schedule_protocol": {
+  "bug": "--no-autotune returned a default RuntimeProfile whose schedule_policy 0 = Static, which main.cpp applied as if tuned. Fixed in this wave (-1 = keep the caller's default).",
+  "phone_autotune": "HOME=/ is not writable from adb shell, so the autotuner re-ran on every launch (15% of CPU samples in a prefill profile) and could pick a different policy each run: earlier phone numbers carry per-run policy noise.",
+  "baseline_sweep_wave15_binary": [
+   {
+    "who": "llama.cpp",
+    "threads": 2,
+    "policy": "-",
+    "reps": 3,
+    "decode_tok_s": [
+     18.41,
+     18.44,
+     17.94
+    ],
+    "prefill_tok_s": [
+     53.34,
+     53.4,
+     53.18
+    ],
+    "decode_median": 18.41,
+    "prefill_median": 53.34,
+    "output_md5": [
+     "-"
+    ],
+    "battery_temp_dC": [
+     "349",
+     "355",
+     "359"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 2,
+    "policy": "fixed16",
+    "reps": 3,
+    "decode_tok_s": [
+     6.59,
+     14.13,
+     14.18
+    ],
+    "prefill_tok_s": [
+     24.09,
+     28.77,
+     28.82
+    ],
+    "decode_median": 14.13,
+    "prefill_median": 28.77,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "340",
+     "356",
+     "360"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 2,
+    "policy": "fixed8",
+    "reps": 3,
+    "decode_tok_s": [
+     14.31,
+     14.02,
+     13.99
+    ],
+    "prefill_tok_s": [
+     29.08,
+     29.02,
+     28.74
+    ],
+    "decode_median": 14.02,
+    "prefill_median": 29.02,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "341",
+     "356",
+     "360"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 2,
+    "policy": "proportional4",
+    "reps": 3,
+    "decode_tok_s": [
+     14.93,
+     14.34,
+     14.98
+    ],
+    "prefill_tok_s": [
+     26.3,
+     28.42,
+     28.92
+    ],
+    "decode_median": 14.93,
+    "prefill_median": 28.42,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "342",
+     "357",
+     "360"
+    ],
+    "big_khz": [
+     "2400000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "llama.cpp",
+    "threads": 4,
+    "policy": "-",
+    "reps": 3,
+    "decode_tok_s": [
+     17.57,
+     17.53,
+     17.55
+    ],
+    "prefill_tok_s": [
+     52.14,
+     53.35,
+     53.63
+    ],
+    "decode_median": 17.55,
+    "prefill_median": 53.35,
+    "output_md5": [
+     "-"
+    ],
+    "battery_temp_dC": [
+     "350",
+     "355",
+     "359"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 4,
+    "policy": "fixed16",
+    "reps": 3,
+    "decode_tok_s": [
+     14.04,
+     15.0,
+     15.03
+    ],
+    "prefill_tok_s": [
+     32.09,
+     32.09,
+     32.2
+    ],
+    "decode_median": 15.0,
+    "prefill_median": 32.09,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "344",
+     "357",
+     "360"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 4,
+    "policy": "fixed8",
+    "reps": 3,
+    "decode_tok_s": [
+     15.07,
+     14.91,
+     14.73
+    ],
+    "prefill_tok_s": [
+     32.91,
+     32.44,
+     32.32
+    ],
+    "decode_median": 14.91,
+    "prefill_median": 32.44,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "345",
+     "351",
+     "361"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 4,
+    "policy": "proportional4",
+    "reps": 3,
+    "decode_tok_s": [
+     10.8,
+     11.0,
+     11.05
+    ],
+    "prefill_tok_s": [
+     31.18,
+     31.13,
+     30.73
+    ],
+    "decode_median": 11.0,
+    "prefill_median": 31.13,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "346",
+     "352",
+     "361"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "llama.cpp",
+    "threads": 8,
+    "policy": "-",
+    "reps": 3,
+    "decode_tok_s": [
+     17.61,
+     17.8,
+     17.75
+    ],
+    "prefill_tok_s": [
+     70.48,
+     71.93,
+     69.54
+    ],
+    "decode_median": 17.75,
+    "prefill_median": 70.48,
+    "output_md5": [
+     "-"
+    ],
+    "battery_temp_dC": [
+     "351",
+     "355",
+     "359"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 8,
+    "policy": "fixed16",
+    "reps": 3,
+    "decode_tok_s": [
+     15.39,
+     15.38,
+     15.3
+    ],
+    "prefill_tok_s": [
+     36.28,
+     36.84,
+     36.96
+    ],
+    "decode_median": 15.38,
+    "prefill_median": 36.84,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "346",
+     "353",
+     "362"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "910000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 8,
+    "policy": "fixed8",
+    "reps": 3,
+    "decode_tok_s": [
+     15.61,
+     15.6,
+     15.51
+    ],
+    "prefill_tok_s": [
+     37.18,
+     37.31,
+     36.98
+    ],
+    "decode_median": 15.6,
+    "prefill_median": 37.18,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "348",
+     "353",
+     "362"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   },
+   {
+    "who": "sipllm",
+    "threads": 8,
+    "policy": "proportional4",
+    "reps": 3,
+    "decode_tok_s": [
+     14.49,
+     14.64,
+     14.43
+    ],
+    "prefill_tok_s": [
+     35.35,
+     35.49,
+     36.53
+    ],
+    "decode_median": 14.49,
+    "prefill_median": 35.49,
+    "output_md5": [
+     "bc9c27e8"
+    ],
+    "battery_temp_dC": [
+     "348",
+     "354",
+     "358"
+    ],
+    "big_khz": [
+     "1300000",
+     "1300000",
+     "1300000"
+    ]
+   }
+  ],
+  "m3_policy_sweep_wave16_binary": [
+   {
+    "threads": 4,
+    "policy": "fixed16",
+    "decode_median": 67.08,
+    "prefill_median": 236.69,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 4,
+    "policy": "fixed8",
+    "decode_median": 64.72,
+    "prefill_median": 236.29,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 4,
+    "policy": "proportional2",
+    "decode_median": 68.83,
+    "prefill_median": 231.93,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 4,
+    "policy": "proportional4",
+    "decode_median": 69.14,
+    "prefill_median": 230.85,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 4,
+    "policy": "static",
+    "decode_median": 67.78,
+    "prefill_median": 231.96,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 8,
+    "policy": "fixed16",
+    "decode_median": 67.11,
+    "prefill_median": 259.15,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 8,
+    "policy": "fixed8",
+    "decode_median": 61.17,
+    "prefill_median": 266.24,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 8,
+    "policy": "proportional2",
+    "decode_median": 68.31,
+    "prefill_median": 264.71,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 8,
+    "policy": "proportional4",
+    "decode_median": 68.48,
+    "prefill_median": 266.46,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   },
+   {
+    "threads": 8,
+    "policy": "static",
+    "decode_median": 67.45,
+    "prefill_median": 258.06,
+    "output_md5": [
+     "bc9c27e8"
+    ]
+   }
+  ],
+  "note": "Library default (ThreadPool) is Proportional4, the slowest dynamic policy on the phone at 4 threads (decode 11.0 vs 15.0 fixed16). M3 spread across policies <5%. Default NOT changed in this wave (maintainer decision)."
+ },
+ "phone_e2e_first_build": [
+  {
+   "who": "llama.cpp",
+   "threads": 2,
+   "policy": "-",
+   "reps": 3,
+   "decode_tok_s": [
+    18.39,
+    18.35,
+    18.18
+   ],
+   "prefill_tok_s": [
+    53.28,
+    53.39,
+    53.44
+   ],
+   "decode_median": 18.35,
+   "prefill_median": 53.39,
+   "output_md5": [
+    "-"
+   ],
+   "battery_temp_dC": [
+    "356",
+    "359",
+    "362"
+   ],
+   "big_khz": [
+    "1300000",
+    "650000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w15:il4",
+   "threads": 2,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    13.72,
+    13.84,
+    13.83
+   ],
+   "prefill_tok_s": [
+    29.14,
+    29.08,
+    28.93
+   ],
+   "decode_median": 13.83,
+   "prefill_median": 29.08,
+   "output_md5": [
+    "bc9c27e8"
+   ],
+   "battery_temp_dC": [
+    "354",
+    "357",
+    "363"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16:il4",
+   "threads": 2,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    13.03,
+    13.17,
+    13.32
+   ],
+   "prefill_tok_s": [
+    39.38,
+    39.27,
+    39.64
+   ],
+   "decode_median": 13.17,
+   "prefill_median": 39.38,
+   "output_md5": [
+    "25d69ec5"
+   ],
+   "battery_temp_dC": [
+    "355",
+    "358",
+    "364"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16:il4-q4",
+   "threads": 2,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    12.72,
+    12.78,
+    12.83
+   ],
+   "prefill_tok_s": [
+    31.97,
+    31.51,
+    31.87
+   ],
+   "decode_median": 12.78,
+   "prefill_median": 31.87,
+   "output_md5": [
+    "bc9c27e8"
+   ],
+   "battery_temp_dC": [
+    "355",
+    "358",
+    "364"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16:il4",
+   "threads": 4,
+   "policy": "fixed16",
+   "reps": 3,
+   "decode_tok_s": [
+    13.56,
+    13.67,
+    13.35
+   ],
+   "prefill_tok_s": [
+    41.75,
+    41.57,
+    42.52
+   ],
+   "decode_median": 13.56,
+   "prefill_median": 41.75,
+   "output_md5": [
+    "25d69ec5"
+   ],
+   "battery_temp_dC": [
+    "356",
+    "359",
+    "361"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "llama.cpp",
+   "threads": 8,
+   "policy": "-",
+   "reps": 3,
+   "decode_tok_s": [
+    16.53,
+    17.96,
+    17.84
+   ],
+   "prefill_tok_s": [
+    72.12,
+    67.61,
+    69.85
+   ],
+   "decode_median": 17.84,
+   "prefill_median": 69.85,
+   "output_md5": [
+    "-"
+   ],
+   "battery_temp_dC": [
+    "357",
+    "360",
+    "362"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w15:il4",
+   "threads": 8,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    15.64,
+    15.62,
+    15.67
+   ],
+   "prefill_tok_s": [
+    37.35,
+    37.28,
+    37.34
+   ],
+   "decode_median": 15.64,
+   "prefill_median": 37.34,
+   "output_md5": [
+    "bc9c27e8"
+   ],
+   "battery_temp_dC": [
+    "355",
+    "360",
+    "362"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16:il4",
+   "threads": 8,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    14.65,
+    14.58,
+    14.46
+   ],
+   "prefill_tok_s": [
+    50.31,
+    46.49,
+    47.76
+   ],
+   "decode_median": 14.58,
+   "prefill_median": 47.76,
+   "output_md5": [
+    "25d69ec5"
+   ],
+   "battery_temp_dC": [
+    "353",
+    "361",
+    "363"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16:il4-q4",
+   "threads": 8,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    15.05,
+    14.84,
+    14.95
+   ],
+   "prefill_tok_s": [
+    40.06,
+    39.98,
+    40.05
+   ],
+   "decode_median": 14.95,
+   "prefill_median": 40.05,
+   "output_md5": [
+    "bc9c27e8"
+   ],
+   "battery_temp_dC": [
+    "353",
+    "360",
+    "363"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  }
+ ],
+ "phone_e2e_final_build": [
+  {
+   "who": "llama.cpp",
+   "threads": 2,
+   "policy": "-",
+   "reps": 3,
+   "decode_tok_s": [
+    18.2,
+    16.27,
+    16.25
+   ],
+   "prefill_tok_s": [
+    52.46,
+    30.4,
+    30.54
+   ],
+   "decode_median": 16.27,
+   "prefill_median": 30.54,
+   "output_md5": [
+    "-"
+   ],
+   "battery_temp_dC": [
+    "347",
+    "351",
+    "350"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w15:il4",
+   "threads": 2,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    13.88,
+    13.99,
+    8.46
+   ],
+   "prefill_tok_s": [
+    28.74,
+    28.79,
+    16.48
+   ],
+   "decode_median": 13.88,
+   "prefill_median": 28.74,
+   "output_md5": [
+    "bc9c27e8"
+   ],
+   "battery_temp_dC": [
+    "346",
+    "350",
+    "346"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16e:il4",
+   "threads": 2,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    13.25,
+    13.14,
+    9.17
+   ],
+   "prefill_tok_s": [
+    39.9,
+    38.3,
+    22.18
+   ],
+   "decode_median": 13.14,
+   "prefill_median": 38.3,
+   "output_md5": [
+    "25d69ec5"
+   ],
+   "battery_temp_dC": [
+    "346",
+    "351",
+    "350"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w15:il4",
+   "threads": 4,
+   "policy": "fixed16",
+   "reps": 3,
+   "decode_tok_s": [
+    14.2,
+    14.69,
+    9.95
+   ],
+   "prefill_tok_s": [
+    32.08,
+    31.84,
+    19.83
+   ],
+   "decode_median": 14.2,
+   "prefill_median": 31.84,
+   "output_md5": [
+    "bc9c27e8"
+   ],
+   "battery_temp_dC": [
+    "344",
+    "349",
+    "347"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16e:il4",
+   "threads": 4,
+   "policy": "fixed16",
+   "reps": 3,
+   "decode_tok_s": [
+    14.03,
+    14.22,
+    10.49
+   ],
+   "prefill_tok_s": [
+    42.36,
+    41.82,
+    25.99
+   ],
+   "decode_median": 14.03,
+   "prefill_median": 41.82,
+   "output_md5": [
+    "25d69ec5"
+   ],
+   "battery_temp_dC": [
+    "345",
+    "350",
+    "346"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "llama.cpp",
+   "threads": 8,
+   "policy": "-",
+   "reps": 3,
+   "decode_tok_s": [
+    16.32,
+    17.33,
+    15.85
+   ],
+   "prefill_tok_s": [
+    71.44,
+    55.88,
+    55.55
+   ],
+   "decode_median": 16.32,
+   "prefill_median": 55.88,
+   "output_md5": [
+    "-"
+   ],
+   "battery_temp_dC": [
+    "348",
+    "352",
+    "349"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w15:il4",
+   "threads": 8,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    13.99,
+    10.94,
+    10.92
+   ],
+   "prefill_tok_s": [
+    36.6,
+    24.99,
+    25.23
+   ],
+   "decode_median": 10.94,
+   "prefill_median": 25.23,
+   "output_md5": [
+    "bc9c27e8"
+   ],
+   "battery_temp_dC": [
+    "342",
+    "352",
+    "349"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16e:il4",
+   "threads": 8,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    14.74,
+    10.29,
+    10.29
+   ],
+   "prefill_tok_s": [
+    46.98,
+    27.92,
+    27.7
+   ],
+   "decode_median": 10.29,
+   "prefill_median": 27.92,
+   "output_md5": [
+    "25d69ec5"
+   ],
+   "battery_temp_dC": [
+    "342",
+    "351",
+    "348"
+   ],
+   "big_khz": [
+    "1300000",
+    "1300000",
+    "1300000"
+   ]
+  },
+  {
+   "who": "w16e:il4-q4",
+   "threads": 8,
+   "policy": "fixed8",
+   "reps": 3,
+   "decode_tok_s": [
+    15.22,
+    11.23,
+    10.96
+   ],
+   "prefill_tok_s": [
+    40.87,
+    25.32,
+    27.39
+   ],
+   "decode_median": 11.23,
+   "prefill_median": 27.39,
+   "output_md5": [
+    "bc9c27e8"
+   ],
+   "battery_temp_dC": [
+    "342",
+    "351",
+    "348"
+   ],
+   "big_khz": [
+    "1430000",
+    "1300000",
+    "1300000"
+   ]
+  }
+ ],
+ "phone_e2e_note": "Final-build sweep: rep 1 at normal clocks; reps 2-3 throttled for every config including llama.cpp (8-thread prefill 71 -> 56). Compare within a rep.",
+ "kernel_level_phone": {
+  "single_core_bs1_same_session": [
+   {
+    "build": "w15/kcore",
+    "cpu": "cpu0",
+    "kernel": "il4",
+    "ms_median": 5.718500000000001,
+    "ms": [
+     5.721,
+     5.716
+    ]
+   },
+   {
+    "build": "w15/kcore",
+    "cpu": "cpu0",
+    "kernel": "q4k",
+    "ms_median": 5.0145,
+    "ms": [
+     4.998,
+     5.031
+    ]
+   },
+   {
+    "build": "w15/kcore",
+    "cpu": "cpu0",
+    "kernel": "q6k",
+    "ms_median": 16.907,
+    "ms": [
+     16.975,
+     16.839
+    ]
+   },
+   {
+    "build": "w15/kcore",
+    "cpu": "cpu7",
+    "kernel": "il4",
+    "ms_median": 0.845,
+    "ms": [
+     0.844,
+     0.846
+    ]
+   },
+   {
+    "build": "w15/kcore",
+    "cpu": "cpu7",
+    "kernel": "q4k",
+    "ms_median": 1.23,
+    "ms": [
+     1.226,
+     1.234
+    ]
+   },
+   {
+    "build": "w15/kcore",
+    "cpu": "cpu7",
+    "kernel": "q6k",
+    "ms_median": 2.17,
+    "ms": [
+     2.17,
+     2.17
+    ]
+   },
+   {
+    "build": "w16d/kcore",
+    "cpu": "cpu0",
+    "kernel": "il4",
+    "ms_median": 4.232,
+    "ms": [
+     4.25,
+     4.214
+    ]
+   },
+   {
+    "build": "w16d/kcore",
+    "cpu": "cpu0",
+    "kernel": "q4k",
+    "ms_median": 5.068,
+    "ms": [
+     5.083,
+     5.053
+    ]
+   },
+   {
+    "build": "w16d/kcore",
+    "cpu": "cpu0",
+    "kernel": "q6il4",
+    "ms_median": 22.124000000000002,
+    "ms": [
+     22.166,
+     22.082
+    ]
+   },
+   {
+    "build": "w16d/kcore",
+    "cpu": "cpu0",
+    "kernel": "q6k",
+    "ms_median": 16.9885,
+    "ms": [
+     16.836,
+     17.141
+    ]
+   },
+   {
+    "build": "w16d/kcore",
+    "cpu": "cpu7",
+    "kernel": "il4",
+    "ms_median": 0.7575000000000001,
+    "ms": [
+     0.783,
+     0.732
+    ]
+   },
+   {
+    "build": "w16d/kcore",
+    "cpu": "cpu7",
+    "kernel": "q4k",
+    "ms_median": 1.2275,
+    "ms": [
+     1.222,
+     1.233
+    ]
+   },
+   {
+    "build": "w16d/kcore",
+    "cpu": "cpu7",
+    "kernel": "q6il4",
+    "ms_median": 1.7955,
+    "ms": [
+     1.754,
+     1.837
+    ]
+   },
+   {
+    "build": "w16d/kcore",
+    "cpu": "cpu7",
+    "kernel": "q6k",
+    "ms_median": 2.17,
+    "ms": [
+     2.173,
+     2.167
+    ]
+   },
+   {
+    "build": "w16e/kcore",
+    "cpu": "cpu0",
+    "kernel": "il4",
+    "ms_median": 4.188000000000001,
+    "ms": [
+     4.181,
+     4.195
+    ]
+   },
+   {
+    "build": "w16e/kcore",
+    "cpu": "cpu0",
+    "kernel": "q4k",
+    "ms_median": 5.075,
+    "ms": [
+     5.109,
+     5.041
+    ]
+   },
+   {
+    "build": "w16e/kcore",
+    "cpu": "cpu0",
+    "kernel": "q6il4",
+    "ms_median": 19.1765,
+    "ms": [
+     19.367,
+     18.986
+    ]
+   },
+   {
+    "build": "w16e/kcore",
+    "cpu": "cpu0",
+    "kernel": "q6k",
+    "ms_median": 16.889499999999998,
+    "ms": [
+     17.005,
+     16.774
+    ]
+   },
+   {
+    "build": "w16e/kcore",
+    "cpu": "cpu7",
+    "kernel": "il4",
+    "ms_median": 0.746,
+    "ms": [
+     0.746,
+     0.746
+    ]
+   },
+   {
+    "build": "w16e/kcore",
+    "cpu": "cpu7",
+    "kernel": "q4k",
+    "ms_median": 1.2275,
+    "ms": [
+     1.232,
+     1.223
+    ]
+   },
+   {
+    "build": "w16e/kcore",
+    "cpu": "cpu7",
+    "kernel": "q6il4",
+    "ms_median": 1.7309999999999999,
+    "ms": [
+     1.74,
+     1.722
+    ]
+   },
+   {
+    "build": "w16e/kcore",
+    "cpu": "cpu7",
+    "kernel": "q6k",
+    "ms_median": 2.1704999999999997,
+    "ms": [
+     2.167,
+     2.174
+    ]
+   }
+  ],
+  "bs32_4threads_mixed": "two-layer sample, bs=32: Q4_K IL4 44.0 ms (native 105.3), Q6_K IL4 10.3 ms (native 28.1) -> total IL4 54.2 vs native 133.3 ms",
+  "bs32_pinned_A55x4_then_A78x2": [
+   "two-layer sample, bs=32: Q4_K IL4 112.6 ms (native 307.8), Q6_K IL4 38.7 ms (native 106.1) -> total IL4 151.3 vs native 413.9 ms",
+   "two-layer sample, bs=32: Q4_K IL4 90.1 ms (native 212.3), Q6_K IL4 20.4 ms (native 57.3) -> total IL4 110.5 vs native 269.5 ms"
+  ],
+  "opbench_ns_per_op": "A78: sdot-vec 0.162 sdot-lane 0.111 sli 0.108 orr 0.104; A55: sdot-vec 0.258 sdot-lane 0.255 sli 0.190 orr 0.127"
+ },
+ "correctness": {
+  "q4k_il4_rewrite": "byte-identical (cmp) to the wave-15 kernel on real tensors, bs 1..33, pool and no pool: M3 and phone",
+  "q6k_il4_vs_row_major_real_tensors": "max rel diff 0.9e-6 .. 3.5e-6 (blk.1.ffn_down, blk.1.attn_v, output.weight; bs 1/7/32)",
+  "q6k_il4_kernel_variants": "each later variant byte-identical to the first Q6_K IL4 kernel (integer-exact changes)",
+  "fp16_vector_convert": "0 mismatches over all 65536 inputs vs scalar fcvt (M3 and phone)",
+  "test_neon": "13/13 on M3 and phone (new: q6_K_il4_matches_row_major_int8)",
+  "greedy_output": "il4 (Q4_K+Q6_K) output differs from native after ~40 tokens (near-tie flip; float summation order); il4-q4 identical to native"
+ },
+ "accuracy_sign_test": {
+  "docs": 10,
+  "tokens": 512,
+  "reference": "exact",
+  "rows": [
+   {
+    "text": "cpp-engine",
+    "variant": "native",
+    "kl_mean": 0.000472,
+    "top1_pct": 99.41
+   },
+   {
+    "text": "cpp-engine",
+    "variant": "il4-q4",
+    "kl_mean": 0.000483,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "cpp-engine",
+    "variant": "il4",
+    "kl_mean": 0.000465,
+    "top1_pct": 98.63
+   },
+   {
+    "text": "dart",
+    "variant": "native",
+    "kl_mean": 0.00055,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "dart",
+    "variant": "il4-q4",
+    "kl_mean": 0.00051,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "dart",
+    "variant": "il4",
+    "kl_mean": 0.00051,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "flutter-runtime",
+    "variant": "native",
+    "kl_mean": 0.00052,
+    "top1_pct": 98.05
+   },
+   {
+    "text": "flutter-runtime",
+    "variant": "il4-q4",
+    "kl_mean": 0.000532,
+    "top1_pct": 98.05
+   },
+   {
+    "text": "flutter-runtime",
+    "variant": "il4",
+    "kl_mean": 0.000503,
+    "top1_pct": 99.02
+   },
+   {
+    "text": "benchmarks",
+    "variant": "native",
+    "kl_mean": 0.000524,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "benchmarks",
+    "variant": "il4-q4",
+    "kl_mean": 0.000467,
+    "top1_pct": 98.24
+   },
+   {
+    "text": "benchmarks",
+    "variant": "il4",
+    "kl_mean": 0.000526,
+    "top1_pct": 98.24
+   },
+   {
+    "text": "performance-history",
+    "variant": "native",
+    "kl_mean": 0.000572,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "performance-history",
+    "variant": "il4-q4",
+    "kl_mean": 0.000585,
+    "top1_pct": 98.63
+   },
+   {
+    "text": "performance-history",
+    "variant": "il4",
+    "kl_mean": 0.000624,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "transformer",
+    "variant": "native",
+    "kl_mean": 0.000585,
+    "top1_pct": 98.24
+   },
+   {
+    "text": "transformer",
+    "variant": "il4-q4",
+    "kl_mean": 0.000641,
+    "top1_pct": 98.05
+   },
+   {
+    "text": "transformer",
+    "variant": "il4",
+    "kl_mean": 0.000577,
+    "top1_pct": 98.63
+   },
+   {
+    "text": "quantization",
+    "variant": "native",
+    "kl_mean": 0.000502,
+    "top1_pct": 98.63
+   },
+   {
+    "text": "quantization",
+    "variant": "il4-q4",
+    "kl_mean": 0.000545,
+    "top1_pct": 98.05
+   },
+   {
+    "text": "quantization",
+    "variant": "il4",
+    "kl_mean": 0.000506,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "memory-planner",
+    "variant": "native",
+    "kl_mean": 0.000449,
+    "top1_pct": 98.24
+   },
+   {
+    "text": "memory-planner",
+    "variant": "il4-q4",
+    "kl_mean": 0.000484,
+    "top1_pct": 98.63
+   },
+   {
+    "text": "memory-planner",
+    "variant": "il4",
+    "kl_mean": 0.00048,
+    "top1_pct": 97.85
+   },
+   {
+    "text": "faq",
+    "variant": "native",
+    "kl_mean": 0.000586,
+    "top1_pct": 97.85
+   },
+   {
+    "text": "faq",
+    "variant": "il4-q4",
+    "kl_mean": 0.000534,
+    "top1_pct": 98.44
+   },
+   {
+    "text": "faq",
+    "variant": "il4",
+    "kl_mean": 0.000509,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "layer-residency",
+    "variant": "native",
+    "kl_mean": 0.000478,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "layer-residency",
+    "variant": "il4-q4",
+    "kl_mean": 0.000493,
+    "top1_pct": 98.83
+   },
+   {
+    "text": "layer-residency",
+    "variant": "il4",
+    "kl_mean": 0.000545,
+    "top1_pct": 98.44
+   }
+  ],
+  "il4_vs_native": "KL ratio geo-mean 1.002 (worse 5/10, p=1.00); top-1 +0.039 pt (worse 4/8 non-ties, p=1.00)",
+  "il4_q4_vs_native": "KL ratio 1.006 (p=0.34); top-1 -0.116 pt (p=0.45) - identical to wave 15, as the kernel output is identical"
+ },
+ "m3_e2e_single_runs": {
+  "native": "prefill 98.1 decode 58.4",
+  "il4-q4": "prefill 173.6 decode 65.0",
+  "il4": "prefill 237.5 decode 67.3",
+  "note": "one run each, 4 threads fixed16, output md5 identical for 32 tokens"
+ }
+}
