@@ -44,6 +44,7 @@ class SipllmParams {
     this.residencyFp32 = false,
     this.forceBudget = false,
     this.schedulePolicy = SchedulePolicy.proportional2,
+    this.specDraft = 0,
   });
 
   /// Hard peak-RSS ceiling in bytes (`--ram-budget`). 0 = unlimited streaming.
@@ -56,12 +57,19 @@ class SipllmParams {
   final bool useMmap;
   final bool asyncPrefetch;
 
-  /// Opt-in int8 SDOT kernel for Q8_0 (`--fast`).
+  /// Opt-in int8 kernels for Q8_0, Q4_K and Q6_K (`--fast`). Quantizes the
+  /// activation to int8 (same approximation as llama.cpp); the exact fp32 path
+  /// stays the default.
   final bool fastQuant;
   final bool streamLmHead;
   final bool residencyFp32;
   final bool forceBudget;
   final SchedulePolicy schedulePolicy;
+
+  /// Prompt-lookup speculative decoding: max draft tokens per verify pass
+  /// (`--spec N`). 0 = off. Output is token-identical to plain decoding; the
+  /// win is on copy-heavy output (edits, summaries) and largest when streaming.
+  final int specDraft;
 
   /// Convenience: build a budget in MiB.
   SipllmParams copyWithBudgetMiB(int mib) =>
@@ -79,6 +87,7 @@ class SipllmParams {
     bool? residencyFp32,
     bool? forceBudget,
     SchedulePolicy? schedulePolicy,
+    int? specDraft,
   }) {
     return SipllmParams(
       ramBudgetBytes: ramBudgetBytes ?? this.ramBudgetBytes,
@@ -92,6 +101,7 @@ class SipllmParams {
       residencyFp32: residencyFp32 ?? this.residencyFp32,
       forceBudget: forceBudget ?? this.forceBudget,
       schedulePolicy: schedulePolicy ?? this.schedulePolicy,
+      specDraft: specDraft ?? this.specDraft,
     );
   }
 
@@ -107,6 +117,7 @@ class SipllmParams {
         'residencyFp32': residencyFp32,
         'forceBudget': forceBudget,
         'schedulePolicy': schedulePolicy.index,
+        'specDraft': specDraft,
       };
 
   static SipllmParams fromMap(Map<String, Object?> m) => SipllmParams(
@@ -121,6 +132,7 @@ class SipllmParams {
         residencyFp32: m['residencyFp32']! as bool,
         forceBudget: m['forceBudget']! as bool,
         schedulePolicy: SchedulePolicy.values[m['schedulePolicy']! as int],
+        specDraft: (m['specDraft'] as int?) ?? 0,
       );
 }
 

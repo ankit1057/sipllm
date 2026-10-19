@@ -57,11 +57,14 @@ typedef struct {
   int32_t n_buffers;         /* async prefetch ring buffers (>=1)                                  */
   int32_t use_mmap;          /* mmap backend instead of pread                                      */
   int32_t async_prefetch;    /* background double-buffered prefetch thread                         */
-  int32_t fast_quant;        /* int8 SDOT kernel for Q8_0 (--fast); numerically equivalent         */
+  int32_t fast_quant;        /* int8 kernels for Q8_0/Q4_K/Q6_K (--fast); int8-activation approx. */
   int32_t stream_lm_head;    /* stream non-tied LM head off disk (RAM<->speed knob)                */
   int32_t residency_fp32;    /* FP32 residency (else Quantized — the memory-bounded default)       */
   int32_t force_budget;      /* honor ram_budget even below the safe floor (--ram-budget-force)    */
   int32_t schedule_policy;   /* SIPLLM_SCHED_*                                                     */
+  int32_t spec_draft;        /* prompt-lookup speculative decoding, max draft tokens (--spec N);   */
+                             /* 0 = off (default). Output is token-identical to plain decoding.   */
+                             /* Appended last: earlier field offsets are unchanged (ABI-additive). */
 } sipllm_params;
 
 /* Sampler configuration. Mirrors llm::SamplerConfig. temperature<=0 => greedy. */

@@ -36,6 +36,8 @@ final class SipllmParamsC extends Struct {
   external int forceBudget;
   @Int32()
   external int schedulePolicy;
+  @Int32()
+  external int specDraft;
 }
 
 // ---- sipllm_sampler -------------------------------------------------------

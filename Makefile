@@ -27,7 +27,9 @@ LDLIBS   := -lpthread
 # a cross-build such as `make CXX=.../aarch64-linux-android29-clang++` must not
 # ask for it or ld.lld fails with "unable to find library -lpthread".
 ifneq (,$(findstring android,$(CXX)))
-  LDLIBS :=
+  LDLIBS := -static-libstdc++
+  # libc++ is linked statically so the binaries run from /data/local/tmp without a
+  # libc++_shared.so beside them ("cannot locate symbol ...bad_function_call" otherwise).
 endif
 
 # Per-arch tuning. By default -march=native lights up the host's SIMD:
