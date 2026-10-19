@@ -33,6 +33,18 @@ bool fast_quant_enabled();
 void matmul_q8_0_i8(float* y, const void* W, const float* x,
                     int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
 
+// y = W @ x, W is Q4_K [n_out, n_in] (256-weight super-blocks); activation
+// quantized to int8 per 32-block internally, Σxq per block shared across rows.
+// n_in must be a multiple of 256. Same opt-in gate and the same fp32-dequant
+// fallback as matmul_q8_0_i8, so it is always safe to call.
+void matmul_q4_K_i8(float* y, const void* W, const float* x,
+                    int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+
+// y = W @ x, W is Q6_K [n_out, n_in] (256-weight super-blocks, per-16 scales).
+// Same gate, activation quantization and fallback as matmul_q4_K_i8.
+void matmul_q6_K_i8(float* y, const void* W, const float* x,
+                    int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+
 // Bulk fp16 -> fp32 using the hardware half-precision converter (asimdhp).
 void fp16_to_fp32_bulk(const uint16_t* src, float* dst, int64_t n);
 

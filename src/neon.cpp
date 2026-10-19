@@ -43,7 +43,7 @@ namespace {
 
 // Quantize an fp32 activation vector to per-32-block int8 (symmetric), matching
 // the Q8 activation format. Returns int8 codes + per-block scale.
-void quantize_activation_q8(const float* x, int64_t n, int8_t* q, float* scale) {
+[[maybe_unused]] void quantize_activation_q8(const float* x, int64_t n, int8_t* q, float* scale) {
     const int64_t nb = n / 32;
     for (int64_t b = 0; b < nb; ++b) {
         const float* xb = x + b * 32;
@@ -62,9 +62,9 @@ void quantize_activation_q8(const float* x, int64_t n, int8_t* q, float* scale) 
 // Hardware fp16 -> fp32 for a Q8_0 block scale (one fcvt vs the software IEEE
 // decode). Falls back to the software path where fp16 arithmetic is absent.
 #if defined(__ARM_FP16_FORMAT_IEEE)
-inline float f16_scale(const uint8_t* p) { __fp16 h; std::memcpy(&h, p, 2); return (float)h; }
+[[maybe_unused]] inline float f16_scale(const uint8_t* p) { __fp16 h; std::memcpy(&h, p, 2); return (float)h; }
 #else
-inline float f16_scale(const uint8_t* p) { uint16_t h; std::memcpy(&h, p, 2); return fp16_to_fp32(h); }
+[[maybe_unused]] inline float f16_scale(const uint8_t* p) { uint16_t h; std::memcpy(&h, p, 2); return fp16_to_fp32(h); }
 #endif
 
 } // namespace
@@ -103,7 +103,304 @@ void matmul_q8_0_i8(float* y, const void* W, const float* x,
     else body(0, 0, n_out);
 #else
     // No SDOT: defer to the exact fp32-dequant path.
+    (void)base; (void)row_bytes;
     matmul_quant(y, W, DType::Q8_0, x, n_out, n_in, pool);
+#endif
+}
+
+} // namespace llm
+
+// ---------------------------------------------------------------------------
+// Q4_K × int8-activation kernel (opt-in via --fast, like matmul_q8_0_i8).
+//
+// Q4_K super-block (256 weights, 144 bytes): d fp16 | dmin fp16 | scales[12]
+// (eight 6-bit (scale, min) pairs) | q[128] nibbles. Chunk j (64 weights) holds
+// its low nibbles as weights 64j+0..31 (pair 2j) and its high nibbles as
+// 64j+32..63 (pair 2j+1); w = d*sc*q - dmin*m with q in [0,15].
+//
+// With the activation quantized per 32-block (x ≈ xs[b]*xq), each 32-wide
+// sub-block contributes
+//     xs[b] * ( d*sc * Σ q*xq  -  dmin*m * Σ xq )
+// so the whole row is int8 dot products (SDOT on the 0..15 nibbles, which are
+// valid int8) plus two scalar fused-multiply-adds per sub-block. Σxq per
+// activation block is computed once and reused across every output row.
+// Numerics: same int8-activation approximation as the Q8_0 kernel (and as
+// llama.cpp's Q8_K activations); the exact fp32 dequant path stays the default.
+namespace llm {
+
+void matmul_q4_K_i8(float* y, const void* W, const float* x,
+                    int64_t n_out, int64_t n_in, ThreadPool* pool) {
+#if defined(__ARM_FEATURE_DOTPROD)
+    const int64_t nsb = n_in / 256;              // super-blocks per row
+    const int64_t nb  = n_in / 32;               // activation blocks per row
+    const uint8_t* base = static_cast<const uint8_t*>(W);
+    const int64_t row_bytes = nsb * 144;
+
+    std::vector<int8_t>  xq(n_in);
+    std::vector<float>   xs(nb);
+    std::vector<int32_t> xsum(nb);
+    quantize_activation_q8(x, n_in, xq.data(), xs.data());
+    for (int64_t b = 0; b < nb; ++b)
+        xsum[b] = vaddlvq_s8(vld1q_s8(xq.data() + b * 32))
+                + vaddlvq_s8(vld1q_s8(xq.data() + b * 32 + 16));
+
+    auto body = [&](int, int64_t begin, int64_t end) {
+        const uint8x16_t lomask = vdupq_n_u8(0x0F);
+        for (int64_t o = begin; o < end; ++o) {
+            const uint8_t* row = base + o * row_bytes;
+            float32x4_t accv = vdupq_n_f32(0.f);  // Σ xs*d*sc*dot (lane-wise)
+            float       accm = 0.f;               // Σ xs*dmin*m*Σxq (scalar)
+            for (int64_t k = 0; k < nsb; ++k) {
+                const uint8_t* p = row + k * 144;
+                const float d = f16_scale(p), dmin = f16_scale(p + 2);
+                const uint8_t* scales = p + 4;
+                const uint8_t* q = p + 16;
+                const int8_t*  aq = xq.data() + k * 256;
+                const float*   bxs = xs.data() + k * 8;
+                const int32_t* bsum = xsum.data() + k * 8;
+                for (int j = 0; j < 4; ++j) {     // four 64-weight chunks
+                    const uint8x16_t q0 = vld1q_u8(q), q1 = vld1q_u8(q + 16);
+                    const int8x16_t lo0 = vreinterpretq_s8_u8(vandq_u8(q0, lomask));
+                    const int8x16_t lo1 = vreinterpretq_s8_u8(vandq_u8(q1, lomask));
+                    const int8x16_t hi0 = vreinterpretq_s8_u8(vshrq_n_u8(q0, 4));
+                    const int8x16_t hi1 = vreinterpretq_s8_u8(vshrq_n_u8(q1, 4));
+                    const int32x4_t plo = vdotq_s32(vdotq_s32(vdupq_n_s32(0),
+                                              lo0, vld1q_s8(aq)),      lo1, vld1q_s8(aq + 16));
+                    const int32x4_t phi = vdotq_s32(vdotq_s32(vdupq_n_s32(0),
+                                              hi0, vld1q_s8(aq + 32)), hi1, vld1q_s8(aq + 48));
+                    uint8_t sc, m;
+                    const int b0 = 2 * j;         // activation block of the low half
+                    get_scale_min_k4(b0, scales, sc, m);
+                    accv = vfmaq_n_f32(accv, vcvtq_f32_s32(plo), d * (float)sc * bxs[b0]);
+                    accm += dmin * (float)m * bxs[b0] * (float)bsum[b0];
+                    get_scale_min_k4(b0 + 1, scales, sc, m);
+                    accv = vfmaq_n_f32(accv, vcvtq_f32_s32(phi), d * (float)sc * bxs[b0 + 1]);
+                    accm += dmin * (float)m * bxs[b0 + 1] * (float)bsum[b0 + 1];
+                    q += 32; aq += 64;
+                }
+            }
+            y[o] = vaddvq_f32(accv) - accm;
+        }
+    };
+    if (pool && pool->size() > 1 && n_out >= 32) pool->parallel_for(n_out, body);
+    else body(0, 0, n_out);
+#elif LLM_HAVE_AVX2
+    // x86-64 (AMD/Intel, Haswell+/Zen+): the same arithmetic with
+    // _mm256_maddubs_epi16, whose operand contract is exactly (u8, s8) — the
+    // 0..15 nibbles are the unsigned side, the int8 activations the signed
+    // side. Pair sums are at most 2*15*127 = 3810, far below int16 saturation.
+    // NOT yet run on real x86 hardware (cross-compiled only on 2026-10-19).
+    const int64_t nsb = n_in / 256;
+    const int64_t nb  = n_in / 32;
+    const uint8_t* base = static_cast<const uint8_t*>(W);
+    const int64_t row_bytes = nsb * 144;
+
+    std::vector<int8_t>  xq(n_in);
+    std::vector<float>   xs(nb);
+    std::vector<int32_t> xsum(nb);
+    quantize_activation_q8(x, n_in, xq.data(), xs.data());
+    for (int64_t b = 0; b < nb; ++b) {
+        int32_t t = 0;
+        for (int i = 0; i < 32; ++i) t += xq[b * 32 + i];
+        xsum[b] = t;
+    }
+
+    auto hsum256 = [](__m256 v) -> float {
+        __m128 lo = _mm256_castps256_ps128(v), hi = _mm256_extractf128_ps(v, 1);
+        lo = _mm_add_ps(lo, hi);
+        lo = _mm_hadd_ps(lo, lo);
+        lo = _mm_hadd_ps(lo, lo);
+        return _mm_cvtss_f32(lo);
+    };
+
+    auto body = [&](int, int64_t begin, int64_t end) {
+        const __m256i lomask = _mm256_set1_epi8(0x0F);
+        const __m256i ones16 = _mm256_set1_epi16(1);
+        for (int64_t o = begin; o < end; ++o) {
+            const uint8_t* row = base + o * row_bytes;
+            __m256 accv = _mm256_setzero_ps();
+            float  accm = 0.f;
+            for (int64_t k = 0; k < nsb; ++k) {
+                const uint8_t* p = row + k * 144;
+                const float d = f16_scale(p), dmin = f16_scale(p + 2);
+                const uint8_t* scales = p + 4;
+                const uint8_t* q = p + 16;
+                const int8_t*  aq = xq.data() + k * 256;
+                const float*   bxs = xs.data() + k * 8;
+                const int32_t* bsum = xsum.data() + k * 8;
+                for (int j = 0; j < 4; ++j) {
+                    const __m256i qv = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q));
+                    const __m256i lo = _mm256_and_si256(qv, lomask);
+                    const __m256i hi = _mm256_and_si256(_mm256_srli_epi16(qv, 4), lomask);
+                    const __m256i alo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(aq));
+                    const __m256i ahi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(aq + 32));
+                    const __m256i plo = _mm256_madd_epi16(_mm256_maddubs_epi16(lo, alo), ones16);
+                    const __m256i phi = _mm256_madd_epi16(_mm256_maddubs_epi16(hi, ahi), ones16);
+                    uint8_t sc, m;
+                    const int b0 = 2 * j;
+                    get_scale_min_k4(b0, scales, sc, m);
+                    accv = _mm256_fmadd_ps(_mm256_cvtepi32_ps(plo),
+                                           _mm256_set1_ps(d * (float)sc * bxs[b0]), accv);
+                    accm += dmin * (float)m * bxs[b0] * (float)bsum[b0];
+                    get_scale_min_k4(b0 + 1, scales, sc, m);
+                    accv = _mm256_fmadd_ps(_mm256_cvtepi32_ps(phi),
+                                           _mm256_set1_ps(d * (float)sc * bxs[b0 + 1]), accv);
+                    accm += dmin * (float)m * bxs[b0 + 1] * (float)bsum[b0 + 1];
+                    q += 32; aq += 64;
+                }
+            }
+            y[o] = hsum256(accv) - accm;
+        }
+    };
+    if (pool && pool->size() > 1 && n_out >= 32) pool->parallel_for(n_out, body);
+    else body(0, 0, n_out);
+#else
+    // No SDOT / AVX2: defer to the exact fp32-dequant path.
+    matmul_quant(y, W, DType::Q4_K, x, n_out, n_in, pool);
+#endif
+}
+
+} // namespace llm
+
+// ---------------------------------------------------------------------------
+// Q6_K × int8-activation kernel (opt-in via --fast). Q6_K is the lm_head and
+// a few attention/FFN tensors in a Q4_K_M file (21 of 201 in TinyLlama).
+//
+// Q6_K super-block (256 weights, 210 bytes): ql[128] low nibbles | qh[64] high
+// 2-bit pairs | sc[16] int8 (one per 16 weights) | d fp16. Each 128-weight half
+// unpacks, for l in [0,32): q1 = ql[l]&0xF | (qh[l]&3)<<4 at l, q2 at l+32,
+// q3 = ql[l]>>4 | ... at l+64, q4 at l+96; w = d * sc[g] * (q - 32), q in [0,63].
+//
+// Scales are per 16 weights, so the dot is taken per 16-wide group (one SDOT
+// per group gives exactly that) and the "-32" is folded into a scalar term:
+//     xs[b] * d * sc[g] * ( Σ q*xq  -  32 * Σ xq )       (Σ over the 16 group)
+// Σxq per 16 is precomputed once per activation and shared across rows.
+namespace llm {
+
+void matmul_q6_K_i8(float* y, const void* W, const float* x,
+                    int64_t n_out, int64_t n_in, ThreadPool* pool) {
+#if defined(__ARM_FEATURE_DOTPROD)
+    const int64_t nsb = n_in / 256;
+    const int64_t nb  = n_in / 32;
+    const int64_t ng  = n_in / 16;
+    const uint8_t* base = static_cast<const uint8_t*>(W);
+    const int64_t row_bytes = nsb * 210;
+
+    std::vector<int8_t>  xq(n_in);
+    std::vector<float>   xs(nb);
+    std::vector<int32_t> xsum16(ng);
+    quantize_activation_q8(x, n_in, xq.data(), xs.data());
+    for (int64_t g = 0; g < ng; ++g) xsum16[g] = vaddlvq_s8(vld1q_s8(xq.data() + g * 16));
+
+    auto body = [&](int, int64_t begin, int64_t end) {
+        const uint8x16_t m0f = vdupq_n_u8(0x0F), m03 = vdupq_n_u8(0x03);
+        for (int64_t o = begin; o < end; ++o) {
+            const uint8_t* row = base + o * row_bytes;
+            float32x4_t accv = vdupq_n_f32(0.f);
+            float       accm = 0.f;
+            for (int64_t k = 0; k < nsb; ++k) {
+                const uint8_t* p  = row + k * 210;
+                const uint8_t* ql = p;
+                const uint8_t* qh = p + 128;
+                const int8_t*  sc = reinterpret_cast<const int8_t*>(p + 192);
+                const float d = f16_scale(p + 208);
+                for (int h = 0; h < 2; ++h) {                 // two 128-weight halves
+                    const int64_t e0 = k * 256 + h * 128;     // first element of this half
+                    for (int off = 0; off < 32; off += 16) {  // two 16-wide groups per quarter
+                        const int is = off / 16;
+                        const uint8x16_t qlv  = vld1q_u8(ql + off);
+                        const uint8x16_t qlv2 = vld1q_u8(ql + off + 32);
+                        const uint8x16_t qhv  = vld1q_u8(qh + off);
+                        const int8x16_t q1 = vreinterpretq_s8_u8(vorrq_u8(vandq_u8(qlv,  m0f), vshlq_n_u8(vandq_u8(qhv, m03), 4)));
+                        const int8x16_t q2 = vreinterpretq_s8_u8(vorrq_u8(vandq_u8(qlv2, m0f), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 2), m03), 4)));
+                        const int8x16_t q3 = vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(qlv,  4), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 4), m03), 4)));
+                        const int8x16_t q4 = vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(qlv2, 4), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 6), m03), 4)));
+                        const int8x16_t* qs[4] = {&q1, &q2, &q3, &q4};
+                        for (int quarter = 0; quarter < 4; ++quarter) {
+                            const int64_t e  = e0 + quarter * 32 + off;      // element index
+                            const int32x4_t pd = vdotq_s32(vdupq_n_s32(0), *qs[quarter], vld1q_s8(xq.data() + e));
+                            const float s = d * (float)sc[is + 2 * quarter] * xs[e / 32];
+                            accv = vfmaq_n_f32(accv, vcvtq_f32_s32(pd), s);
+                            accm += s * 32.f * (float)xsum16[e / 16];
+                        }
+                    }
+                    ql += 64; qh += 32; sc += 8;
+                }
+            }
+            y[o] = vaddvq_f32(accv) - accm;
+        }
+    };
+    if (pool && pool->size() > 1 && n_out >= 32) pool->parallel_for(n_out, body);
+    else body(0, 0, n_out);
+#elif LLM_HAVE_AVX2
+    // Same arithmetic; 32 bytes of ql at once give two 16-wide groups (two
+    // scales) per quarter, so the per-lane scale vector carries sc[is] in
+    // lanes 0-3 and sc[is+1] in lanes 4-7. Pair sums <= 2*63*127 = 16002.
+    // NOT yet run on real x86 hardware (cross-compiled only on 2026-10-19).
+    const int64_t nsb = n_in / 256;
+    const int64_t nb  = n_in / 32;
+    const int64_t ng  = n_in / 16;
+    const uint8_t* base = static_cast<const uint8_t*>(W);
+    const int64_t row_bytes = nsb * 210;
+
+    std::vector<int8_t>  xq(n_in);
+    std::vector<float>   xs(nb);
+    std::vector<int32_t> xsum16(ng);
+    quantize_activation_q8(x, n_in, xq.data(), xs.data());
+    for (int64_t g = 0; g < ng; ++g) {
+        int32_t t = 0;
+        for (int i = 0; i < 16; ++i) t += xq[g * 16 + i];
+        xsum16[g] = t;
+    }
+    auto hsum256 = [](__m256 v) -> float {
+        __m128 lo = _mm256_castps256_ps128(v), hi = _mm256_extractf128_ps(v, 1);
+        lo = _mm_add_ps(lo, hi); lo = _mm_hadd_ps(lo, lo); lo = _mm_hadd_ps(lo, lo);
+        return _mm_cvtss_f32(lo);
+    };
+    auto body = [&](int, int64_t begin, int64_t end) {
+        const __m256i m0f = _mm256_set1_epi8(0x0F), m03 = _mm256_set1_epi8(0x03);
+        const __m256i ones16 = _mm256_set1_epi16(1);
+        for (int64_t o = begin; o < end; ++o) {
+            const uint8_t* row = base + o * row_bytes;
+            __m256 accv = _mm256_setzero_ps();
+            float  accm = 0.f;
+            for (int64_t k = 0; k < nsb; ++k) {
+                const uint8_t* p  = row + k * 210;
+                const uint8_t* ql = p;
+                const uint8_t* qh = p + 128;
+                const int8_t*  sc = reinterpret_cast<const int8_t*>(p + 192);
+                const float d = f16_scale(p + 208);
+                for (int h = 0; h < 2; ++h) {
+                    const int64_t e0 = k * 256 + h * 128;
+                    const __m256i qlv  = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ql));
+                    const __m256i qlv2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ql + 32));
+                    const __m256i qhv  = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(qh));
+                    const __m256i q[4] = {
+                        _mm256_or_si256(_mm256_and_si256(qlv,  m0f), _mm256_slli_epi16(_mm256_and_si256(qhv, m03), 4)),
+                        _mm256_or_si256(_mm256_and_si256(qlv2, m0f), _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qhv, 2), m03), 4)),
+                        _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(qlv,  4), m0f), _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qhv, 4), m03), 4)),
+                        _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(qlv2, 4), m0f), _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qhv, 6), m03), 4)),
+                    };
+                    for (int quarter = 0; quarter < 4; ++quarter) {
+                        const int64_t e = e0 + quarter * 32;          // 32 elements: groups e/16, e/16+1
+                        const __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xq.data() + e));
+                        const __m256i pd = _mm256_madd_epi16(_mm256_maddubs_epi16(q[quarter], a), ones16);
+                        const float sb = d * xs[e / 32];
+                        const float s0 = sb * (float)sc[0 + 2 * quarter], s1 = sb * (float)sc[1 + 2 * quarter];
+                        const __m256 sv = _mm256_set_ps(s1, s1, s1, s1, s0, s0, s0, s0);
+                        accv = _mm256_fmadd_ps(_mm256_cvtepi32_ps(pd), sv, accv);
+                        accm += 32.f * (s0 * (float)xsum16[e / 16] + s1 * (float)xsum16[e / 16 + 1]);
+                    }
+                    ql += 64; qh += 32; sc += 8;
+                }
+            }
+            y[o] = hsum256(accv) - accm;
+        }
+    };
+    if (pool && pool->size() > 1 && n_out >= 32) pool->parallel_for(n_out, body);
+    else body(0, 0, n_out);
+#else
+    matmul_quant(y, W, DType::Q6_K, x, n_out, n_in, pool);
 #endif
 }
 

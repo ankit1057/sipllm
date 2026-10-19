@@ -1,0 +1,149 @@
+{
+  "meta": {
+    "benchmark": "ram_budget_sweep (#37)",
+    "host": "Ankits-MacBook-Air",
+    "date": "2026-10-19",
+    "os": "macOS 27.0.1",
+    "cpu": "Apple M3",
+    "git_commit": "b262811",
+    "gen_tokens": 24,
+    "ctx": 512,
+    "prompt": "Once upon a time",
+    "threads": 4,
+    "median_of_n": 3,
+    "cache_state": "warm",
+    "peak_rss_source": "/usr/bin/time -l 'maximum resident set size' (bytes)",
+    "load_1m_at_start": 3.72,
+    "load_state": "quiet",
+    "top_foreign_process_at_start": "37.7% /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd",
+    "reproduce": "./scripts/bench_ram_budget.sh"
+  },
+  "ram_budget_sweep": [
+    {
+      "model": "smollm2-135m",
+      "ram_budget": "0",
+      "decode_tok_s": 58.94,
+      "peak_rss_mb": 54.2,
+      "pinned_layers": 0,
+      "weights_resident_mb": 37.6,
+      "streamed_mb": 2827.3
+    },
+    {
+      "model": "smollm2-135m",
+      "ram_budget": "128M",
+      "decode_tok_s": 60.8,
+      "peak_rss_mb": 100.3,
+      "pinned_layers": 12,
+      "weights_resident_mb": 82.8,
+      "streamed_mb": 1743.1
+    },
+    {
+      "model": "smollm2-135m",
+      "ram_budget": "256M",
+      "decode_tok_s": 64.01,
+      "peak_rss_mb": 162.1,
+      "pinned_layers": 30,
+      "weights_resident_mb": 143.0,
+      "streamed_mb": 112.9
+    },
+    {
+      "model": "smollm2-135m",
+      "ram_budget": "384M",
+      "decode_tok_s": 63.87,
+      "peak_rss_mb": 162.1,
+      "pinned_layers": 30,
+      "weights_resident_mb": 143.0,
+      "streamed_mb": 112.9
+    },
+    {
+      "model": "smollm2-135m",
+      "ram_budget": "512M",
+      "decode_tok_s": 63.69,
+      "peak_rss_mb": 162.1,
+      "pinned_layers": 30,
+      "weights_resident_mb": 143.0,
+      "streamed_mb": 112.9
+    },
+    {
+      "model": "smollm2-135m",
+      "ram_budget": "768M",
+      "decode_tok_s": 60.1,
+      "peak_rss_mb": 162.1,
+      "pinned_layers": 30,
+      "weights_resident_mb": 143.0,
+      "streamed_mb": 112.9
+    },
+    {
+      "model": "smollm2-135m",
+      "ram_budget": "1200M",
+      "decode_tok_s": 64.52,
+      "peak_rss_mb": 162.1,
+      "pinned_layers": 30,
+      "weights_resident_mb": 143.0,
+      "streamed_mb": 112.9
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "0",
+      "decode_tok_s": 10.77,
+      "peak_rss_mb": 122.5,
+      "pinned_layers": 0,
+      "weights_resident_mb": 106.5,
+      "streamed_mb": 14439.1
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "128M",
+      "decode_tok_s": 9.67,
+      "peak_rss_mb": 72.2,
+      "pinned_layers": 0,
+      "weights_resident_mb": 52.7,
+      "streamed_mb": 14439.1
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "256M",
+      "decode_tok_s": 10.63,
+      "peak_rss_mb": 210.1,
+      "pinned_layers": 3,
+      "weights_resident_mb": 183.9,
+      "streamed_mb": 12501.9
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "384M",
+      "decode_tok_s": 12.87,
+      "peak_rss_mb": 334.0,
+      "pinned_layers": 8,
+      "weights_resident_mb": 317.2,
+      "streamed_mb": 9381.1
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "512M",
+      "decode_tok_s": 14.69,
+      "peak_rss_mb": 481.3,
+      "pinned_layers": 13,
+      "weights_resident_mb": 447.4,
+      "streamed_mb": 6179.5
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "768M",
+      "decode_tok_s": 21.57,
+      "peak_rss_mb": 644.9,
+      "pinned_layers": 22,
+      "weights_resident_mb": 630.2,
+      "streamed_mb": 576.4
+    },
+    {
+      "model": "tinyllama",
+      "ram_budget": "1200M",
+      "decode_tok_s": 20.57,
+      "peak_rss_mb": 644.9,
+      "pinned_layers": 22,
+      "weights_resident_mb": 630.2,
+      "streamed_mb": 576.4
+    }
+  ]
+}

@@ -69,6 +69,7 @@ const SipllmParams({
   this.residencyFp32 = false,
   this.forceBudget = false,
   this.schedulePolicy = SchedulePolicy.proportional2,
+  this.specDraft = 0,
 });
 
 final int ramBudgetBytes;                  // hard peak-RSS ceiling (--ram-budget); 0 = unlimited
@@ -77,11 +78,12 @@ final int maxCtx;
 final int nBuffers;
 final bool useMmap;
 final bool asyncPrefetch;
-final bool fastQuant;                      // opt-in int8 SDOT kernel for Q8_0 (--fast)
+final bool fastQuant;                      // opt-in int8 kernels for Q8_0 / Q4_K / Q6_K (--fast)
 final bool streamLmHead;
 final bool residencyFp32;
 final bool forceBudget;
 final SchedulePolicy schedulePolicy;
+final int specDraft;                       // prompt-lookup speculative decoding, max draft tokens (--spec N); 0 = off
 
 SipllmParams copyWithBudgetMiB(int mib);   // convenience: budget in MiB
 SipllmParams copyWith({ /* per-field overrides */ });

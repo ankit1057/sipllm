@@ -73,16 +73,8 @@ namespace {
 constexpr int QK = 32;      // legacy block
 constexpr int QK_K = 256;   // K-quant block
 
-// scale/min unpacking shared by Q4_K and Q5_K (6-bit packed into 12 bytes).
-inline void get_scale_min_k4(int j, const uint8_t* q, uint8_t& d, uint8_t& m) {
-    if (j < 4) {
-        d = q[j] & 63;
-        m = q[j + 4] & 63;
-    } else {
-        d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
-        m = (q[j + 4] >>  4) | ((q[j - 0] >> 6) << 4);
-    }
-}
+// get_scale_min_k4 (Q4_K/Q5_K 6-bit scale/min unpack) now lives in quant.h so the
+// integer K-quant kernels in neon.cpp share one definition.
 
 void dequant_q8_0(const uint8_t* p, float* y, int64_t n) {
     for (int64_t b = 0; b < n / QK; ++b) {

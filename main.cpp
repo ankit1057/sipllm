@@ -37,7 +37,7 @@ static void print_usage(const char* prog) {
         "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
         "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
         "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy] [--schedule P]\n"
-        "          [--ram-budget BYTES|N{K,M,G}] [--fast]\n"
+        "          [--ram-budget BYTES|N{K,M,G}] [--fast] [--spec N]\n"
         "          [--kosh] [--kosh-max-run N] [--rtk] [--reuse]\n"
         "          [--save-session F] [--load-session F]\n"
         "          [--chat | -i]\n",
@@ -98,6 +98,7 @@ int main(int argc, char** argv) {
     bool use_kosh = false, use_rtk = false;
     int  kosh_max_run = 8;
     bool use_reuse = false;
+    int  spec_draft = 0;   // --spec N: prompt-lookup speculative decoding, N draft tokens (0 = off)
     std::string save_path, load_path;
 
     for (int i = 2; i < argc; ++i) {
@@ -155,6 +156,7 @@ int main(int argc, char** argv) {
         else if (a == "--kosh-max-run") kosh_max_run = std::stoi(next("8"));
         else if (a == "--rtk") use_rtk = true;
         else if (a == "--reuse") use_reuse = true;
+        else if (a == "--spec") spec_draft = std::stoi(next("3"));
         else if (a == "--save-session") { save_path = next(""); use_reuse = true; }
         else if (a == "--load-session") { load_path = next(""); use_reuse = true; }
         else if (a == "--profile-info") {
@@ -226,6 +228,7 @@ int main(int argc, char** argv) {
         if (use_rtk)  plugins.set_rtk(make_rtk_v0());
         if (use_kosh || use_rtk) rt.set_plugins(&plugins);
         if (use_reuse) rt.set_context_reuse(true);
+        if (spec_draft > 0) rt.enable_speculative_decoding(spec_draft);
         if (!load_path.empty() && !rt.load_session(load_path))
             fprintf(stderr, "warning: could not load session '%s'\n", load_path.c_str());
 
@@ -405,6 +408,13 @@ int main(int argc, char** argv) {
             rt.thread_pool()->stats.steals.load(),
             rt.thread_pool()->stats.idle_time_us.load() / 1000.0,
             rt.thread_pool()->stats.barrier_time_us.load() / 1000.0);
+        if (st.spec_active) {
+            double acc = st.spec_drafted > 0
+                ? 100.0 * (double)st.spec_accepted / (double)st.spec_drafted : 0.0;
+            fprintf(stderr, "spec decode:     %lld drafted, %lld accepted (%.1f%%), %lld verify passes\n",
+                    (long long)st.spec_drafted, (long long)st.spec_accepted, acc,
+                    (long long)st.spec_batches);
+        }
         if (st.kosh_active || st.rtk_active || st.reuse_active) {
             fprintf(stderr, "── plugins ───────────────\n");
             if (st.kosh_active) {

@@ -65,6 +65,15 @@ inline void log_impl(LogLevel lvl, const char* tag, const char* fmt, ...) {
 
 // ---- timing ---------------------------------------------------------------
 // Monotonic seconds as a double. Used for TTFT / tokens-per-second reporting.
+inline std::string get_tmp_dir() { 
+    if (const char* t = std::getenv("TMPDIR")) return t; 
+#ifdef _WIN32 
+    if (const char* t = std::getenv("TEMP")) return t; 
+    if (const char* t = std::getenv("TMP")) return t; 
+#endif 
+    return "/tmp"; 
+} 
+
 inline double now_sec() {
     using clk = std::chrono::steady_clock;
     return std::chrono::duration<double>(clk::now().time_since_epoch()).count();

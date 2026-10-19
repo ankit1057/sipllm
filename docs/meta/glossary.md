@@ -85,7 +85,7 @@ resident weights track layer width, not model depth. Real single-layer:
 `--fast` routes Q8_0 projections through an int8 SDOT (signed dot-product) kernel
 (`matmul_q8_0_i8`), ARM-only (`__ARM_FEATURE_DOTPROD`), quantizing the activation
 for near-parity Q8 decode. It is **opt-in and an approximation** — the exact
-fp32-dequant path stays the correctness oracle. Q8_0-only; no AVX2 equivalent.
+fp32-dequant path stays the correctness oracle. Covers Q8_0, Q4_K and Q6_K; NEON `sdot` verified on hardware, the AVX2 equivalent is cross-compiled only.
 
 ## Streaming
 Loading a transformer block's weights from disk, running it, freeing it, and

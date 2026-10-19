@@ -60,6 +60,26 @@ else
     get_rss() { grep -i 'maximum resident set size' "$1" | awk -F': ' '{print $2 * 1024}' | head -1; }
 fi
 
+
+# ---- load guard (scientific validity) ---------------------------------------
+# A benchmark taken while another process owns the CPU is not a measurement.
+# Record the 1-minute load average and the hungriest foreign process in the
+# JSON meta, and refuse to run when load exceeds the thread count unless the
+# caller sets LOAD_OVERRIDE=1 (then the run is tagged "contended").
+LOAD_1M="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+TOP_PROC="$(ps -eo pcpu,comm 2>/dev/null | sort -rn | awk 'NR==2{printf "%s%% %s", $1, $2}')"
+LOAD_STATE="quiet"
+if awk -v l="$LOAD_1M" -v t="$THREADS" 'BEGIN{exit !(l > t)}'; then
+    if [ "${LOAD_OVERRIDE:-0}" = "1" ]; then
+        LOAD_STATE="contended"
+        log "WARNING: load ${LOAD_1M} > threads ${THREADS} (top: ${TOP_PROC}); LOAD_OVERRIDE=1 → results tagged contended"
+    else
+        echo "FATAL: 1-min load average ${LOAD_1M} exceeds thread count ${THREADS} (top: ${TOP_PROC})." >&2
+        echo "       Numbers taken now would be contention, not performance. Wait, or LOAD_OVERRIDE=1." >&2
+        exit 2
+    fi
+fi
+log "load guard: load1m=${LOAD_1M} threads=${THREADS} state=${LOAD_STATE} top=${TOP_PROC}"
 [ "$SKIP_BUILD" = "1" ] || make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)" build/llm >/dev/null
 [ -x build/llm ] || { echo "FATAL: build/llm missing" >&2; exit 1; }
 mkdir -p "$OUTDIR"
@@ -108,6 +128,7 @@ done
 # ---- emit JSON + markdown --------------------------------------------------
 ROWS="$ROWS" OUT="$OUT" HOST="$HOST" DATE="$DATE" OS_STR="$OS_STR" CPU_STR="$CPU_STR" \
 GIT_COMMIT="$GIT_COMMIT" NGEN="$NGEN" CTX="$CTX" PROMPT="$PROMPT" THREADS="$THREADS" NREP="$N" \
+LOAD_1M="$LOAD_1M" LOAD_STATE="$LOAD_STATE" TOP_PROC="$TOP_PROC" \
 python3 - <<'PY'
 import json, os
 rows = []
@@ -133,6 +154,9 @@ doc = {
         "prompt": os.environ["PROMPT"], "threads": int(os.environ["THREADS"]),
         "median_of_n": int(os.environ["NREP"]), "cache_state": "warm",
         "peak_rss_source": "/usr/bin/time -l 'maximum resident set size' (bytes)",
+        "load_1m_at_start": float(os.environ.get("LOAD_1M", "0") or 0),
+        "load_state": os.environ.get("LOAD_STATE", "unknown"),
+        "top_foreign_process_at_start": os.environ.get("TOP_PROC", ""),
         "reproduce": "./scripts/bench_ram_budget.sh",
     },
     "ram_budget_sweep": rows,

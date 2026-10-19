@@ -110,11 +110,33 @@ store, a resumable Hugging Face downloader, and phone→Wear OS transfer.
 > Pro) and Wear transfer (OnePlus Watch 2) are the remainder of M6.5. No
 > Android/phone performance numbers are quoted anywhere; they do not exist yet.
 
+## Wave 12 — edge truth (2026-10-19)
+
+Standing goal set this wave: beat LiteRT / MediaPipe LLM Inference on ARM and AMD
+CPUs — an order of magnitude less RAM at competitive speed. Measured on TinyLlama
+**Q4_K_M** (the 4-bit file a phone runs), Apple M3, 4 threads, load-guarded:
+
+| | before (fp32 dequant) | after (`--fast` int8 K-quant) | llama.cpp |
+|:--|--:|--:|--:|
+| resident decode (645 MB) | 21.0 tok/s | **59.6 tok/s** | 88–96 tok/s (1323 MB) |
+| resident prefill | 44 tok/s | 73 tok/s | 266 tok/s |
+| streaming decode (122 MB) | 11.7 | 11.9 (I/O-bound) | — |
+| streaming, copy-heavy output, `--spec 5` | 9.7 | **30.7** | — |
+
+Both K-quant kernels (Q4_K, Q6_K) ship for NEON `sdot` and AVX2; **only NEON has
+run on hardware** — on Apple M3 and, the same day, on a OnePlus IV2201 (Dimensity
+900): resident 615 MB at 8.9–12.7 tok/s and streaming 118 MB at 4.7 tok/s against
+llama.cpp's 1251 MB at 18.7 tok/s on that phone; prefill 7.5 vs 39 is the on-device
+bottleneck. `--spec N` (prompt-lookup speculative decoding) is proven
+token-identical to plain decoding and reaches the CLI for the first time. The
+`--ram-budget` planner no longer trades the second stream buffer for one pinned
+layer (it was slower than pure streaming at every budget below 512M). Benchmarks
+now refuse to run on a contended CPU and record the load in their JSON.
+
 ## What comes next
 
-Per the scorecard's own "current largest bottleneck": (1) **K-quant int-dot** —
-the `--fast` path is Q8_0-only, so 4-bit (Q4_K) decode still uses fp32 dequant;
-extending int-dot there is the biggest pending RAM headline. (2) **Speculative
-streaming** to amortize weight movement in the exceeds-RAM regime, where decode
-is disk-bandwidth-bound (arithmetic intensity Θ(1)). See the
-[roadmap](roadmap.html).
+Per the refreshed scorecard: (1) **the AMD half** — the AVX2 K-quant path is
+cross-compiled only; and **a batched int8 kernel for prefill**, the on-device
+bottleneck (a fifth of llama.cpp's prompt speed on the Dimensity 900). (2) the remaining resident gap on M3 (62–67% → parity): fp32 attention/KV and
+prefill (73 vs 266 tok/s). (3) a same-hardware head-to-head against LiteRT-LM's
+CLI. See the [roadmap](roadmap.html).

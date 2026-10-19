@@ -6,6 +6,8 @@
 #include "llm/neon.h"
 #include "llm/mem_plan.h"
 #include "llm/plugin.h"
+#include "llm/semantic_cache.h"
+#include "llm/spec_decoder.h"
 #include "llm/session.h"
 
 #include <cstdio>
@@ -73,6 +75,19 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx, kv_precision);
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
     tok_ = Tokenizer::from_source(*src_);
+}
+
+void Runtime::enable_semantic_cache(size_t max_bytes) {
+    if (!semantic_cache_) {
+        semantic_cache_ = std::make_unique<SemanticCache>(max_bytes, cfg_.n_layers, cfg_.kv_dim());
+    }
+}
+
+void Runtime::enable_speculative_decoding(int max_draft_len) {
+    if (!spec_decoder_) {
+        spec_decoder_ = std::make_unique<PromptLookupDecoder>();
+        max_draft_len_ = max_draft_len;
+    }
 }
 
 std::string Runtime::generate(const std::string& prompt, int max_new,
@@ -159,6 +174,23 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         committed_.resize((size_t)reuse_r);
         st.reused_prefix_tokens = (int)reuse_r;
     }
+
+    // ---- semantic cache (Radix Tree prefix match) ----
+    if (semantic_cache_) {
+        std::vector<float> cached_k, cached_v;
+        int64_t hit_len = semantic_cache_->find_longest_prefix(prompt_ids, cached_k, cached_v);
+        if (hit_len >= (int64_t)prompt_ids.size()) hit_len = (int64_t)prompt_ids.size() - 1;
+        if (hit_len > reuse_r) {
+            int64_t stride = hit_len * cfg_.kv_dim();
+            for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+                kv_->inject(l, cached_k.data() + l * stride, cached_v.data() + l * stride, hit_len);
+            }
+            pos_ = hit_len;
+            committed_.assign(prompt_ids.begin(), prompt_ids.begin() + hit_len);
+            reuse_r = hit_len;
+            st.semantic_cache_hits = hit_len;
+        }
+    }
     st.processed_tokens = (int)((int64_t)prompt_ids.size() - reuse_r);
 
     // ---- prefill (RFC-007: single-pass batched) ----
@@ -188,7 +220,7 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     // ---- decode ----
     if (profile_sink_) tf_->enable_profiling(true);
     double t_decode_start = now_sec();
-    for (int n = 0; n < max_new; ++n) {
+    for (int n = 0; n < max_new; ) {
         if (next < 0) break;
         if (tok_.is_eog(next)) break;
         if (pos_ >= kv_->max_ctx()) break;
@@ -198,12 +230,71 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         ++st.gen_tokens;
         if (on_token && !on_token(piece, next)) break;
 
-        const float* logits = tf_->forward(next, pos_);
         committed_.push_back(next);
-        ++pos_;
-        if (rtk) rtk->on_step(kv_view());
-        if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
-        next = sampler.sample(logits, vocab);
+        ++n;
+
+        // ---- speculative decoding (prompt lookup; opt-in, default OFF) ------
+        // When no draft is available this iteration is byte-identical to the
+        // plain path below: one forward, one sample.
+        std::vector<int64_t> draft;
+        if (spec_decoder_ && n < max_new && pos_ + max_draft_len_ < kv_->max_ctx()) {
+            st.spec_active = true;
+            draft = spec_decoder_->draft(committed_, std::min(max_draft_len_, max_new - n));
+        }
+
+        if (draft.empty()) {
+            const float* logits = tf_->forward(next, pos_);
+            ++pos_;
+            if (rtk) rtk->on_step(kv_view());
+            if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
+            next = sampler.sample(logits, vocab);
+        } else {
+            // One batched verify pass over [next, draft...] streams every layer
+            // ONCE for K+1 positions. Step i's logits are the model's prediction
+            // after consuming batch[i]; draft[i] is accepted iff the sampler
+            // would have produced it there, so every emitted token is still
+            // sampled from the model's own distribution given its true prefix.
+            const int K = (int)draft.size();
+            std::vector<int64_t> batch;
+            batch.reserve(K + 1);
+            batch.push_back(next);
+            batch.insert(batch.end(), draft.begin(), draft.end());
+            ++st.spec_batches;
+            st.spec_drafted += K;
+
+            const float* spec_logits = tf_->spec_forward(batch.data(), K + 1, pos_);
+            if (rtk) rtk->on_step(kv_view());
+            if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
+
+            for (int i = 0; i <= K; ++i) {
+                const float* step_logits = spec_logits + (size_t)i * vocab;
+                int64_t sampled = sampler.sample(step_logits, vocab);
+                ++pos_;   // batch[i] is now consumed at position pos_-1
+
+                if (i == K) {
+                    // Every draft token verified; `sampled` is the prediction
+                    // for the next step, exactly as the plain path would have.
+                    next = sampled;
+                    break;
+                }
+                if (sampled != draft[i]) {
+                    // Reject: KV written for draft[i..] is stale beyond pos_.
+                    kv_->set_seq_len(pos_);
+                    next = sampled;
+                    break;
+                }
+                // Accept draft[i]. Mirror the top-of-loop emission exactly,
+                // including the end-of-generation and context checks.
+                ++st.spec_accepted;
+                if (tok_.is_eog(draft[i]) || n >= max_new) { next = -1; break; }
+                piece = tok_.decode_token(draft[i]);
+                output += piece;
+                ++st.gen_tokens;
+                if (on_token && !on_token(piece, draft[i])) { next = -1; break; }
+                committed_.push_back(draft[i]);
+                ++n;
+            }
+        }
     }
     if (profile_sink_) tf_->enable_profiling(false);
     double t_end = now_sec();
@@ -222,6 +313,11 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         st.rtk_steps         = rm.steps;
         st.rtk_max_seq       = rm.max_seq;
         st.rtk_peak_kv_bytes = rm.peak_kv_bytes;
+    }
+    if (semantic_cache_ && pos_ > 0) {
+        auto k_fn = [&](int64_t l, int64_t p) -> const float* { return kv_->k(l, p); };
+        auto v_fn = [&](int64_t l, int64_t p) -> const float* { return kv_->v(l, p); };
+        semantic_cache_->commit(committed_, k_fn, v_fn);
     }
     if (stats) *stats = st;
     return output;

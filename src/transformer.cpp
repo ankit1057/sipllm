@@ -575,4 +575,63 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
     return logits_.data();
 }
 
+
+const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t start_pos) {
+    if (n <= 0) return logits_.data();
+    LLM_CHECK(start_pos + n - 1 < kv_->max_ctx(),
+              "spec_forward: position exceeds context window");
+
+    const int64_t dim = cfg_.dim;
+
+    // 1. Materialize P residual streams
+    resid_.assign((size_t)n * dim, 0.f);
+    for (int64_t i = 0; i < n; ++i) {
+        float* xi = resid_.data() + (size_t)i * dim;
+        loader_->embed_token(tokens[i], xi);
+        if (cfg_.embedding_scale != 1.0f) scale_f32(xi, cfg_.embedding_scale, dim);
+        if (cfg_.learned_pos_emb) loader_->add_pos_embd(start_pos + i, xi);
+    }
+
+    // 2. Stream every layer once for all positions
+    const int64_t C = 32;
+    for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        loader_->loadLayer((int)l);
+        for (int64_t i = 0; i < n; i += C) {
+            int64_t bs = std::min(C, n - i);
+            float* xi = resid_.data() + (size_t)i * dim;
+            block(l, start_pos + i, bs, xi);
+        }
+        loader_->unloadLayer();
+    }
+    kv_->set_seq_len(start_pos + n);
+
+    // 3. Project ALL positions through lm_head
+    spec_logits_.resize((size_t)n * cfg_.vocab_size);
+    WeightRef on = loader_->output_norm_weight();
+    
+    for (int64_t i = 0; i < n; ++i) {
+        std::memcpy(x_.data(), resid_.data() + (size_t)i * dim, dim * sizeof(float));
+        
+        switch (cfg_.block_spec.norm) {
+            case NormKind::LayerNorm:
+                layernorm(xb_.data(), x_.data(), static_cast<const float*>(on.data),
+                          static_cast<const float*>(loader_->output_norm_bias_weight().data),
+                          dim, cfg_.layernorm_eps);
+                break;
+            case NormKind::RMSNormGemma:
+                rmsnorm_gemma(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+                break;
+            case NormKind::RMSNorm:
+            default:
+                rmsnorm(xb_.data(), x_.data(), static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+                break;
+        }
+        
+        float* pos_logits = spec_logits_.data() + (size_t)i * cfg_.vocab_size;
+        loader_->project_output(xb_.data(), pos_logits, pool_);
+        softcap_inplace(pos_logits, cfg_.vocab_size, cfg_.final_logit_softcap);
+    }
+    
+    return spec_logits_.data();
+}
 } // namespace llm

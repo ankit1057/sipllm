@@ -10,7 +10,12 @@
 set -eu
 
 REPO="ankit1057/sipllm"
-VERSION="1.0.0"
+# No prebuilt bundle exists for this version yet (latest tagged release is
+# v0.5.0, which predates the REPL, tools, --spec and the gap-closure work on
+# main). Pointing at an unreleased version makes the fetch below fail fast and
+# the installer build from source, which is the CURRENT engine. When a release
+# is cut, set this to its tag and upload sipllm-<ver>-<os>-<arch>.tar.gz.
+VERSION="0.6.0-dev"
 PREFIX="${SIPLLM_PREFIX:-$HOME/.sipllm}"
 BIN="$PREFIX/bin"
 FORCE_BUILD="${SIPLLM_BUILD:-0}"

@@ -32,7 +32,7 @@ The engine dispatches on `general.architecture` and implements **Llama, Mistral,
 
 ## Which quantization formats can it read?
 
-Dequant is supported for `F32`, `F16`, `BF16`, `Q4_0/1`, `Q5_0/1`, `Q8_0`, and the K-quants `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, plus `IQ4_NL`. **`Q8_1` and `Q8_K` are not dequantizable** (they throw). Only Q4_K and Q6_K have NEON dequant fast paths, and the `--fast` int8 SDOT kernel is **Q8_0-only and ARM-only** (`__ARM_FEATURE_DOTPROD`) — it is an approximation, so the fp32-dequant path stays the correctness oracle.
+Dequant is supported for `F32`, `F16`, `BF16`, `Q4_0/1`, `Q5_0/1`, `Q8_0`, and the K-quants `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, plus `IQ4_NL`. **`Q8_1` and `Q8_K` are not dequantizable** (they throw). Q4_K and Q6_K have NEON dequant fast paths. The `--fast` int8 kernels cover **Q8_0, Q4_K and Q6_K** on ARM NEON `sdot` (`__ARM_FEATURE_DOTPROD`, verified on Apple M3) and on x86-64 AVX2 (cross-compiled only — not yet run on real x86 hardware); they quantize the activation to int8, so the fp32-dequant path stays the correctness oracle and the default.
 
 ## What does `--fast` actually do?
 

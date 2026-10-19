@@ -23,6 +23,14 @@ WARN     := -Wall -Wextra -Wno-unused-parameter
 OPT      := -O3 -funroll-loops -fno-math-errno
 INCLUDE  := -Iinclude -I.
 LDLIBS   := -lpthread
+# Android (NDK clang, bionic) ships pthreads inside libc and has no libpthread;
+# a cross-build such as `make CXX=.../aarch64-linux-android29-clang++` must not
+# ask for it or ld.lld fails with "unable to find library -lpthread".
+ifneq (,$(findstring android,$(CXX)))
+  LDLIBS := -static-libstdc++
+  # libc++ is linked statically so the binaries run from /data/local/tmp without a
+  # libc++_shared.so beside them ("cannot locate symbol ...bad_function_call" otherwise).
+endif
 
 # Per-arch tuning. By default -march=native lights up the host's SIMD:
 #   aarch64 -> asimddp/i8mm/sve2/bf16 (the NEON kernels in simd.h/neon.cpp)

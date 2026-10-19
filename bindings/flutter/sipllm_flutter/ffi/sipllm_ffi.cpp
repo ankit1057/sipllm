@@ -87,6 +87,7 @@ void sipllm_params_default(sipllm_params* out) {
   out->residency_fp32 = 0;
   out->force_budget = 0;
   out->schedule_policy = SIPLLM_SCHED_PROPORTIONAL2;
+  out->spec_draft = 0;
 }
 
 void sipllm_sampler_default(sipllm_sampler* out) {
@@ -128,6 +129,7 @@ sipllm_ctx* sipllm_open(const char* model_path, const sipllm_params* p,
     auto ctx = std::unique_ptr<sipllm_ctx>(new sipllm_ctx());
     ctx->rt = std::make_unique<Runtime>(std::move(src), opt, params.max_ctx, threads,
                                         params.ram_budget_bytes, params.force_budget != 0);
+    if (params.spec_draft > 0) ctx->rt->enable_speculative_decoding(params.spec_draft);
     if (ctx->rt->thread_pool()) {
       ctx->rt->thread_pool()->set_policy(
           to_policy(tuned_policy >= 0 ? tuned_policy : params.schedule_policy));

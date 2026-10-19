@@ -49,7 +49,8 @@ double max_abs_diff(const std::vector<float>& a, const std::vector<float>& b) {
 } // namespace
 
 std::vector<SelfTestResult> run_selftests(const std::string& tmpdir) {
-    Ctx c{tmpdir};
+    std::string actual_tmp = tmpdir.empty() ? get_tmp_dir() : tmpdir;
+    Ctx c{actual_tmp};
     std::vector<SelfTestResult> out;
 
     // Task 1 — Tensor

@@ -10,6 +10,8 @@
 #include "llm/model.h"
 #include "llm/sampler.h"
 #include "llm/tokenizer.h"
+#include "llm/semantic_cache.h"
+#include "llm/spec_decoder.h"
 #include "llm/transformer.h"
 #include "llm/weight_source.h"
 
@@ -49,6 +51,12 @@ struct GenStats {
     bool     kosh_active = false;
     int64_t  kosh_tokens_in = 0;
     int64_t  kosh_tokens_out = 0;
+    // Speculative decoding (prompt-lookup, opt-in via --spec N). All zero/false
+    // on the default path.
+    bool     spec_active = false;
+    int64_t  spec_batches = 0;   // verify passes that carried >= 1 draft token
+    int64_t  spec_drafted = 0;   // draft tokens proposed
+    int64_t  spec_accepted = 0;  // draft tokens accepted (= model-free tokens)
     bool     rtk_active = false;
     uint64_t rtk_steps = 0;
     int64_t  rtk_max_seq = 0;
@@ -57,6 +65,7 @@ struct GenStats {
     bool reuse_active = false;
     int  reused_prefix_tokens = 0;
     int  processed_tokens = 0;
+    uint64_t semantic_cache_hits = 0;
 };
 
 class Runtime {
@@ -117,6 +126,13 @@ public:
     // load_session resets the runtime and returns false on any mismatch
     // (magic/version/model-id/dims) or IO error — a session is only valid for
     // the model that wrote it.
+    // Enable Semantic Cache (Radix Tree + memcpy injection)
+    void enable_semantic_cache(size_t max_bytes);
+    
+    // Enable Speculative Decoding (Prompt Lookup)
+    void enable_speculative_decoding(int max_draft_len = 3);
+    bool speculative_enabled() const { return spec_decoder_ != nullptr; }
+
     bool save_session(const std::string& path) const;
     bool load_session(const std::string& path);
 
@@ -135,6 +151,9 @@ private:
     PluginHost* host_ = nullptr;   // optional, non-owning plugin seam
     bool reuse_ = false;                 // cross-turn context reuse (opt-in)
     std::vector<int64_t> committed_;     // mirrors tokens in KV [0,pos_) (for reuse + session save)
+    std::unique_ptr<class SemanticCache> semantic_cache_;
+    std::unique_ptr<class SpecDecoder> spec_decoder_;
+    int max_draft_len_ = 0;
 };
 
 } // namespace llm

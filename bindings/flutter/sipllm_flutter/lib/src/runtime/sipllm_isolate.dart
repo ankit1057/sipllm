@@ -96,6 +96,7 @@ _OpenResult _open(SipllmBindings b, String modelPath, SipllmParams p) {
     r.residencyFp32 = p.residencyFp32 ? 1 : 0;
     r.forceBudget = p.forceBudget ? 1 : 0;
     r.schedulePolicy = p.schedulePolicy.code;
+    r.specDraft = p.specDraft;
 
     final pathC = modelPath.toNativeUtf8(allocator: arena);
     final errC = arena.allocate<Uint8>(512).cast<Utf8>();

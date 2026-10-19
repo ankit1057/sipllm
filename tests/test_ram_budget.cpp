@@ -202,6 +202,33 @@ TEST(ram_budget_planner) {
     CHECK_MSG(p3.ctx_capped, "minimum budget caps ctx");
     CHECK_MSG(!p3.stream_lm_head, "tied model head ignores stream flag");
     CHECK_MSG(p3.n_pinned_est == 0, "minimum budget pins nothing");
+
+    // Partial residency: with room for exactly 5 layers' worth of weights the
+    // planner can pick {2 buffers + 3 pinned} or {1 buffer + 4 pinned} at the
+    // same RSS. The second buffer overlaps I/O with compute for EVERY streamed
+    // layer, which measured faster than one more pinned layer (see the score
+    // tiers in mem_plan.cpp), so the ring must keep its depth.
+    const size_t layer = p1.ledger.pinned / 8;
+    req.ctx_req = 1024; req.ctx_explicit = true;
+    req.budget_bytes = p1.ledger.total() - 3 * layer;
+    MemoryPlan p4 = plan_memory(f, cfg, req);
+    CHECK_MSG(p4.feasible, "5-layer budget is feasible");
+    CHECK_MSG(p4.ctx == 1024, "5-layer budget keeps the requested ctx");
+    CHECK_MSG(p4.n_buffers == 2, "keeps the 2-deep ring over one more pinned layer");
+    CHECK_MSG(p4.n_pinned_est == 3, "pins the remainder after the ring");
+    CHECK_MSG(p4.ledger.total() <= req.budget_bytes, "stays under budget");
+
+    // Room for 1 layer only: the ring itself needs 2, so the planner must fall
+    // back to a single buffer and 0 pinned rather than fail.
+    req.budget_bytes = p1.ledger.total() - 7 * layer;
+    MemoryPlan p5 = plan_memory(f, cfg, req);
+    CHECK_MSG(p5.feasible, "1-layer budget is feasible");
+    CHECK_MSG(p5.n_buffers == 1 && p5.n_pinned_est == 0, "single buffer when the ring cannot fit");
+
+    // All 8 layers fit: pin everything (ring 0 → reported as 1 buffer).
+    req.budget_bytes = p1.ledger.total();
+    MemoryPlan p6 = plan_memory(f, cfg, req);
+    CHECK_MSG(p6.n_pinned_est == 8 && p6.n_buffers == 1, "all-pinned still wins when it fits");
 }
 
 int main() {

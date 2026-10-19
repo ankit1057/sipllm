@@ -71,6 +71,7 @@ LLAMA_CLI=""; LLAMA_BENCH=""
 [ -n "$LLAMA_BIN" ] && [ -x "$LLAMA_BIN/llama-bench" ] && LLAMA_BENCH="$LLAMA_BIN/llama-bench"
 
 # --- working area -----------------------------------------------------------
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sipllm_bench.XXXXXX")"
 TOYDIR="$WORK/toy"
 mkdir -p "$TOYDIR" "$OUTDIR"
@@ -79,6 +80,26 @@ MANIFEST="$WORK/manifest.tsv"
 trap 'rm -rf "$WORK"' EXIT
 
 log() { printf '\033[36m[bench]\033[0m %s\n' "$*" >&2; }
+# ---- load guard (scientific validity) ---------------------------------------
+# A benchmark taken while another process owns the CPU is not a measurement.
+# Record the 1-minute load average and the hungriest foreign process in the
+# JSON meta, and refuse to run when load exceeds the thread count unless the
+# caller sets LOAD_OVERRIDE=1 (then the run is tagged "contended").
+LOAD_1M="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+TOP_PROC="$(ps -eo pcpu,comm 2>/dev/null | sort -rn | awk 'NR==2{printf "%s%% %s", $1, $2}')"
+LOAD_STATE="quiet"
+if awk -v l="$LOAD_1M" -v t="${THREADS:-4}" 'BEGIN{exit !(l > t)}'; then
+    if [ "${LOAD_OVERRIDE:-0}" = "1" ]; then
+        LOAD_STATE="contended"
+        log "WARNING: load ${LOAD_1M} > threads ${THREADS:-4} (top: ${TOP_PROC}); LOAD_OVERRIDE=1 → results tagged contended"
+    else
+        echo "FATAL: 1-min load average ${LOAD_1M} exceeds thread count ${THREADS:-4} (top: ${TOP_PROC})." >&2
+        echo "       Numbers taken now would be contention, not performance. Wait, or LOAD_OVERRIDE=1." >&2
+        exit 2
+    fi
+fi
+log "load guard: load1m=${LOAD_1M} threads=${THREADS:-4} state=${LOAD_STATE} top=${TOP_PROC}"
+
 
 # --- build ------------------------------------------------------------------
 if [ "$SKIP_BUILD" != "1" ]; then
@@ -144,6 +165,10 @@ for idx in "${!REAL_MODELS[@]}"; do
 done
 
 # --- SipLLM: toy scaling (identical geometry, increasing depth) -------------
+# Toy weights are random, so greedy decoding can hit end-of-sequence on the very
+# first step (observed at 32 layers: every run recorded 0 generated tokens and a
+# 0 tok/s decode). Seeded sampling is equally reproducible and keeps generating,
+# so the per-depth decode and peak-RSS rows stay valid.
 # The core "bounded RSS" experiment. Fixed layer geometry (dim/heads/kv/ffn/
 # vocab); ONLY --layers varies, so on-disk size grows linearly with depth. We
 # sweep depth at TWO context lengths to separate two effects:
@@ -159,7 +184,7 @@ for C in 64 512; do
     ./build/make_toy_model "$toy" --gguf --q8 --layers "$L" --ctx "$C" "${TOY_GEOM[@]}" >/dev/null
     log "SipLLM toy: ${L} layers ctx=${C} x$N"
     record "toy" "$toy" "Q8_0" "pread" "$L" "sipllm" "$NGEN" "$THREADS" \
-      ./build/llm "$toy" -p "a b c" -n "$NGEN" --threads "$THREADS" --greedy
+      ./build/llm "$toy" -p "a b c" -n "$NGEN" --threads "$THREADS" --seed 1
   done
 done
 
@@ -212,6 +237,7 @@ HOST="$HOST" DATE="$DATE" OS_STR="$OS_STR" CPU_STR="$CPU_STR" CORES="$CORES" \
 THREADS="$THREADS" NGEN="$NGEN" PROMPT="$PROMPT" NREP="$N" \
 CACHE_STATE="$CACHE_STATE" CACHE_NOTE="$CACHE_NOTE" POWER_NOTE="$POWER_NOTE" \
 LLAMA_NOTE="$LLAMA_NOTE" GIT_COMMIT="$GIT_COMMIT" MODELS_DIR="$MODELS_DIR" \
+LOAD_1M="$LOAD_1M" LOAD_STATE="$LOAD_STATE" TOP_PROC="$TOP_PROC" \
 python3 "$SCRIPT_DIR/_assemble.py"
 
 log "done -> $OUT"

@@ -93,6 +93,14 @@ public:
 
     size_t bytes() const { return k_.size() + v_.size(); }
 
+    // Inject contiguous float KV data into layer from pos=0 to num_positions
+    void inject(int64_t layer, const float* k_src, const float* v_src, int64_t num_positions) {
+        if (num_positions > cap_) grow_to(num_positions);
+        std::memcpy(k_ptr(layer, 0), k_src, num_positions * kv_dim_ * sizeof(float));
+        std::memcpy(v_ptr(layer, 0), v_src, num_positions * kv_dim_ * sizeof(float));
+        if (num_positions > seq_len_) seq_len_ = num_positions;
+    }
+
 private:
     static constexpr int64_t kInitialCap = 64;
 
