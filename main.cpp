@@ -446,7 +446,7 @@ int main(int argc, char** argv) {
             "sched idle:      %.2f ms\n"
             "sched barrier:   %.2f ms\n",
             rss / 1e6,
-            st.pinned_layers, (int)rt.config().n_layers, budget_note,
+            st.pinned_layers, rt.layer_end() - rt.layer_begin(), budget_note,   // local layers (#70)
             opt.fast_quant ? "on" : "off",
             st.decode_tok_s, st.prefill_tok_s, st.ttft_s,
             st.prompt_tokens, st.gen_tokens,

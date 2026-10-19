@@ -16,6 +16,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sstream>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -110,6 +111,17 @@ Fingerprint get_fp(const uint8_t* p) {
     f.kv_precision = p[28]; f.fast_quant = p[29]; f.residency = p[30];
     f.layer_begin = get32(p + 31); f.layer_end = get32(p + 35);
     return f;
+}
+
+// Process peak RSS (kernel high-water mark): what this machine actually donated.
+double peak_rss_mb() {
+    rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+#if defined(__APPLE__)
+    return ru.ru_maxrss / 1e6;            // bytes on macOS
+#else
+    return ru.ru_maxrss * 1024.0 / 1e6;   // kilobytes on Linux/Android
+#endif
 }
 
 uint64_t fnv1a(uint64_t h, const void* data, size_t n) {
@@ -341,7 +353,8 @@ void serve_worker(Runtime& rt, const WorkerConfig& wc, const std::atomic<bool>* 
             }
             if (!send_frame(fd, MSG_RESULT, resid, n * d * (uint32_t)sizeof(float))) break;
         }
-        fprintf(stderr, "worker: coordinator %s disconnected\n", pip);
+        fprintf(stderr, "worker: coordinator %s disconnected; peak RSS so far %.0f MB, now %.0f MB\n",
+                pip, peak_rss_mb(), current_rss_bytes() / 1e6);
         ::close(fd);
     }
     ::close(lfd);
