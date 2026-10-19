@@ -423,16 +423,21 @@ void matmul_q4_K_il4_sdot(float* Y, const void* Wil4, const float* X, int64_t bs
                             const int8x16_t a2 = vld1q_s8(aq + 32), a3 = vld1q_s8(aq + 48);
                             // Two independent chains per half (integer, so the split is exact):
                             // one token alone no longer waits on 8 dependent SDOTs.
+                            // One token alone: two chains per half, so it does not wait on
+                            // 8 dependent SDOTs. Two or more tokens already give independent
+                            // chains, so skip the extra adds (integer either way: exact).
+                            constexpr bool split = nt == 1;
                             int32x4_t lo0 = vdupq_n_s32(0), lo1 = vdupq_n_s32(0), hi0 = vdupq_n_s32(0), hi1 = vdupq_n_s32(0);
-#define LLM_IL4_LO(acc, v, A, L) acc = vdotq_laneq_s32(acc, vreinterpretq_s8_u8(vandq_u8(w[v], m4)), A, L)
-#define LLM_IL4_HI(acc, v, A, L) acc = vdotq_laneq_s32(acc, vreinterpretq_s8_u8(vshrq_n_u8(w[v], 4)), A, L)
-                            LLM_IL4_LO(lo0, 0, a0, 0); LLM_IL4_LO(lo1, 1, a0, 1); LLM_IL4_LO(lo0, 2, a0, 2); LLM_IL4_LO(lo1, 3, a0, 3);
-                            LLM_IL4_LO(lo0, 4, a1, 0); LLM_IL4_LO(lo1, 5, a1, 1); LLM_IL4_LO(lo0, 6, a1, 2); LLM_IL4_LO(lo1, 7, a1, 3);
-                            LLM_IL4_HI(hi0, 0, a2, 0); LLM_IL4_HI(hi1, 1, a2, 1); LLM_IL4_HI(hi0, 2, a2, 2); LLM_IL4_HI(hi1, 3, a2, 3);
-                            LLM_IL4_HI(hi0, 4, a3, 0); LLM_IL4_HI(hi1, 5, a3, 1); LLM_IL4_HI(hi0, 6, a3, 2); LLM_IL4_HI(hi1, 7, a3, 3);
+#define LLM_IL4_LO(acc, v, A, L) (acc) = vdotq_laneq_s32((acc), vreinterpretq_s8_u8(vandq_u8(w[v], m4)), A, L)
+#define LLM_IL4_HI(acc, v, A, L) (acc) = vdotq_laneq_s32((acc), vreinterpretq_s8_u8(vshrq_n_u8(w[v], 4)), A, L)
+                            LLM_IL4_LO(lo0, 0, a0, 0); LLM_IL4_LO(split ? lo1 : lo0, 1, a0, 1); LLM_IL4_LO(lo0, 2, a0, 2); LLM_IL4_LO(split ? lo1 : lo0, 3, a0, 3);
+                            LLM_IL4_LO(lo0, 4, a1, 0); LLM_IL4_LO(split ? lo1 : lo0, 5, a1, 1); LLM_IL4_LO(lo0, 6, a1, 2); LLM_IL4_LO(split ? lo1 : lo0, 7, a1, 3);
+                            LLM_IL4_HI(hi0, 0, a2, 0); LLM_IL4_HI(split ? hi1 : hi0, 1, a2, 1); LLM_IL4_HI(hi0, 2, a2, 2); LLM_IL4_HI(split ? hi1 : hi0, 3, a2, 3);
+                            LLM_IL4_HI(hi0, 4, a3, 0); LLM_IL4_HI(split ? hi1 : hi0, 5, a3, 1); LLM_IL4_HI(hi0, 6, a3, 2); LLM_IL4_HI(split ? hi1 : hi0, 7, a3, 3);
 #undef LLM_IL4_LO
 #undef LLM_IL4_HI
-                            const int32x4_t lo = vaddq_s32(lo0, lo1), hi = vaddq_s32(hi0, hi1);
+                            int32x4_t lo = lo0, hi = hi0;
+                            if constexpr (split) { lo = vaddq_s32(lo0, lo1); hi = vaddq_s32(hi0, hi1); }
                             const int64_t sb = tt * nb + k * 8 + 2 * j;
                             accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(lo), vmulq_n_f32(s[2 * j], a.xs[sb]));
                             accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(hi), vmulq_n_f32(s[2 * j + 1], a.xs[sb + 1]));
@@ -576,15 +581,14 @@ void matmul_q6_K_il4_sdot(float* Y, const void* Wil4, const float* X, int64_t bs
                                 const int64_t tt = t0 + t;
                                 const int8_t* aq = a.xq.data() + tt * n_in + bi * 32;
                                 const int8x16_t a0 = vld1q_s8(aq), a1 = vld1q_s8(aq + 16);
-                                // Four 2-long chains (integer, exact): an in-order core
-                                // (Cortex-A55) stalls on every dependent SDOT.
-                                int32x4_t dA = vdupq_n_s32(x32[tt * n16 + 2 * bi]), dA1 = vdupq_n_s32(0);
-                                int32x4_t dB = vdupq_n_s32(x32[tt * n16 + 2 * bi + 1]), dB1 = vdupq_n_s32(0);
-                                dA = vdotq_laneq_s32(dA, q[0], a0, 0); dB  = vdotq_laneq_s32(dB,  q[4], a1, 0);
-                                dA1 = vdotq_laneq_s32(dA1, q[1], a0, 1); dB1 = vdotq_laneq_s32(dB1, q[5], a1, 1);
-                                dA = vdotq_laneq_s32(dA, q[2], a0, 2); dB  = vdotq_laneq_s32(dB,  q[6], a1, 2);
-                                dA1 = vdotq_laneq_s32(dA1, q[3], a0, 3); dB1 = vdotq_laneq_s32(dB1, q[7], a1, 3);
-                                dA = vaddq_s32(dA, dA1); dB = vaddq_s32(dB, dB1);
+                                // Two chains per token here (nt >= 2 in practice: nt == 1 takes
+                                // the two-pass path above), so several tokens interleave.
+                                int32x4_t dA = vdupq_n_s32(x32[tt * n16 + 2 * bi]);
+                                int32x4_t dB = vdupq_n_s32(x32[tt * n16 + 2 * bi + 1]);
+                                dA = vdotq_laneq_s32(dA, q[0], a0, 0); dB = vdotq_laneq_s32(dB, q[4], a1, 0);
+                                dA = vdotq_laneq_s32(dA, q[1], a0, 1); dB = vdotq_laneq_s32(dB, q[5], a1, 1);
+                                dA = vdotq_laneq_s32(dA, q[2], a0, 2); dB = vdotq_laneq_s32(dB, q[6], a1, 2);
+                                dA = vdotq_laneq_s32(dA, q[3], a0, 3); dB = vdotq_laneq_s32(dB, q[7], a1, 3);
                                 const int32x4_t s = vmlaq_s32(vmulq_s32(dA, sA), dB, sB);
                                 accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(s), vmulq_n_f32(d4, a.xs[tt * nb + bi]));
                             }
