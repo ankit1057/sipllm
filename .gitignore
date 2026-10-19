@@ -35,3 +35,4 @@ docs/superpowers/
 __pycache__/
 *.pyc
 /build-android/
+/bench/device/

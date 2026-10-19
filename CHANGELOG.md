@@ -6,38 +6,43 @@ Rule 1). Peak RSS is the authoritative cross-runtime number from `/usr/bin/time 
 
 ```
 ============================
-SipLLM North Star   (measured 2026-10-19 · Apple M3 · 4 thr · ctx 512 · warm · load-guarded)
+SipLLM North Star   (measured 2026-10-19 · Apple M3 + OnePlus/Dimensity 900 · 4 thr · ctx 512 · warm)
 ============================
 Peak RSS:              tinyllama Q4_K_M (669 MB file): 122 MB (stream) … 645 MB (fully resident)
                        smollm2-135m Q8_0: 54 MB (stream) … 162 MB (resident)
                        vs llama.cpp CPU (ggml 0.27.0): 1323 MB / 515 MB → 10.8× / 9.5× smaller at min budget
+                       PHONE (Dimensity 900, kernel VmHWM): 118 MB stream … 615 MB resident vs llama.cpp 1251 MB
 Resident Weights:      FLAT 1.5 MB across 4/16/32 toy layers (streaming thesis holds)
                        real: 37.6 MB (smollm2 1-layer) / 106.5 MB (tinyllama 1-layer)
                        pinned dial: up to 143 MB (smollm2) / 630 MB (tinyllama)
 Decode tok/s:          tinyllama Q4_K_M resident: fp32 21.0 → `--fast` int8 **59.6** (llama.cpp 88–96 → 62–67%)
                        tinyllama Q4_K_M stream (122 MB): 11.7 (I/O-bound); `--spec 5` on copy-heavy output: 30.7
                        smollm2 Q8_0 stream 58.9 / resident 67.6 (llama.cpp 366)
+                       PHONE tinyllama Q4_K_M `--fast`: resident 8.9–11.0 (8 thr 12.7) · stream 4.7  vs llama.cpp 18.7
 TTFT:                  tinyllama 123 ms stream · 68 ms resident `--fast`   vs llama.cpp 28 ms
 Prefill Throughput:    tinyllama 37–51 (stream) · 73 (resident `--fast`) tok/s   vs llama.cpp 266
+                       PHONE: 4.4–7.5 tok/s vs llama.cpp 39 — the on-device bottleneck
 Expansion Factor:      5.5× (tinyllama Q4_K_M) · 2.7× (smollm2)  = disk / peak-RSS at min budget
 Largest Runnable Model:MEASURED 2026-07-27 — Llama-2-13B (7.87 GB Q4) in 317 MB peak RSS (25×);
                        Llama-3.1-8B (4.92 GB Q4) in 204 MB (24×). Bounded by layer, not model size.
 Energy / Token:        N/A (needs `sudo powermetrics`; never fabricated)
 
-Current Largest Bottleneck:  Two measured gaps against the standing goal (beat LiteRT /
-                       MediaPipe on ARM + AMD CPUs). (1) No on-device number exists:
-                       nothing has run on a phone or an AMD host; the AVX2 K-quant
-                       path is cross-compiled only. (2) Resident 4-bit decode is 62–67% of
-                       llama.cpp: remaining cost is the fp32 attention/KV path and
-                       per-token lm_head (Q6_K, now int8) plus prefill at 73 vs 266.
-Estimated Gain if Fixed:  (1) turns the RAM thesis into a competitor claim or kills
-                       it — the only step that can. (2) ~1.3× decode (to ~parity), 3× prefill.
-Why this is the next priority:  The runtime now has the kernel it lacked; what it
-                       lacks is evidence on the hardware the goal names. A number on a
-                       Snapdragon/Dimensity phone and on a Zen laptop decides the
-                       roadmap more than any further M3 tuning.
-Confidence:            High on every number above (quiet CPU, load recorded, 3–5 reps,
-                       JSON committed). Zero on phone/AMD — not measured.
+Current Largest Bottleneck:  Measured on the phone the goal names: PREFILL. The batched
+                       `--fast` path loops the single-vector int8 kernel per prompt
+                       token, so prompt processing runs at 4.4–7.5 tok/s on the
+                       Dimensity 900 (llama.cpp 39) and TTFT for a 40-token prompt is
+                       ~4 s. Decode is at ½–⅔ of llama.cpp there; RAM is 2–10.6× less.
+                       Second: the AVX2 K-quant path has never run on x86.
+Estimated Gain if Fixed:  A true batched int8 kernel (quantize bs activations once, one
+                       weight pass per row) → ~bs× fewer weight reads in prefill: 3–5×
+                       on the phone, likely 2× on M3. Needed for any chat use on device.
+Why this is the next priority:  On a phone a user waits for the prompt before the
+                       first token; at 4 s per 40 tokens the RAM win is invisible.
+                       Decode parity is a longer road (attention/KV in fp32); prefill
+                       is a contained kernel change with a measured 5× gap.
+Confidence:            High on every number above (M3: quiet CPU, load recorded; phone:
+                       per-run clocks/temperature/VmHWM captured, 3 reps, JSON committed).
+                       Phone clocks were capped at 1.3–1.5 GHz by the device — floor, not peak.
 ```
 
 ## [0.5.0] — Plugin runtime + persistent context (2026-08-13)
@@ -316,11 +321,53 @@ llama.cpp — the 4-bit path dequantized to fp32. That gap is the named hard par
   50 tg tok/s in 982 MB; LiteRT-LM int4-QAT 379 pp / 55 tg in 1009 MB; model files
   529–657 MB. They hold 1.5–1.9× the model in RAM; SipLLM streaming holds 0.18×.
 
-**Still cannot (one line, per the standing goal):** a phone user has no SipLLM number
-at all yet (no on-device run); an AMD user has an untested AVX2 path; on M3 the
-resident 4-bit decode is 62–67% of llama.cpp, prefill 27%, TTFT 2.4× longer, and no
-same-hardware LiteRT-LM head-to-head has been run — so "better than LiteRT /
-MediaPipe" is a RAM claim with evidence and a speed claim without it.
+**Still cannot (one line, per the standing goal):** on a phone (Dimensity 900) a user
+gets 2–10.6× less RAM than llama.cpp but only half the decode speed and a fifth of the
+prefill; an AMD user has an untested AVX2 path; no same-hardware LiteRT / MediaPipe
+head-to-head has been run — so "better than LiteRT / MediaPipe" is a RAM claim with
+evidence and a speed claim without it.
+
+**On-device, for the first time (OnePlus IV2201, MediaTek Dimensity 900, 2×A78 + 6×A55,
+8 GB, Android 13; shell only, nothing installed, engine at nice 10; evidence captured per
+run: battery temperature, big/little clocks, kernel VmHWM, wall time, full engine stats).**
+`test_neon` 7/7 and `test_spec_equiv` 5/5 pass on the phone's SDOT path. TinyLlama
+Q4_K_M, `--ctx 512`, greedy, 32 tokens, median of 3, 4 threads unless noted. Big cores
+were observed at 1.3–1.5 GHz throughout (battery 14–15%, charging; the governor is not
+readable by the shell user), so treat absolute speeds as a floor for this SoC:
+
+| config | pinned | peak RSS (VmHWM) | decode fp32 | decode `--fast` | prefill `--fast` | TTFT |
+|:--|--:|--:|--:|--:|--:|--:|
+| `--ram-budget 1G` (resident) | 22/22 | 615 MB | 2.84 tok/s | **8.9 tok/s** (3.1×) | 7.5 tok/s | 0.67 s |
+| `--ram-budget 512M` | 13/22 | 452 MB | 2.89 | 7.5 | 7.4 | 0.67 s |
+| `--ram-budget 256M` | 3/22 | 201 MB | 2.55 | 4.8 | 7.3 | 0.68 s |
+| streaming (`--ram-budget 0`) | 0/22 | **118 MB** | 2.68 | 4.7 | 4.4 | 1.13 s |
+| resident, thread sweep `--fast` | 22/22 | 615 MB | — | 2 thr 8.3 · 4 thr 11.0 · 8 thr 12.7 | 8 thr: 6.0 | 8 thr: 0.83 s |
+
+`--spec 5` on the phone (copy-heavy prompt, `--fast`): streaming 4.9 → 6.4 tok/s
+(+30%, 24/29 drafts accepted); resident 8.6 → 7.9 (−9%). With the int8 kernels the
+phone is compute-bound even when streaming, so batching K+1 positions per layer pass
+buys little — the opposite of the M3 streaming regime. Prefill is ~7–11 tok/s on this
+SoC at every budget: the batched `--fast` path still calls the single-vector kernel
+per prompt token, so prompt processing is the next on-device bottleneck.
+
+**llama.cpp on the same phone, same file** (NDK build of ggml 0.27 / llama 0.7.0-dev,
+CPU, `llama-bench -p 16 -n 32 -r 3`, same wrapper): 4 threads **18.7 tok/s** decode /
+39.3 prefill, 8 threads 16.0 / 52.2, peak RSS (VmHWM) **1251 MB** (mmap, whole file
+touched). Head-to-head on the OnePlus:
+
+| | peak RSS | decode | prefill |
+|:--|--:|--:|--:|
+| llama.cpp, 4 thr | 1251 MB | 18.7 tok/s | 39 tok/s |
+| SipLLM `--fast`, resident (1G), 4 thr | **615 MB** (2.0× less) | 8.9–11.0 tok/s (48–59%) | 7.5–8.7 (19–22%) |
+| SipLLM `--fast`, resident, 8 thr | 615 MB | 12.7 tok/s (68% of llama.cpp's best) | 6.0 |
+| SipLLM `--fast`, streaming (0), 4 thr | **118 MB** (10.6× less) | 4.7 tok/s (25%) | 4.4 |
+
+The RAM half of the standing goal holds on a real phone: 2× less resident, 10.6×
+less streaming, with a usable 118 MB footprint. The speed half does not yet:
+decode is at roughly half to two-thirds of llama.cpp and prefill at a fifth. The
+phone's prefill gap (not visible on M3, where the same code reached 73 vs 266) is
+the batched `--fast` path — it loops the single-vector int8 kernel per prompt token,
+re-reading every weight row per token; a true batched int8 kernel is the next step.
 
 **Android:** the engine and the kernel tests cross-compile for arm64 Android with
 the NDK (`make CXX=.../aarch64-linux-android29-clang++ ARCHFLAGS="-march=armv8.2-a+dotprod+fp16"`;

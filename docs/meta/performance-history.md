@@ -124,7 +124,10 @@ CPUs — an order of magnitude less RAM at competitive speed. Measured on TinyLl
 | streaming, copy-heavy output, `--spec 5` | 9.7 | **30.7** | — |
 
 Both K-quant kernels (Q4_K, Q6_K) ship for NEON `sdot` and AVX2; **only NEON has
-run on hardware**. `--spec N` (prompt-lookup speculative decoding) is proven
+run on hardware** — on Apple M3 and, the same day, on a OnePlus IV2201 (Dimensity
+900): resident 615 MB at 8.9–12.7 tok/s and streaming 118 MB at 4.7 tok/s against
+llama.cpp's 1251 MB at 18.7 tok/s on that phone; prefill 7.5 vs 39 is the on-device
+bottleneck. `--spec N` (prompt-lookup speculative decoding) is proven
 token-identical to plain decoding and reaches the CLI for the first time. The
 `--ram-budget` planner no longer trades the second stream buffer for one pinned
 layer (it was slower than pure streaming at every budget below 512M). Benchmarks
@@ -132,8 +135,8 @@ now refuse to run on a contended CPU and record the load in their JSON.
 
 ## What comes next
 
-Per the refreshed scorecard: (1) **a number on the hardware the goal names** —
-nothing has run on a phone or an AMD host; the AVX2 K-quant path is cross-compiled
-only. (2) the remaining resident gap on M3 (62–67% → parity): fp32 attention/KV and
+Per the refreshed scorecard: (1) **the AMD half** — the AVX2 K-quant path is
+cross-compiled only; and **a batched int8 kernel for prefill**, the on-device
+bottleneck (a fifth of llama.cpp's prompt speed on the Dimensity 900). (2) the remaining resident gap on M3 (62–67% → parity): fp32 attention/KV and
 prefill (73 vs 266 tok/s). (3) a same-hardware head-to-head against LiteRT-LM's
 CLI. See the [roadmap](roadmap.html).

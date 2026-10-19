@@ -20,11 +20,12 @@ SipLLM *sips* weights off storage — one transformer layer at a time — so pea
 > Output accuracy is validated against reference implementations (cosine similarity
 > `1.000000` on F16).
 >
-> **What a user on a phone (ARM) or an AMD laptop still cannot do:** see a SipLLM
-> number measured on their hardware. Everything here is Apple M3. The 4-bit integer
-> kernels (`--fast`, Q4_K/Q6_K) are verified on ARM NEON; the AVX2 path for AMD is
-> cross-compiled only and has never been run. On M3, resident 4-bit decode is now 62–67%
-> of llama.cpp in half the RAM; streaming is I/O-bound at 10.8× less RAM.
+> **What a user on a phone (ARM) or an AMD laptop still cannot do:** match llama.cpp's
+> speed. On a OnePlus (Dimensity 900, 2×A78 + 6×A55) the same TinyLlama Q4_K_M file runs
+> in **615 MB resident at 8.9–12.7 tok/s** or **118 MB streaming at 4.7 tok/s**, against
+> llama.cpp's 1251 MB at 18.7 tok/s — 2–10.6× less RAM at half to two-thirds of the
+> decode speed and a fifth of the prefill. The AVX2 path for AMD is cross-compiled only
+> and has never been run. On Apple M3, resident 4-bit decode is 62–67% of llama.cpp.
 
 **Edge-first, and therefore CPU-first.** This engine targets phones, SBCs, and
 other edge hardware — where there's plenty of storage but very little RAM and
@@ -64,6 +65,22 @@ is the OS figure from `/usr/bin/time -l` (authoritative, cross-runtime).
 AVX2 on x86-64) with the activation quantized per 32-block — the same approximation
 llama.cpp uses. First greedy token matched the exact fp32 path on 6/6 prompts, full
 48-token continuations on 5/6. The exact path stays the default.
+
+**On a phone (OnePlus IV2201, MediaTek Dimensity 900, Android 13; adb shell, nothing
+installed, measured 2026-10-19, `bench/results/device-*.json`):** same file, 4 threads,
+`--ctx 512`, greedy, median of 3. Peak RSS is the kernel's VmHWM.
+
+| runtime | peak RSS | decode | prefill |
+|:--------|---------:|-------:|--------:|
+| llama.cpp (CPU, NDK build) | 1251 MB | 18.7 tok/s | 39 tok/s |
+| **SipLLM** `--fast --ram-budget 1G` (22/22) | **615 MB** | 8.9–11.0 tok/s (8 thr: 12.7) | 7.5 tok/s |
+| **SipLLM** `--ram-budget 1G` (exact fp32) | 615 MB | 2.8 tok/s | 6.4 tok/s |
+| **SipLLM** `--fast` streaming | **118 MB** | 4.7 tok/s | 4.4 tok/s |
+
+Big cores sat at 1.3–1.5 GHz throughout (battery 15%, governor unreadable), so these
+are a floor for the SoC. The kernel and speculative-decoding test suites pass on the
+phone (7/7, 5/5). Prefill is the on-device bottleneck: the batched `--fast` path loops
+the single-vector kernel per prompt token.
 
 **TinyLlama-1.1B Q8_0 (1.17 GB), `--fast`, `--ctx 512`, greedy.** Measured
 2026-07-27 at v0.4.0 (`bench/results/demo-v0.4-*.json`), median of 3:
@@ -307,7 +324,7 @@ Built specifically for edge and resource-constrained environments:
 - **ARM64 NEON Kernels**: int8 `sdot` dot-product kernels for Q8_0, Q4_K and Q6_K (`--fast`), NEON-assisted fp32 dequantization for the exact path, NEON fp16→fp32 conversion.
 - **x86_64 AVX2 / FMA Vector Paths**: Optimized vector dot products with automatic CPU runtime detection and portable scalar fallbacks.
 - **Hardware-Calibrated Auto-Tuning**: `AutoTuner` and `DeviceProfile` automatically benchmark the host hardware on first launch, selecting the optimal thread count and scheduling policy.
-- **Mobile & Embedded**: builds on Android/Termux, Apple Silicon and Linux SBCs. No phone performance numbers are published yet — they do not exist; on-device measurement is open work.
+- **Mobile & Embedded**: builds on Android (NDK, static libc++), Termux, Apple Silicon and Linux SBCs. First phone numbers (Dimensity 900, 2026-10-19) are in the demo above and in `bench/results/device-*.json`; the harness is `scripts/device/`.
 
 ## Validated against llama.cpp
 
@@ -418,7 +435,8 @@ order of magnitude less RAM at competitive speed. The RAM half is measured; the 
 half needs:
 - [x] Integer K-quant kernels (Q4_K, Q6_K × int8 activations): resident 4-bit decode 24% → 62–67% of llama.cpp on M3.
 - [ ] Run and verify the AVX2 path on a real AMD/Intel host (`make test`, then the bench).
-- [ ] On-device numbers from a real phone (Snapdragon / Dimensity) — none exist yet.
+- [x] On-device numbers from a real phone (Dimensity 900): 2–10.6× less RAM than llama.cpp, 48–68% of its decode, 19% of its prefill.
+- [ ] Batched int8 kernel for prefill (the on-device bottleneck: 7.5 vs llama.cpp's 39 tok/s).
 - [ ] Same-hardware head-to-head against LiteRT-LM (published anchor, S24 Ultra CPU, not ours: Gemma3-1B int4 at 50–55 tok/s in ~1 GB).
 - [ ] Remaining M3 gap (62–67% → parity): fp32 attention/KV path, prefill (73 vs 266 tok/s).
 

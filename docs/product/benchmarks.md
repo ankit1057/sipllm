@@ -2,8 +2,8 @@
 
 <div class="hero"><p class="lead"><strong>Correctness is a measurement, not a claim; footprint is a measurement, not a claim.</strong> Every number here is Apple M3, CPU-only, warm cache, median-of-3 or 5, measured 2026-10-19 unless dated otherwise; the harness now records the CPU load and refuses to run on a contended machine. Peak RSS is the authoritative cross-runtime figure from <code>/usr/bin/time -l</code>. All figures are committed as JSON under <code>bench/results/</code>.</p></div>
 
-> [!MEASURED] Host, not device
-> These are measured on **host (Apple M3)**. Android on-device numbers are **pending** — the Flutter/FFI layer (Wave 8) is host-verified only. No phone/watch figure is quoted anywhere in these docs because none has been measured yet.
+> [!MEASURED] Host and, since 2026-10-19, one phone
+> Host numbers are Apple M3. The on-device rows are a OnePlus IV2201 (MediaTek Dimensity 900, Android 13), measured over adb shell with nothing installed; raw per-run evidence (battery temperature, clocks, kernel VmHWM) is captured by `scripts/device/`. No Wear OS figure exists yet.
 
 ## North Star scorecard
 
@@ -56,6 +56,21 @@ TinyLlama-1.1B **Q4_K_M** (669 MB), `--ctx 512`, greedy, 4 threads, warm cache, 
 
 > [!WARNING] Competitor anchor is published, not measured here
 > LiteRT-LM / MediaPipe publish Gemma3-1B dynamic-int4 on a Samsung S24 Ultra CPU (XNNPACK, 4 threads) at 50–55 tok/s decode in 982–1009 MB (model file 529–657 MB). Different model, different hardware — quoted only to size the target. They hold 1.5–1.9× the model in RAM; SipLLM streaming holds 0.18×. No same-hardware head-to-head exists yet.
+
+## On a phone (OnePlus IV2201 · Dimensity 900 · 2026-10-19)
+
+Same TinyLlama Q4_K_M file, 4 threads, `--ctx 512`, greedy, 32 tokens, median of 3; peak RSS = kernel VmHWM; big cores observed at 1.3–1.5 GHz (floor for the SoC):
+
+| Runtime | Peak RSS | Decode | Prefill |
+|:--------|---------:|-------:|--------:|
+| llama.cpp (CPU, NDK build, ggml 0.27) | 1251 MB | 18.7 tok/s | 39 tok/s |
+| SipLLM `--fast --ram-budget 1G` (22/22) | **615 MB** | 8.9–11.0 tok/s (8 thr 12.7) | 7.5 tok/s |
+| SipLLM `--fast --ram-budget 512M` (13/22) | 452 MB | 7.5 tok/s | 7.4 tok/s |
+| SipLLM `--fast --ram-budget 256M` (3/22) | 201 MB | 4.8 tok/s | 7.3 tok/s |
+| SipLLM `--fast` streaming | **118 MB** | 4.7 tok/s | 4.4 tok/s |
+| SipLLM exact fp32, resident | 615 MB | 2.8 tok/s | 6.4 tok/s |
+
+`--spec 5` on the phone: streaming copy-heavy 4.9 → 6.4 tok/s (+30%); resident −9% (compute-bound with the int8 kernels). The kernel (7/7) and speculative-decoding (5/5) test suites pass on the phone.
 
 ## Half the RAM, comparable speed (Q8_0, measured 2026-07-27 at v0.4.0)
 
