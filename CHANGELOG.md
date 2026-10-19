@@ -6,44 +6,97 @@ Rule 1). Peak RSS is the authoritative cross-runtime number from `/usr/bin/time 
 
 ```
 ============================
-SipLLM North Star   (measured 2026-10-19 · Apple M3 + OnePlus/Dimensity 900 · 4 thr · ctx 512 · warm)
+SipLLM North Star   (measured 2026-10-19, wave 16 · Apple M3 + Dimensity 900 phone (2x A78 + 6x A55) · ctx 512 · warm)
 ============================
-Peak RSS:              tinyllama Q4_K_M (669 MB file): 122 MB (stream) … 645 MB (fully resident)
-                       smollm2-135m Q8_0: 54 MB (stream) … 162 MB (resident)
-                       vs llama.cpp CPU (ggml 0.27.0): 1323 MB / 515 MB → 10.8× / 9.5× smaller at min budget
-                       PHONE (Dimensity 900, kernel VmHWM): 118 MB stream … 615 MB resident vs llama.cpp 1251 MB
-Resident Weights:      FLAT 1.5 MB across 4/16/32 toy layers (streaming thesis holds)
-                       real: 37.6 MB (smollm2 1-layer) / 106.5 MB (tinyllama 1-layer)
-                       pinned dial: up to 143 MB (smollm2) / 630 MB (tinyllama)
-Decode tok/s:          tinyllama Q4_K_M resident: fp32 21.0 → `--fast` int8 **59.6** (llama.cpp 88–96 → 62–67%)
-                       tinyllama Q4_K_M stream (122 MB): 11.7 (I/O-bound); `--spec 5` on copy-heavy output: 30.7
-                       smollm2 Q8_0 stream 58.9 / resident 67.6 (llama.cpp 366)
-                       PHONE tinyllama Q4_K_M `--fast`: resident 8.9–11.0 (8 thr 12.7) · stream 4.7  vs llama.cpp 18.7
-TTFT:                  tinyllama 123 ms stream · 68 ms resident `--fast`   vs llama.cpp 28 ms
-Prefill Throughput:    tinyllama 37–51 (stream) · 73 (resident `--fast`) tok/s   vs llama.cpp 266
-                       PHONE: 4.4–7.5 tok/s vs llama.cpp 39 — the on-device bottleneck
-Expansion Factor:      5.5× (tinyllama Q4_K_M) · 2.7× (smollm2)  = disk / peak-RSS at min budget
+Peak RSS:              tinyllama Q4_K_M (669 MB file), fully resident `--fast` (interleaved): M3 667 MB vs llama.cpp
+                       CPU 1317 MB (same session, llama-bench) → 1.97× smaller; phone VmHWM 633–658 MB vs 1251–1280 MB.
+                       Streaming floor (not re-measured this wave): 122 MB M3 / 118 MB phone.
+Resident Weights:      FLAT 1.5 MB across 4/16/32 toy layers; real pinned dial up to 630 MB (tinyllama).
+Decode tok/s:          M3 tinyllama `--fast` + SIPLLM_FAST_LAYOUT=il4: 68.0 (8 thr) vs llama.cpp CPU 92.8 (4 thr) → 73%.
+                       PHONE (same rep, normal clocks): 14.7 (8 thr) vs llama.cpp 18.2 (2 thr, its best) → 81%;
+                       best SipLLM config 15.2–15.6 (8 thr, fixed8). Decode is compute-bound per core, not memory-bound.
+TTFT:                  135-token prompt: M3 0.49 s (8 thr) · phone 2.87 s (8 thr; wave 15 in the same rep: 3.69 s)
+Prefill Throughput:    M3: 274.7 tok/s (8 thr) vs llama.cpp CPU 386.8 → 71%  (native `--fast` 99.3; wave 12: 73)
+                       PHONE (final build, rep at normal clocks): 47.0 (8 thr) / 42.4 (4) / 39.9 (2) vs llama.cpp 71.4 (8) / 52.5 (2) → 66%
+                       (wave 12 scorecard: 4.4–7.5 tok/s).
+Expansion Factor:      5.5× (tinyllama Q4_K_M) · 2.7× (smollm2) = disk / peak-RSS at min budget (not re-measured)
 Largest Runnable Model:MEASURED 2026-07-27 — Llama-2-13B (7.87 GB Q4) in 317 MB peak RSS (25×);
                        Llama-3.1-8B (4.92 GB Q4) in 204 MB (24×). Bounded by layer, not model size.
 Energy / Token:        N/A (needs `sudo powermetrics`; never fabricated)
 
-Current Largest Bottleneck:  Measured on the phone the goal names: PREFILL. The batched
-                       `--fast` path loops the single-vector int8 kernel per prompt
-                       token, so prompt processing runs at 4.4–7.5 tok/s on the
-                       Dimensity 900 (llama.cpp 39) and TTFT for a 40-token prompt is
-                       ~4 s. Decode is at ½–⅔ of llama.cpp there; RAM is 2–10.6× less.
-                       Second: the AVX2 K-quant path has never run on x86.
-Estimated Gain if Fixed:  A true batched int8 kernel (quantize bs activations once, one
-                       weight pass per row) → ~bs× fewer weight reads in prefill: 3–5×
-                       on the phone, likely 2× on M3. Needed for any chat use on device.
-Why this is the next priority:  On a phone a user waits for the prompt before the
-                       first token; at 4 s per 40 tokens the RAM win is invisible.
-                       Decode parity is a longer road (attention/KV in fp32); prefill
-                       is a contained kernel change with a measured 5× gap.
-Confidence:            High on every number above (M3: quiet CPU, load recorded; phone:
-                       per-run clocks/temperature/VmHWM captured, 3 reps, JSON committed).
-                       Phone clocks were capped at 1.3–1.5 GHz by the device — floor, not peak.
+Current Largest Bottleneck:  Phone prefill is still 1.5× behind llama.cpp (47 vs 71 tok/s at
+                       8 threads) and decode ~0.8×. Profile: >95% of prefill time is the
+                       int8 matmuls; the Q4_K IL4 inner loop still spends ~8 float ops per
+                       16 SDOTs on per-32 activation scales. Second, a configuration gap:
+                       the library's default thread schedule (Proportional4, inherited by
+                       the Flutter app) decodes at 11.0 vs 15.0 tok/s with fixed16 on the
+                       phone at 4 threads.
+Estimated Gain if Fixed:  Per-256 activation scales with integer accumulation per super-block
+                       (llama.cpp's Q8_K approach): ~20–25% fewer inner-loop instructions →
+                       hypothesis +15–25% prefill (accuracy must be re-tested; it changes the
+                       numerics). Default schedule fixed16: measured +36% decode for app users
+                       at 4 threads, <3% cost on M3.
+Why this is the next priority:  TTFT is what a phone user waits on; RAM is already 2× better
+                       than llama.cpp at every size, so prefill speed decides whether the RAM
+                       win is usable.
+Confidence:            High: phone numbers are medians of 3 interleaved reps with clocks and
+                       temperature logged (reps 2–3 of the final sweep throttled for every
+                       config; ratios quoted within a rep), explicit --schedule on every run,
+                       accuracy sign-tested over 10 docs. llama.cpp = build 585080d CPU
+                       (repack on), not the ggml 0.27.0 of earlier scorecards.
 ```
+
+## Waves 13–16 — any-CPU binaries, batched and interleaved int8 prefill (2026-10-19)
+
+All four waves are opt-in or behaviour-preserving: a default run produces the
+same tokens as before (output hash unchanged on M3 and phone; the golden matrix,
+which needs a llama.cpp reference build, was not re-run). Evidence: `bench/results/issue68-dispatch-…`, `wave14-…`,
+`wave15-…`, `wave16-il4-q6k-2026-10-19.json`.
+
+### Wave 13 (#68) — Runtime SDOT dispatch: one baseline binary for every ARM core
+- The int8 `--fast` kernels live in `src/neon_sdot.cpp` (the only file built
+  with `+dotprod`); the rest of the engine builds for baseline ARMv8-A. At run
+  time `cpu_has_dotprod()` (HWCAP / sysctl, `SIPLLM_CPU=generic` to force off)
+  picks SDOT or the exact path, so one binary serves cores with and without
+  SDOT (run on Cortex-A55/A78 and Apple M3; not yet on a Cortex-A53). The
+  release workflow builds an x86-64 baseline and an AVX2 binary behind a
+  launcher (not yet exercised by a tag). CI gates: portable aarch64 + x86-64 jobs, and "no SDOT outside
+  neon_sdot.o".
+
+### Wave 14 — Batched int8 prefill kernels (bit-identical per token)
+- `matmul_{q8_0,q4_K,q6_K}_i8_batch`: activations quantized once per batch,
+  one weight pass per tile of 4 tokens; output memcmp-identical to the per-token
+  kernels. Phone prefill +25–45%.
+
+### Wave 15 — Interleaved Q4_K weights (IL4), opt-in
+- `SIPLLM_FAST_LAYOUT=il4` with `--fast` repacks resident Q4_K matrices in place
+  (same size as GGUF) so one SDOT lane serves one row. 10-doc sign test vs the
+  exact path: no detectable accuracy difference (KL ratio 1.006, p = 0.34).
+
+### Wave 16 — Exact IL4 kernel rewrite, interleaved Q6_K, scheduling protocol
+- **Q4_K IL4 kernel rewrite, output byte-identical to wave 15**: vector fp16
+  scales, scales decoded once per row group, split SDOT chains, compile-time
+  token tiles (a runtime tile count spilled the accumulators to the stack).
+  Single-core decode kernel −12% time on Cortex-A78, −27% on Cortex-A55.
+- **Q6_K IL4** (`il4` now covers Q4_K and Q6_K; `il4-q4` keeps the wave-15
+  layout): Q6_K's −32 offset folded into the SDOT accumulator, int8 sub-block
+  scales applied in integer. bs=32 kernels 2.7× (A55-only) / 2.4× (A78-only)
+  vs native batched. Accuracy, 10 docs × 512 tokens vs exact: KL ratio 1.002,
+  top-1 +0.04 pt vs native `--fast` (no detectable difference).
+- **Phone end to end** (Dimensity 900, 135-token prompt, same-rep A/B vs wave 15):
+  prefill +28% (8 threads), +31% (4), +33% (2); decode within −6…+5%
+  (−5% at 2 threads). Known gap: single-token Q6_K IL4 is 13% slower than the
+  native kernel on Cortex-A55 (20% faster on A78).
+- **Fix:** `--no-autotune` applied `SchedulePolicy::Static` (the struct default)
+  as if it were tuned; it now keeps the caller's default. Static is the slowest
+  policy on big.LITTLE (phone decode 4.5–8.0 vs 11–15 tok/s).
+- **Measurement protocol:** every phone run now passes `--no-autotune` and an
+  explicit `--schedule`. Without it, the phone (HOME=/ not writable from adb)
+  re-ran the fp32 autotuner on every launch and could pick a different policy
+  per run; earlier phone numbers carry that noise.
+- **Not changed (maintainer decision pending):** the library's default schedule
+  is `Proportional4`, which the Flutter app inherits; on the phone at 4 threads
+  it decodes at 11.0 tok/s vs 15.0 with `fixed16` (M3 spread across policies <5%).
 
 ## [0.5.0] — Plugin runtime + persistent context (2026-08-13)
 
