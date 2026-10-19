@@ -70,7 +70,7 @@ Same TinyLlama Q4_K_M file, 4 threads, `--ctx 512`, greedy, 32 tokens, median of
 | SipLLM `--fast` streaming | **118 MB** | 4.7 tok/s | 4.4 tok/s |
 | SipLLM exact fp32, resident | 615 MB | 2.8 tok/s | 6.4 tok/s |
 
-`--spec 5` on the phone: streaming copy-heavy 4.9 → 6.4 tok/s (+30%); resident −9% (compute-bound with the int8 kernels). The kernel (7/7) and speculative-decoding (5/5) test suites pass on the phone.
+`--spec 5` on the phone: streaming copy-heavy 4.7–4.9 → 5.5–6.4 tok/s (+18–30% across two passes); resident −9% (compute-bound with the int8 kernels). The kernel (7/7) and speculative-decoding (5/5) test suites pass on the phone.
 
 ## Half the RAM, comparable speed (Q8_0, measured 2026-07-27 at v0.4.0)
 

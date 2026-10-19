@@ -343,8 +343,8 @@ readable by the shell user), so treat absolute speeds as a floor for this SoC:
 | streaming (`--ram-budget 0`) | 0/22 | **118 MB** | 2.68 | 4.7 | 4.4 | 1.13 s |
 | resident, thread sweep `--fast` | 22/22 | 615 MB | — | 2 thr 8.3 · 4 thr 11.0 · 8 thr 12.7 | 8 thr: 6.0 | 8 thr: 0.83 s |
 
-`--spec 5` on the phone (copy-heavy prompt, `--fast`): streaming 4.9 → 6.4 tok/s
-(+30%, 24/29 drafts accepted); resident 8.6 → 7.9 (−9%). With the int8 kernels the
+`--spec 5` on the phone (copy-heavy prompt, `--fast`): streaming 4.7–4.9 → 5.5–6.4 tok/s
+(+18–30% across two passes, 24/29 drafts accepted); resident 8.6–8.8 → 7.8–7.9 (−9%). With the int8 kernels the
 phone is compute-bound even when streaming, so batching K+1 positions per layer pass
 buys little — the opposite of the M3 streaming regime. Prefill is ~7–11 tok/s on this
 SoC at every budget: the batched `--fast` path still calls the single-vector kernel
