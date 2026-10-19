@@ -193,6 +193,82 @@
    "kl_mean": 0.00056,
    "note": "same size as fast-vs-exact"
   },
-  "mechanism": "per-matmul IL4 vs row-major differ ~1e-6 relative (float summation order only; verified on real tensors); residual difference stays ~2e-7 through layer 12, then jumps 70x at layer 13-14: an int8 activation rounding flip. Any reordering of the int8 path samples a different but equal-size quantization noise."
+  "mechanism": "per-matmul IL4 vs row-major differ ~1e-6 relative (float summation order only; verified on real tensors); residual difference stays ~2e-7 through layer 12, then jumps 70x at layer 13-14: an int8 activation rounding flip. Any reordering of the int8 path samples a different but equal-size quantization noise.",
+  "noise_control_2026-10-19": {
+   "method": "native --fast with its layer-0 residual scaled by (1+e), e in {+1e-7,-1e-7,+3e-7} (~1 ulp), vs exact; same 1024-token README/CHANGELOG samples; tools/fast_accuracy + hidden-hook nudge (throwaway)",
+   "rows": [
+    {
+     "text": "README",
+     "variant": "native",
+     "kl_mean": 0.00057,
+     "kl_p99": 0.004945,
+     "top1_pct": 99.12
+    },
+    {
+     "text": "README",
+     "variant": "nudge+",
+     "kl_mean": 0.000614,
+     "kl_p99": 0.003596,
+     "top1_pct": 98.93
+    },
+    {
+     "text": "README",
+     "variant": "nudge-",
+     "kl_mean": 0.000594,
+     "kl_p99": 0.004202,
+     "top1_pct": 98.93
+    },
+    {
+     "text": "README",
+     "variant": "nudge3",
+     "kl_mean": 0.00058,
+     "kl_p99": 0.005431,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "README",
+     "variant": "il4",
+     "kl_mean": 0.00055,
+     "kl_p99": 0.004711,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "native",
+     "kl_mean": 0.000662,
+     "kl_p99": 0.005882,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "nudge+",
+     "kl_mean": 0.000645,
+     "kl_p99": 0.006233,
+     "top1_pct": 98.34
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "nudge-",
+     "kl_mean": 0.000642,
+     "kl_p99": 0.005089,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "nudge3",
+     "kl_mean": 0.000645,
+     "kl_p99": 0.005338,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "il4",
+     "kl_mean": 0.000733,
+     "kl_p99": 0.007055,
+     "top1_pct": 98.05
+    }
+   ],
+   "reading": "native draws: top-1 README 98.83-99.12, CHANGELOG 98.34-98.83; IL4 98.63 / 98.05, below every native draw on both texts. KL: IL4 lowest of all on README, ~11% above the native draws on CHANGELOG. A small real top-1 deficit (~0.3-0.5 pt) is likely; cause unknown; IL4 stays opt-in."
+  }
  }
 }
