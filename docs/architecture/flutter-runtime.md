@@ -20,7 +20,7 @@ The header pins a **threading contract**:
 - A `sipllm_ctx` is **NOT thread-safe** for concurrent `generate()` calls — drive one context from one worker at a time.
 - `sipllm_cancel()` **IS thread-safe**: it flips a `std::atomic<bool>` the decode loop checks at every token boundary, so it can be called from another thread while `generate()` runs.
 
-`sipllm_params` zero-initialized reproduces the CLI's behavior; `sipllm_params_default()` fills the recommended edge defaults (streaming, quantized residency, hardware threads, `Proportional2`, async prefetch).
+`sipllm_params` zero-initialized reproduces the CLI's behavior; `sipllm_params_default()` fills the recommended edge defaults (streaming, quantized residency, hardware threads, `Fixed16`, async prefetch).
 
 <div class="card-grid"><div class="card"><h3>Lifecycle</h3><p><code>sipllm_params_default</code>, <code>sipllm_sampler_default</code>, <code>sipllm_open</code>, <code>sipllm_close</code>.</p></div><div class="card"><h3>Generation</h3><p><code>sipllm_generate</code> (blocking, streams via <code>sipllm_token_cb</code>), <code>sipllm_cancel</code>, <code>sipllm_reset</code>.</p></div><div class="card"><h3>Introspection</h3><p><code>sipllm_get_model_info</code>, <code>sipllm_get_threads</code>, <code>sipllm_embed_dim</code>, <code>sipllm_embed</code>.</p></div><div class="card"><h3>Device / build</h3><p><code>sipllm_version</code>, <code>sipllm_vulkan_compiled</code>, <code>sipllm_vulkan_available</code>, <code>sipllm_vulkan_info</code>, <code>sipllm_hardware_concurrency</code>, <code>sipllm_optimal_threads</code>, <code>sipllm_set_log_level</code>.</p></div></div>
 

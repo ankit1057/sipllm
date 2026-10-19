@@ -45,7 +45,7 @@ ThreadPool::SchedulePolicy to_policy(int32_t p) {
     case SIPLLM_SCHED_PROPORTIONAL2: return ThreadPool::SchedulePolicy::Proportional2;
     case SIPLLM_SCHED_PROPORTIONAL4: return ThreadPool::SchedulePolicy::Proportional4;
     case SIPLLM_SCHED_ADAPTIVE: return ThreadPool::SchedulePolicy::Adaptive;
-    default: return ThreadPool::SchedulePolicy::Proportional2;
+    default: return ThreadPool::SchedulePolicy::Fixed16;
   }
 }
 
@@ -86,7 +86,7 @@ void sipllm_params_default(sipllm_params* out) {
   out->stream_lm_head = 0;
   out->residency_fp32 = 0;
   out->force_budget = 0;
-  out->schedule_policy = SIPLLM_SCHED_PROPORTIONAL2;
+  out->schedule_policy = SIPLLM_SCHED_FIXED16;
   out->spec_draft = 0;
 }
 

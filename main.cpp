@@ -93,7 +93,9 @@ int main(int argc, char** argv) {
     AutoTunerOptions tuner_opt;
     bool schedule_overridden = false;
     bool threads_overridden = false;
-    ThreadPool::SchedulePolicy schedule_policy = ThreadPool::SchedulePolicy::Proportional2;
+    // fixed16: small dynamic chunks; robust on big.LITTLE (wave 16 measurement:
+    // Proportional2 decoded at 40% of fixed16 on a 2+6-core phone at 4-8 threads).
+    ThreadPool::SchedulePolicy schedule_policy = ThreadPool::SchedulePolicy::Fixed16;
     SamplerConfig scfg;
     LayerLoader::Options opt;
     bool use_kosh = false, use_rtk = false;
