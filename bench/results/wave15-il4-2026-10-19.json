@@ -266,9 +266,188 @@
      "kl_mean": 0.000733,
      "kl_p99": 0.007055,
      "top1_pct": 98.05
+    },
+    {
+     "text": "README",
+     "variant": "il4+",
+     "kl_mean": 0.00058,
+     "kl_p99": 0.004173,
+     "top1_pct": 99.41
+    },
+    {
+     "text": "README",
+     "variant": "il4-",
+     "kl_mean": 0.000557,
+     "kl_p99": 0.004191,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "README",
+     "variant": "il43",
+     "kl_mean": 0.000602,
+     "kl_p99": 0.004659,
+     "top1_pct": 98.54
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "il4+",
+     "kl_mean": 0.000692,
+     "kl_p99": 0.005868,
+     "top1_pct": 98.54
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "il4-",
+     "kl_mean": 0.000718,
+     "kl_p99": 0.006797,
+     "top1_pct": 98.73
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "il43",
+     "kl_mean": 0.000843,
+     "kl_p99": 0.007352,
+     "top1_pct": 98.44
     }
    ],
-   "reading": "native draws: top-1 README 98.83-99.12, CHANGELOG 98.34-98.83; IL4 98.63 / 98.05, below every native draw on both texts. KL: IL4 lowest of all on README, ~11% above the native draws on CHANGELOG. A small real top-1 deficit (~0.3-0.5 pt) is likely; cause unknown; IL4 stays opt-in."
+   "reading": "With 4 nudged draws per family: top-1 ranges overlap (README native 98.83-99.12 vs IL4 98.54-99.41; CHANGELOG 98.34-98.83 vs 98.05-98.73); KL README IL4 slightly lower, CHANGELOG IL4 ~15% higher. Nudged draws share most of a trajectory, so they are correlated, not independent samples."
+  },
+  "sign_test_10_docs_512": {
+   "method": "native --fast vs IL4 vs exact on 10 independent repo docs (docs/**/*.md), 512 tokens each, one draw per variant",
+   "rows": [
+    {
+     "text": "cpp-engine",
+     "variant": "native",
+     "kl_mean": 0.000472,
+     "top1_pct": 99.41
+    },
+    {
+     "text": "cpp-engine",
+     "variant": "il4",
+     "kl_mean": 0.000483,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "dart",
+     "variant": "native",
+     "kl_mean": 0.00055,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "dart",
+     "variant": "il4",
+     "kl_mean": 0.00051,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "flutter-runtime",
+     "variant": "native",
+     "kl_mean": 0.00052,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "flutter-runtime",
+     "variant": "il4",
+     "kl_mean": 0.000532,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "benchmarks",
+     "variant": "native",
+     "kl_mean": 0.000524,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "benchmarks",
+     "variant": "il4",
+     "kl_mean": 0.000467,
+     "top1_pct": 98.24
+    },
+    {
+     "text": "performance-history",
+     "variant": "native",
+     "kl_mean": 0.000572,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "performance-history",
+     "variant": "il4",
+     "kl_mean": 0.000585,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "transformer",
+     "variant": "native",
+     "kl_mean": 0.000585,
+     "top1_pct": 98.24
+    },
+    {
+     "text": "transformer",
+     "variant": "il4",
+     "kl_mean": 0.000641,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "quantization",
+     "variant": "native",
+     "kl_mean": 0.000502,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "quantization",
+     "variant": "il4",
+     "kl_mean": 0.000545,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "memory-planner",
+     "variant": "native",
+     "kl_mean": 0.000449,
+     "top1_pct": 98.24
+    },
+    {
+     "text": "memory-planner",
+     "variant": "il4",
+     "kl_mean": 0.000484,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "faq",
+     "variant": "native",
+     "kl_mean": 0.000586,
+     "top1_pct": 97.85
+    },
+    {
+     "text": "faq",
+     "variant": "il4",
+     "kl_mean": 0.000534,
+     "top1_pct": 98.44
+    },
+    {
+     "text": "layer-residency",
+     "variant": "native",
+     "kl_mean": 0.000478,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "layer-residency",
+     "variant": "il4",
+     "kl_mean": 0.000493,
+     "top1_pct": 98.83
+    }
+   ],
+   "result": {
+    "kl_ratio_mean": 1.007,
+    "kl_il4_lower": 3,
+    "kl_il4_higher": 7,
+    "kl_sign_test_p": 0.344,
+    "top1_gap_pt": -0.12,
+    "top1_il4_higher": 2,
+    "top1_il4_lower": 5,
+    "top1_ties": 3,
+    "top1_sign_test_p": 0.453
+   },
+   "conclusion": "No statistically detectable accuracy difference between IL4 and native --fast. The pre-registered 256-token single-passage test failed but was too noisy to resolve a 10% KL difference. This supersedes the 'likely small real deficit' statement in commit a7b62d2."
   }
  }
 }
