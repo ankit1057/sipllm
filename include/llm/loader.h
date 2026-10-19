@@ -76,6 +76,12 @@ public:
         // equivalent (activation is quantized), not bit-identical; off by default.
         bool      fast_quant   = false;
         
+        // Issue #70 (LAN pooling): the contiguous layer range this node runs.
+        // Pinning stays inside it and, unless a policy is given, prefetch wraps
+        // inside it. Default [0, n_layers) == today's behavior, exactly.
+        int       layer_begin  = 0;
+        int       layer_end    = -1;     // -1 = n_layers
+
         // Policy seam to select which layer to prefetch next.
         struct PrefetchPolicy {
             virtual ~PrefetchPolicy() = default;
@@ -88,6 +94,22 @@ public:
         int next(int current_layer, int n_layers, const std::vector<uint8_t>& pinned_mask) const override {
             for (int i = 1; i <= n_layers; ++i) {
                 int nxt = (current_layer + i) % n_layers;
+                if (pinned_mask.empty() || !pinned_mask[nxt]) return nxt;
+            }
+            return -1;
+        }
+    };
+
+    // Prefetch the next layer of [begin, end), wrapping inside the range, so a
+    // node never streams layers another node owns (Issue #70).
+    struct RangeWrapPolicy : public Options::PrefetchPolicy {
+        int begin, end;
+        RangeWrapPolicy(int b, int e) : begin(b), end(e) {}
+        int next(int current_layer, int n_layers, const std::vector<uint8_t>& pinned_mask) const override {
+            (void)n_layers;
+            const int span = end - begin;
+            for (int i = 1; i <= span; ++i) {
+                int nxt = begin + ((current_layer - begin + i) % span);
                 if (pinned_mask.empty() || !pinned_mask[nxt]) return nxt;
             }
             return -1;
