@@ -64,6 +64,19 @@ void matmul_q4_K_i8_batch(float* Y, const void* W, const float* X, int64_t bs,
 void matmul_q6_K_i8_batch(float* Y, const void* W, const float* X, int64_t bs,
                           int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
 
+// ---- Wave 15: Q4_K weights interleaved 4 rows at a time ("IL4") -----------
+// Same bytes as GGUF Q4_K, rearranged for a lane-per-row SDOT kernel: ~2x on
+// prefill, ~1.3-1.7x on decode (measured). Opt-in: SIPLLM_FAST_LAYOUT=il4 with
+// --fast. Results equal the row-major int8 kernels up to float summation order.
+bool q4_K_interleave_supported();   // ARM with SDOT
+// Repack a [n_out, n_in] Q4_K matrix in place (n_out % 4 == 0, n_in % 256 == 0).
+// The buffer must be owned memory (never an mmap of the model file).
+void repack_q4_K_il4_inplace(void* data, int64_t n_out, int64_t n_in);
+// Y[bs][n_out] = X[bs][n_in] . W^T for IL4 weights; any bs >= 1. Requires
+// q4_K_interleave_supported().
+void matmul_q4_K_il4(float* Y, const void* W, const float* X, int64_t bs,
+                     int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+
 // Bulk fp16 -> fp32 using the hardware half-precision converter (asimdhp).
 void fp16_to_fp32_bulk(const uint16_t* src, float* dst, int64_t n);
 

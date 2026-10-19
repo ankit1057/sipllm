@@ -2,6 +2,7 @@
 //  * fp16 bulk convert matches the scalar reference exactly.
 //  * int8 SDOT Q8_0 matmul approximates the fp32 result within the error the
 //    activation-quantization budget allows (relative, per output).
+#include "llm/linear.h"
 #include "llm/neon.h"
 #include "llm/ops.h"
 #include "llm/quant.h"
@@ -219,6 +220,70 @@ static void check_batch_identity(QK kind, const char* what) {
 TEST(q8_0_batch_bit_identical_to_per_token) { check_batch_identity(QK::Q8_0, "q8_0"); }
 TEST(q4_K_batch_bit_identical_to_per_token) { check_batch_identity(QK::Q4_K, "q4_K"); }
 TEST(q6_K_batch_bit_identical_to_per_token) { check_batch_identity(QK::Q6_K, "q6_K"); }
+
+
+// Wave 15: IL4-interleaved Q4_K. Repacking is a pure rearrangement (same size),
+// and the lane-per-row kernel computes the same int8 products as the row-major
+// kernel; only the float summation order differs. Bound: 1e-5 of max |y|,
+// four orders of magnitude below the int8 approximation's own error vs exact.
+TEST(q4_K_il4_matches_row_major_int8) {
+    if (!q4_K_interleave_supported()) { printf("    (skipped: no SDOT on this CPU)\n"); return; }
+    std::mt19937 rng(99);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    const int64_t n_in = 768, n_out = 100;            // 100 = 25 groups of 4
+    const int64_t rb = type_nbytes(DType::Q4_K, n_in);
+    std::vector<uint8_t> Wq((size_t)(rb * n_out));
+    for (int64_t o = 0; o < n_out; ++o) random_q4_K_row(rng, Wq.data() + o * rb, n_in);
+    // Real models have a different d / dmin in every row and super-block; the
+    // shared helper uses constants, which would hide a row mix-up of d / dmin.
+    std::uniform_real_distribution<float> ud(0.2f, 1.8f);
+    for (int64_t o = 0; o < n_out; ++o)
+        for (int64_t k = 0; k < n_in / 256; ++k) {
+            uint8_t* p = Wq.data() + o * rb + k * 144;
+            const uint16_t dh = fp32_to_fp16(ud(rng) / (63.f * 15.f)), mh = fp32_to_fp16(ud(rng) * 0.5f / 63.f);
+            std::memcpy(p, &dh, 2); std::memcpy(p + 2, &mh, 2);
+        }
+    std::vector<uint8_t> Wi = Wq;
+    repack_q4_K_il4_inplace(Wi.data(), n_out, n_in);
+    CHECK_MSG(Wi.size() == Wq.size() && Wi != Wq, "repack keeps the size and changes the layout");
+    ThreadPool pool(4);
+    for (int64_t bs : {1, 2, 3, 4, 5, 31, 32, 33}) {
+        std::vector<float> X((size_t)(bs * n_in));
+        for (auto& v : X) v = nd(rng) * 3.f;
+        for (ThreadPool* tp : {(ThreadPool*)nullptr, &pool}) {
+            std::vector<float> ref((size_t)(bs * n_out)), got((size_t)(bs * n_out), -1.f);
+            matmul_q4_K_i8_batch(ref.data(), Wq.data(), X.data(), bs, n_out, n_in, tp);
+            matmul_q4_K_il4(got.data(), Wi.data(), X.data(), bs, n_out, n_in, tp);
+            float ymax = 0, dmax = 0;
+            for (size_t i = 0; i < ref.size(); ++i) {
+                ymax = std::max(ymax, std::fabs(ref[i]));
+                dmax = std::max(dmax, std::fabs(ref[i] - got[i]));
+            }
+            CHECK_MSG(dmax <= 1e-5f * ymax, "il4 vs row-major at bs=" + std::to_string(bs) +
+                      ": max diff " + std::to_string(dmax) + " vs max |y| " + std::to_string(ymax));
+        }
+    }
+}
+
+
+// Wave 15: an interleaved weight must never reach the exact (fp32-dequant)
+// path, which would misread its bytes. With --fast turned off (the flag is
+// process-global; a second Runtime can flip it), linear() must refuse loudly.
+TEST(il4_weight_refuses_when_fast_is_off) {
+    std::vector<uint8_t> W((size_t)(type_nbytes(DType::Q4_K, 256) * 4), 0);
+    WeightRef w{W.data(), DType::Q4_K, 4, 256};
+    w.layout = kLayoutQ4K_IL4;
+    std::vector<float> x(256, 1.f), y(4, 0.f);
+    const bool was = fast_quant_enabled();
+    set_fast_quant(false);
+    bool threw = false;
+    try { linear(y.data(), w, x.data()); } catch (const std::exception&) { threw = true; }
+    CHECK_MSG(threw, "linear() must refuse IL4 weights when --fast is off");
+    threw = false;
+    try { linear_batch(y.data(), w, x.data(), 1); } catch (const std::exception&) { threw = true; }
+    CHECK_MSG(threw, "linear_batch() must refuse IL4 weights when --fast is off");
+    set_fast_quant(was);
+}
 
 int main() {
     printf("== test_neon == (dotprod=%d)\n", (int)neon_dotprod_available());

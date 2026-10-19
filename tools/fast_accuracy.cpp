@@ -52,8 +52,10 @@ int main(int argc, char** argv) {
     std::string path = argv[1], text = kPassage;
     int64_t want = 256;
     int threads = 4;
+    bool ref_fast = false;   // --ref fast: reference = native --fast instead of exact
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
+        if (a == "--ref" && i + 1 < argc) { ref_fast = std::string(argv[++i]) == "fast"; continue; }
         if (a == "--tokens" && i + 1 < argc) want = std::atoll(argv[++i]);
         else if (a == "--threads" && i + 1 < argc) threads = std::atoi(argv[++i]);
         else if (a == "--text" && i + 1 < argc) {
@@ -65,6 +67,10 @@ int main(int argc, char** argv) {
         const ModelConfig cfg = ModelConfig::from_source(*src);
         const Tokenizer tok = Tokenizer::from_source(*src);
         std::vector<int64_t> ids = tok.encode(text, true);
+        if ((int64_t)ids.size() < want)
+            fprintf(stderr, "warning: the text is only %zu tokens; repeating it to reach %lld. Repeated text is "
+                            "easy to predict and understates the error; pass a longer --text.\n",
+                    ids.size(), (long long)want);
         while ((int64_t)ids.size() < want) {            // repeat the passage if it is short
             std::vector<int64_t> more = tok.encode(text, false);
             ids.insert(ids.end(), more.begin(), more.end());
@@ -72,20 +78,31 @@ int main(int argc, char** argv) {
         ids.resize((size_t)want);
         const int64_t n = (int64_t)ids.size(), V = cfg.vocab_size;
 
-        LayerLoader::Options opt;          // fully resident so both modes read the same bytes
         ThreadPool pool(threads);
-        opt.dequant_pool = &pool;
-        LayerLoader loader(src.get(), cfg, opt);
-        auto run = [&](bool fast) {
+        // SIPLLM_FAST_LAYOUT=il4: the fast run uses Q4_K weights interleaved at
+        // load (wave 15). Each mode gets its own fully pinned loader, so the
+        // exact run always reads native weights.
+        const char* lay = std::getenv("SIPLLM_FAST_LAYOUT");
+        const bool want_il4 = lay && std::string(lay) == "il4" && q4_K_interleave_supported();
+        int n_il4 = 0;
+        auto run = [&](bool fast, bool il4) {
             set_fast_quant(fast);
+            LayerLoader::Options opt;
+            opt.dequant_pool = &pool;
+            opt.ram_budget_bytes = (size_t)1 << 40;      // pin every layer
+            opt.interleave_q4k = fast && il4;
+            LayerLoader loader(src.get(), cfg, opt);
+            if (il4) n_il4 = loader.interleaved_matrices();
             KVCache kv(cfg.n_layers, cfg.kv_dim(), std::max<int64_t>(n, 64));
             Transformer tf(&loader, &kv, &pool);
             const float* all = tf.spec_forward(ids.data(), n, 0);
             return std::vector<float>(all, all + (size_t)n * V);
         };
-        const std::vector<float> ex = run(false);
-        const std::vector<float> ap = run(true);
+        const std::vector<float> ex = run(ref_fast, false);   // reference: exact, or native --fast
+        const std::vector<float> ap = run(true, want_il4);
         const bool fast_active = fast_quant_enabled();
+        printf("fast layout: %s\n", n_il4 > 0 ? ("Q4_K interleaved (" + std::to_string(n_il4) + " matrices)").c_str()
+                                               : "native");
 
         std::vector<double> kls;
         int64_t agree = 0;
@@ -116,7 +133,8 @@ int main(int argc, char** argv) {
         double mean = 0; for (double k : kls) mean += k; mean /= (double)n;
         printf("model: %s  tokens: %lld  vocab: %lld  int8 kernels active: %s\n", path.c_str(),
                (long long)n, (long long)V, fast_active ? "yes" : "NO (fast path fell back to exact)");
-        printf("KL(exact||fast) nats: mean %.6f  p50 %.6f  p99 %.6f  max %.6f\n", mean,
+        printf("reference: %s\n", ref_fast ? "native --fast" : "exact");
+        printf("KL(ref||fast) nats: mean %.6f  p50 %.6f  p99 %.6f  max %.6f\n", mean,
                s[s.size() / 2], s[(size_t)(0.99 * (s.size() - 1))], s.back());
         printf("top-1 agreement: %.2f%% (%lld/%lld)\n", 100.0 * agree / n, (long long)agree, (long long)n);
         printf("max |logit diff|: max %.4f  mean over positions %.4f\n", max_abs, sum_max_abs / n);

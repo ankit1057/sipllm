@@ -76,6 +76,12 @@ public:
         // equivalent (activation is quantized), not bit-identical; off by default.
         bool      fast_quant   = false;
         
+        // Wave 15 (opt-in): repack the Q4_K dense matrices of PINNED layers into
+        // the 4-row interleaved layout in place (same size). Streamed layers
+        // keep the native layout: repacking on every load costs more than it
+        // saves in decode. Only set when --fast and the SDOT kernel are active.
+        bool      interleave_q4k = false;
+
         // Policy seam to select which layer to prefetch next.
         struct PrefetchPolicy {
             virtual ~PrefetchPolicy() = default;
@@ -142,6 +148,7 @@ public:
     const Stats& stats() const { return stats_; }
     size_t resident_bytes() const;           // approx current RAM for weights
     int    pinned_layers() const { return n_pinned_; } // resident hot layers (#37)
+    int    interleaved_matrices() const { return n_interleaved_; }   // wave 15
 
     // GGUF tensor-name suffix for a role (e.g. "attn_q.weight"). Public so the
     // Sip IR importer can resolve the per-role tensor schema without duplicating
@@ -185,6 +192,8 @@ private:
     std::vector<Slot>    pinned_;         // indexed by layer; filled iff pinned
     std::vector<uint8_t> pinned_mask_;    // 1 iff layer is pinned resident
     int                  n_pinned_ = 0;
+    int                  n_interleaved_ = 0;   // wave 15: Q4_K matrices repacked to IL4
+    void interleave_slot(Slot& s);
     size_t               pinned_bytes_ = 0;
     const Slot*          active_ = nullptr;
     std::vector<LayerStat> layer_stats_;   // per-layer io/dequant accounting

@@ -3,6 +3,7 @@
 // (built with +dotprod) and are only entered after a runtime CPU check; the x86
 // AVX2 kernels below stay compile-time (x86 ships separate baseline/AVX2
 // binaries, picked by the `sipllm` launcher).
+#include "llm/common.h"
 #include "llm/neon.h"
 #include "llm/quant.h"
 #include "llm/simd.h"
@@ -315,5 +316,50 @@ LLM_I8_BATCH(matmul_q6_K_i8_batch, matmul_q6_K_i8, matmul_q6_K_sdot_batch)
 
 #undef LLM_I8_BATCH_ARM
 #undef LLM_I8_BATCH
+
+} // namespace llm
+
+// ---- Wave 15: IL4 interleaved Q4_K -----------------------------------------
+namespace llm {
+
+bool q4_K_interleave_supported() {
+#if defined(__aarch64__)
+    return cpu_has_dotprod();
+#else
+    return false;
+#endif
+}
+
+void repack_q4_K_il4_inplace(void* data, int64_t n_out, int64_t n_in) {
+    LLM_CHECK(n_out % 4 == 0 && n_in % 256 == 0, "repack_q4_K_il4: n_out % 4 or n_in % 256");
+    const int64_t nsb = n_in / 256, row_bytes = nsb * 144;
+    uint8_t* base = static_cast<uint8_t*>(data);
+    // A 4-row group's IL4 blocks occupy exactly its 4 rows' bytes, so each group
+    // is rewritten in place from a copy of itself (one group of scratch).
+    std::vector<uint8_t> tmp((size_t)(4 * row_bytes));
+    for (int64_t g = 0; g < n_out / 4; ++g) {
+        uint8_t* region = base + g * 4 * row_bytes;
+        std::memcpy(tmp.data(), region, tmp.size());
+        for (int64_t k = 0; k < nsb; ++k) {
+            BlockQ4KIL4 b;
+            for (int r = 0; r < 4; ++r) {
+                const uint8_t* p = tmp.data() + r * row_bytes + k * 144;
+                std::memcpy(&b.d[r], p, 2);
+                std::memcpy(&b.dmin[r], p + 2, 2);
+                for (int i = 0; i < 12; ++i) b.scales[i][r] = p[4 + i];
+                for (int j = 0; j < 4; ++j)
+                    for (int v = 0; v < 8; ++v)
+                        std::memcpy(&b.qs[j][v][r * 4], p + 16 + j * 32 + v * 4, 4);
+            }
+            std::memcpy(region + k * sizeof(BlockQ4KIL4), &b, sizeof b);
+        }
+    }
+}
+
+void matmul_q4_K_il4(float* Y, const void* W, const float* X, int64_t bs,
+                     int64_t n_out, int64_t n_in, ThreadPool* pool) {
+    LLM_CHECK(q4_K_interleave_supported(), "IL4 Q4_K weights need the ARM SDOT kernel");
+    detail::matmul_q4_K_il4_sdot(Y, W, X, bs, n_out, n_in, pool);
+}
 
 } // namespace llm
