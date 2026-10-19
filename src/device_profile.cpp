@@ -57,7 +57,12 @@ HardwareInfo get_hardware_info() {
     size = sizeof(mem);
     if (sysctlbyname("hw.memsize", &mem, &size, NULL, 0) == 0) info.ram_bytes = mem;
     
-    if (sysctlbyname("hw.pagesize", &val, &size, NULL, 0) == 0) info.page_size = val;
+    // hw.pagesize is 8 bytes on arm64 macOS: read it into a 64-bit value with its
+    // own size (it used to land in the 4-byte `val` with size still 8 from
+    // hw.memsize, overwriting 4 bytes of stack; ASan stack-buffer-overflow).
+    int64_t page = 0;
+    size = sizeof(page);
+    if (sysctlbyname("hw.pagesize", &page, &size, NULL, 0) == 0) info.page_size = page;
 
 #if defined(__aarch64__) || defined(_M_ARM64)
     info.architecture = "arm64";
