@@ -68,6 +68,8 @@ typedef struct {
 } sipllm_params;
 ```
 
+**Compatibility:** `spec_draft` was appended to `sipllm_params`. Earlier field offsets are unchanged, but the library copies the whole struct (`sizeof(sipllm_params)`), so a C/C++ caller compiled against the header *before* `spec_draft` existed must be rebuilt; a prebuilt one would pass a shorter struct and the library would read past its end. The in-tree Dart bindings are generated from this header and always match. A struct-size/version field to make future additions binary-compatible is planned, not implemented.
+
 ### `sipllm_sampler` — sampling configuration
 
 Mirrors `llm::SamplerConfig`. `temperature <= 0` selects greedy decoding.

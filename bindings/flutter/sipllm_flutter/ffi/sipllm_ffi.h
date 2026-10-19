@@ -64,7 +64,9 @@ typedef struct {
   int32_t schedule_policy;   /* SIPLLM_SCHED_*                                                     */
   int32_t spec_draft;        /* prompt-lookup speculative decoding, max draft tokens (--spec N);   */
                              /* 0 = off (default). Output is token-identical to plain decoding.   */
-                             /* Appended last: earlier field offsets are unchanged (ABI-additive). */
+                             /* Appended last, so earlier offsets are unchanged, but NOT binary-   */
+                             /* compatible: the library copies sizeof(sipllm_params), so a caller  */
+                             /* compiled against the older header must be rebuilt.                 */
 } sipllm_params;
 
 /* Sampler configuration. Mirrors llm::SamplerConfig. temperature<=0 => greedy. */
