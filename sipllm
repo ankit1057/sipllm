@@ -21,9 +21,25 @@ mkdir -p "$MODELS_DIR"
 
 # ---- locate the engine binary --------------------------------------------
 # Priority: $SIPLLM_ENGINE, alongside this script, ~/.sipllm/bin, then PATH.
+# x86-64 bundles ship two builds (Issue #68): `llm-engine` for any x86-64 CPU
+# and `llm-engine-avx2` for AVX2+FMA (Haswell/Zen and newer). Use the AVX2 one
+# only when this CPU has both; SIPLLM_CPU=generic forces the baseline build.
+cpu_has_avx2_fma() {
+    [ "${SIPLLM_CPU:-}" = "generic" ] && return 1
+    case "$(uname -m)" in x86_64|amd64) ;; *) return 1 ;; esac
+    if [ -r /proc/cpuinfo ]; then
+        grep -m1 '^flags' /proc/cpuinfo | grep -qw avx2 &&
+        grep -m1 '^flags' /proc/cpuinfo | grep -qw fma
+    else
+        sysctl -n machdep.cpu.leaf7_features 2>/dev/null | grep -qw AVX2 &&
+        sysctl -n machdep.cpu.features 2>/dev/null | grep -qw FMA
+    fi
+}
 find_engine() {
     local self_dir; self_dir="$(cd "$(dirname "$0")" && pwd)"
-    for cand in "${SIPLLM_ENGINE:-}" "$self_dir/build/llm" "$self_dir/llm-engine" "$self_dir/llm" \
+    local avx2=""
+    cpu_has_avx2_fma && avx2="$self_dir/llm-engine-avx2"
+    for cand in "${SIPLLM_ENGINE:-}" "$self_dir/build/llm" "$avx2" "$self_dir/llm-engine" "$self_dir/llm" \
                 "$SIPLLM_HOME/bin/llm-engine" "$SIPLLM_HOME/bin/llm" \
                 "$(command -v llm-engine 2>/dev/null || true)" \
                 "$(command -v llm 2>/dev/null || true)"; do
@@ -33,7 +49,9 @@ find_engine() {
 }
 find_server() {
     local self_dir; self_dir="$(cd "$(dirname "$0")" && pwd)"
-    for cand in "${SIPLLM_SERVER:-}" "$self_dir/build/llm_server" "$self_dir/llm_server" \
+    local avx2=""
+    cpu_has_avx2_fma && avx2="$self_dir/llm_server-avx2"
+    for cand in "${SIPLLM_SERVER:-}" "$self_dir/build/llm_server" "$avx2" "$self_dir/llm_server" \
                 "$SIPLLM_HOME/bin/llm_server" \
                 "$(command -v llm_server 2>/dev/null || true)"; do
         [ -n "$cand" ] && [ -x "$cand" ] && { echo "$cand"; return 0; }

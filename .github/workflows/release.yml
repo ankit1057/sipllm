@@ -28,8 +28,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest,     os: linux,  arch: x86_64,  archflags: "-mavx2 -mfma" }
-          - { runner: ubuntu-24.04-arm,  os: linux,  arch: aarch64, archflags: "" }
+          # Baseline ISA for the main build (runs on any CPU of that arch). On
+          # aarch64 the SDOT kernels are compiled separately and picked at runtime;
+          # on x86_64 a second AVX2+FMA build is shipped and the `sipllm` launcher
+          # picks it when the CPU has both (Issue #68).
+          - { runner: ubuntu-latest,     os: linux,  arch: x86_64,  archflags: "-march=x86-64", avx2: true }
+          - { runner: ubuntu-24.04-arm,  os: linux,  arch: aarch64, archflags: "",              avx2: false }
     steps:
       - uses: actions/checkout@v4
 
@@ -58,6 +62,16 @@ jobs:
       - name: Test
         run: make ARCHFLAGS="${{ matrix.archflags }}" test
 
+      - name: Test the no-int8-kernel fallback (SIPLLM_CPU=generic)
+        run: SIPLLM_CPU=generic make ARCHFLAGS="${{ matrix.archflags }}" test
+
+      - name: Build + test the AVX2 variant (x86_64)
+        if: matrix.avx2
+        run: |
+          make -j"$(getconf _NPROCESSORS_ONLN)" BUILD=build-avx2 ARCHFLAGS="-mavx2 -mfma" build-avx2/llm
+          make BUILD=build-avx2 ARCHFLAGS="-mavx2 -mfma" server
+          make BUILD=build-avx2 ARCHFLAGS="-mavx2 -mfma" test
+
       - name: Sanity — synthesize a toy GGUF and run it
         run: |
           ./build/make_toy_model /tmp/toy.gguf --gguf
@@ -72,6 +86,11 @@ jobs:
           cp sipllm            "$DIST/sipllm"
           cp build/llm         "$DIST/llm-engine"      # CLI looks for llm-engine
           cp build/llm_server  "$DIST/llm_server"      2>/dev/null || true
+          if [ -x build-avx2/llm ]; then                 # x86_64: AVX2+FMA variant
+            cp build-avx2/llm        "$DIST/llm-engine-avx2"
+            cp build-avx2/llm_server "$DIST/llm_server-avx2" 2>/dev/null || true
+            chmod +x "$DIST/llm-engine-avx2"
+          fi
           for t in dump_logits bench inspect_gguf make_toy_model gguf_to_f16; do
             cp "build/$t" "$DIST/$t" 2>/dev/null || true
           done

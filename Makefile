@@ -67,6 +67,16 @@ BUILD := build
 SRC   := $(wildcard src/*.cpp)
 OBJ   := $(patsubst src/%.cpp,$(BUILD)/%.o,$(SRC))
 
+# Runtime CPU dispatch (Issue #68): the engine is built for the target's
+# baseline ISA (whatever ARCHFLAGS says), except src/neon_sdot.cpp, which holds
+# the ARM SDOT kernels and is always built with dotprod on 64-bit ARM targets.
+# neon.cpp only calls into it after asking the CPU (getauxval / sysctl), so one
+# binary runs on ARMv8.0 cores (no SDOT) and still uses SDOT where it exists.
+TARGET_TRIPLE := $(shell $(CXX) -dumpmachine 2>/dev/null)
+ifneq (,$(filter aarch64% arm64%,$(TARGET_TRIPLE)))
+  $(BUILD)/neon_sdot.o: CXXFLAGS += -march=armv8.2-a+dotprod
+endif
+
 # Header dependency tracking: -MMD emits a .d per object listing the headers it
 # pulled in; -include feeds them back so editing a header rebuilds exactly the
 # objects that use it. Without this, header edits silently left stale objects
