@@ -43,6 +43,17 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     set_fast_quant(opt_.fast_quant);   // #demo: opt-in int8 SDOT for Q8_0 (--fast)
     LLM_CHECK(cfg_.n_layers > 0 && cfg_.dim > 0, "runtime: invalid model config");
 
+    // Issue #70: the contiguous layer range this node runs (default: all). The
+    // memory plan and the KV cache cover only those layers; a worker (range not
+    // starting at 0) also keeps the LM head on disk, since it never uses it.
+    layer_begin_ = opt_.layer_begin;
+    layer_end_   = opt_.layer_end < 0 ? (int)cfg_.n_layers : opt_.layer_end;
+    LLM_CHECK(layer_begin_ >= 0 && layer_begin_ < layer_end_ && layer_end_ <= (int)cfg_.n_layers,
+              "runtime: invalid layer range");
+    ModelConfig plan_cfg = cfg_;
+    plan_cfg.n_layers = layer_end_ - layer_begin_;
+    if (layer_begin_ > 0) opt_.stream_lm_head = true;
+
     BudgetRequest req;
     req.budget_bytes = ram_budget_total;
     req.ctx_req = max_ctx;
@@ -55,7 +66,7 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     req.default_ctx_cap = 4096;
     req.kv_precision = kv_precision;
 
-    MemoryPlan plan = plan_memory(*src_, cfg_, req);
+    MemoryPlan plan = plan_memory(*src_, plan_cfg, req);
 
     if (ram_budget_total > 0) {
         fprintf(stderr, "\n%s\n", plan.report.c_str());
@@ -72,7 +83,8 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     pool_ = std::make_unique<ThreadPool>(threads);
     opt_.dequant_pool = pool_.get();
     loader_ = std::make_unique<LayerLoader>(src_.get(), cfg_, opt_);
-    kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx, kv_precision);
+    kv_ = std::make_unique<KVCache>(layer_end_ - layer_begin_, cfg_.kv_dim(), ctx, kv_precision,
+                                    layer_begin_);
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
     tok_ = Tokenizer::from_source(*src_);
 }
@@ -96,6 +108,9 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     Sampler sampler(scfg);
     GenStats st;
     st.ctx_max = (int)kv_->max_ctx();
+    if (tf_->has_remote_segments())
+        LLM_CHECK(!spec_decoder_ && !semantic_cache_ && host_ == nullptr,
+                  "--nodes: --spec, the semantic cache and plugins are not supported with remote layers");
 
 
     // ---- plugin seam setup (Kosh #52 context, RTK #53 runtime/KV) ----------
@@ -340,12 +355,42 @@ static uint64_t session_model_id(const ModelConfig& c) {
     return h;
 }
 
+void Runtime::set_remote_segments(std::vector<RemoteSegment> segs) {
+    // Features whose state spans every layer cannot work with a split model.
+    LLM_CHECK(!spec_decoder_, "--nodes: speculative decoding (--spec) is not supported with remote layers");
+    LLM_CHECK(!semantic_cache_, "--nodes: the semantic cache is not supported with remote layers");
+    LLM_CHECK(host_ == nullptr, "--nodes: plugins (--kosh/--rtk) are not supported with remote layers");
+    LLM_CHECK(layer_begin_ == 0, "--nodes: the coordinator must own layers [0, a)");
+    int64_t expect = layer_end_;
+    for (const RemoteSegment& r : segs) {
+        LLM_CHECK(r.begin == expect, "--nodes: worker ranges must start where the previous one ends "
+                                     "(coordinator owns [0, a), workers cover [a, n_layers) in order)");
+        expect = r.end;
+    }
+    LLM_CHECK(expect == cfg_.n_layers, "--nodes: worker ranges must end at the model's last layer ("
+                                       + std::to_string(cfg_.n_layers) + ")");
+    tf_->set_remote_segments(std::move(segs));
+}
+
+void Runtime::run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos) {
+    LLM_CHECK(begin == layer_begin_ && end == layer_end_, "run_layers: range is not this node's");
+    tf_->run_layers(begin, end, resid, n, start_pos);
+}
+
 bool Runtime::save_session(const std::string& path) const {
+    if (tf_->has_remote_segments()) {   // the KV is split across machines
+        fprintf(stderr, "sessions are not supported with remote layers (--nodes)\n");
+        return false;
+    }
     return session_write(path, committed_, *kv_, (int64_t)committed_.size(),
                          session_model_id(cfg_));
 }
 
 bool Runtime::load_session(const std::string& path) {
+    if (tf_->has_remote_segments()) {
+        fprintf(stderr, "sessions are not supported with remote layers (--nodes)\n");
+        return false;
+    }
     std::vector<int64_t> toks;
     int64_t sl = 0;
     if (!session_read(path, toks, *kv_, &sl, session_model_id(cfg_))) {

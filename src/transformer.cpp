@@ -462,6 +462,13 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
     if (profiling_) { timings_.assign(cfg_.n_layers, LayerTiming{}); }
 
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        if (!remote_.empty()) {                    // #70: layers on another node
+            if (const RemoteSegment* r = remote_at(l)) {
+                r->exec->run(r->begin, r->end, x_.data(), 1, pos);
+                l = r->end - 1;
+                continue;
+            }
+        }
         if (profiling_) {
             double t0 = now_sec();
             loader_->loadLayer((int)l);        // may block awaiting prefetch
@@ -541,6 +548,13 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
     // causal history each position needs is already in the KV cache).
     const int64_t C = 32; // batched GEMM size
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        if (!remote_.empty()) {                    // #70: layers on another node
+            if (const RemoteSegment* r = remote_at(l)) {
+                r->exec->run(r->begin, r->end, resid_.data(), n, start_pos);
+                l = r->end - 1;
+                continue;
+            }
+        }
         loader_->loadLayer((int)l);
         for (int64_t i = 0; i < n; i += C) {
             int64_t bs = std::min(C, n - i);
@@ -577,6 +591,7 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
 
 
 const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t start_pos) {
+    LLM_CHECK(remote_.empty(), "speculative decoding is not supported with remote layers (--nodes)");
     if (n <= 0) return logits_.data();
     LLM_CHECK(start_pos + n - 1 < kv_->max_ctx(),
               "spec_forward: position exceeds context window");
@@ -634,4 +649,31 @@ const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t
     
     return spec_logits_.data();
 }
+void Transformer::set_remote_segments(std::vector<RemoteSegment> segs) {
+    int64_t prev_end = 0;
+    for (const RemoteSegment& r : segs) {
+        LLM_CHECK(r.exec != nullptr, "remote segment without an executor");
+        LLM_CHECK(r.begin >= prev_end && r.begin < r.end && r.end <= cfg_.n_layers,
+                  "remote segments must be sorted, non-overlapping and inside the model");
+        prev_end = r.end;
+    }
+    remote_ = std::move(segs);
+}
+
+void Transformer::run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos) {
+    LLM_CHECK(begin >= 0 && begin < end && end <= cfg_.n_layers, "run_layers: bad layer range");
+    LLM_CHECK(n > 0 && start_pos + n - 1 < kv_->max_ctx(), "run_layers: positions exceed context window");
+    const int64_t dim = cfg_.dim;
+    const int64_t C = 32;   // same chunking as prefill(): identical arithmetic
+    for (int64_t l = begin; l < end; ++l) {
+        loader_->loadLayer((int)l);
+        for (int64_t i = 0; i < n; i += C) {
+            const int64_t bs = std::min(C, n - i);
+            block(l, start_pos + i, bs, resid + (size_t)i * dim);
+        }
+        loader_->unloadLayer();
+    }
+    kv_->set_seq_len(start_pos + n);
+}
+
 } // namespace llm
