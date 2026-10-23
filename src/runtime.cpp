@@ -212,10 +212,13 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     // ---- semantic cache (Radix Tree prefix match) ----
     if (semantic_cache_) {
         std::vector<float> cached_k, cached_v;
-        int64_t hit_len = semantic_cache_->find_longest_prefix(prompt_ids, cached_k, cached_v);
-        if (hit_len >= (int64_t)prompt_ids.size()) hit_len = (int64_t)prompt_ids.size() - 1;
+        const int64_t matched = semantic_cache_->find_longest_prefix(prompt_ids, cached_k, cached_v);
+        // Keep the last prompt token for prefill (it produces the logits). The
+        // staged buffers are laid out [layer][matched][kv_dim], so the per-layer
+        // stride is `matched` even when fewer rows are injected.
+        int64_t hit_len = std::min(matched, (int64_t)prompt_ids.size() - 1);
         if (hit_len > reuse_r) {
-            int64_t stride = hit_len * cfg_.kv_dim();
+            const int64_t stride = matched * cfg_.kv_dim();
             for (int64_t l = 0; l < cfg_.n_layers; ++l) {
                 kv_->inject(l, cached_k.data() + l * stride, cached_v.data() + l * stride, hit_len);
             }
