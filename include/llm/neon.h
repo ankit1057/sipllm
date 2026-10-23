@@ -76,6 +76,11 @@ void repack_q4_K_il4_inplace(void* data, int64_t n_out, int64_t n_in);
 // q4_K_interleave_supported().
 void matmul_q4_K_il4(float* Y, const void* W, const float* X, int64_t bs,
                      int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+// Wave 16: the same 4-row interleave for Q6_K (same size as GGUF; same
+// q4_K_interleave_supported() requirement and in-place rules).
+void repack_q6_K_il4_inplace(void* data, int64_t n_out, int64_t n_in);
+void matmul_q6_K_il4(float* Y, const void* W, const float* X, int64_t bs,
+                     int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
 
 // Bulk fp16 -> fp32 using the hardware half-precision converter (asimdhp).
 void fp16_to_fp32_bulk(const uint16_t* src, float* dst, int64_t n);

@@ -138,6 +138,10 @@ RuntimeProfile tune_if_needed(const HardwareInfo& hw, const AutoTunerOptions& op
 
     if (opt.disable_autotune) {
         LOG_INFO("Auto-tuner disabled, using defaults");
+        // No tuned policy: -1 keeps the caller's default schedule. The struct
+        // default (0) is SchedulePolicy::Static, which callers would apply as
+        // if it had been measured (it is the slowest policy on big.LITTLE).
+        profile.schedule_policy = -1;
         return profile;
     }
 

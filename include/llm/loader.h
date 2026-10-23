@@ -81,6 +81,7 @@ public:
         // keep the native layout: repacking on every load costs more than it
         // saves in decode. Only set when --fast and the SDOT kernel are active.
         bool      interleave_q4k = false;
+        bool      interleave_q6k = false;   // wave 16: same, for Q6_K matrices
 
         // Policy seam to select which layer to prefetch next.
         struct PrefetchPolicy {
@@ -148,7 +149,8 @@ public:
     const Stats& stats() const { return stats_; }
     size_t resident_bytes() const;           // approx current RAM for weights
     int    pinned_layers() const { return n_pinned_; } // resident hot layers (#37)
-    int    interleaved_matrices() const { return n_interleaved_; }   // wave 15
+    int    interleaved_matrices() const { return n_interleaved_; }   // wave 15 (all IL4 types)
+    int    interleaved_q6k_matrices() const { return n_interleaved_q6k_; }   // wave 16
 
     // GGUF tensor-name suffix for a role (e.g. "attn_q.weight"). Public so the
     // Sip IR importer can resolve the per-role tensor schema without duplicating
@@ -192,7 +194,8 @@ private:
     std::vector<Slot>    pinned_;         // indexed by layer; filled iff pinned
     std::vector<uint8_t> pinned_mask_;    // 1 iff layer is pinned resident
     int                  n_pinned_ = 0;
-    int                  n_interleaved_ = 0;   // wave 15: Q4_K matrices repacked to IL4
+    int                  n_interleaved_ = 0;   // wave 15: matrices repacked to IL4 (any type)
+    int                  n_interleaved_q6k_ = 0;   // wave 16: of which Q6_K
     void interleave_slot(Slot& s);
     size_t               pinned_bytes_ = 0;
     const Slot*          active_ = nullptr;

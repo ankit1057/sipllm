@@ -79,20 +79,23 @@ int main(int argc, char** argv) {
         const int64_t n = (int64_t)ids.size(), V = cfg.vocab_size;
 
         ThreadPool pool(threads);
-        // SIPLLM_FAST_LAYOUT=il4: the fast run uses Q4_K weights interleaved at
-        // load (wave 15). Each mode gets its own fully pinned loader, so the
-        // exact run always reads native weights.
-        const char* lay = std::getenv("SIPLLM_FAST_LAYOUT");
-        const bool want_il4 = lay && std::string(lay) == "il4" && q4_K_interleave_supported();
-        int n_il4 = 0;
+        // SIPLLM_FAST_LAYOUT as in the runtime: il4 = Q4_K and Q6_K interleaved
+        // at load (waves 15-16), il4-q4 = Q4_K only. Each mode gets its own fully
+        // pinned loader, so the exact run always reads native weights.
+        const std::string lay = std::getenv("SIPLLM_FAST_LAYOUT") ? std::getenv("SIPLLM_FAST_LAYOUT") : "";
+        const bool il4_ok = q4_K_interleave_supported();
+        const bool want_q4 = il4_ok && (lay == "il4" || lay == "il4-q4"), want_q6 = il4_ok && lay == "il4";
+        const bool want_il4 = want_q4 || want_q6;
+        int n_il4 = 0, n_il4_q6 = 0;
         auto run = [&](bool fast, bool il4) {
             set_fast_quant(fast);
             LayerLoader::Options opt;
             opt.dequant_pool = &pool;
             opt.ram_budget_bytes = (size_t)1 << 40;      // pin every layer
-            opt.interleave_q4k = fast && il4;
+            opt.interleave_q4k = fast && il4 && want_q4;
+            opt.interleave_q6k = fast && il4 && want_q6;
             LayerLoader loader(src.get(), cfg, opt);
-            if (il4) n_il4 = loader.interleaved_matrices();
+            if (il4) { n_il4 = loader.interleaved_matrices(); n_il4_q6 = loader.interleaved_q6k_matrices(); }
             KVCache kv(cfg.n_layers, cfg.kv_dim(), std::max<int64_t>(n, 64));
             Transformer tf(&loader, &kv, &pool);
             const float* all = tf.spec_forward(ids.data(), n, 0);
@@ -101,7 +104,8 @@ int main(int argc, char** argv) {
         const std::vector<float> ex = run(ref_fast, false);   // reference: exact, or native --fast
         const std::vector<float> ap = run(true, want_il4);
         const bool fast_active = fast_quant_enabled();
-        printf("fast layout: %s\n", n_il4 > 0 ? ("Q4_K interleaved (" + std::to_string(n_il4) + " matrices)").c_str()
+        printf("fast layout: %s\n", n_il4 > 0 ? ("interleaved: " + std::to_string(n_il4 - n_il4_q6) + " Q4_K + " +
+                                                std::to_string(n_il4_q6) + " Q6_K matrices").c_str()
                                                : "native");
 
         std::vector<double> kls;

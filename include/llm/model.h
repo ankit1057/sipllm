@@ -177,6 +177,7 @@ constexpr const char* output = "output.weight";
 // Byte layout of a quantized weight (wave 15). Native = GGUF row-major.
 constexpr uint8_t kLayoutNative  = 0;
 constexpr uint8_t kLayoutQ4K_IL4 = 1;   // Q4_K, 4 rows interleaved (neon.h)
+constexpr uint8_t kLayoutQ6K_IL4 = 2;   // Q6_K, 4 rows interleaved (neon.h, wave 16)
 
 struct WeightRef {
     const void* data   = nullptr;

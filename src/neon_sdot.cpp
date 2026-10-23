@@ -13,6 +13,7 @@
 
 #include <arm_neon.h>
 #include <algorithm>
+#include <type_traits>
 #include <vector>
 
 namespace llm {
@@ -364,63 +365,84 @@ void matmul_q4_K_il4_sdot(float* Y, const void* Wil4, const float* X, int64_t bs
     const int64_t nsb = n_in / 256, nb = n_in / 32, ng = n_out / 4;
     const BlockQ4KIL4* Wp = static_cast<const BlockQ4KIL4*>(Wil4);
     const BatchQ8 a(X, bs, n_in);
-    std::vector<int32_t> xsum((size_t)(bs * nb));
+    // Per sub-block activation term for the mins: xs * sum(q). Same float product
+    // the inner loop used to form inline, now computed once per token.
+    std::vector<float> xm((size_t)(bs * nb));
     for (int64_t t = 0; t < bs; ++t)
         for (int64_t b = 0; b < nb; ++b) {
             const int8_t* q = a.xq.data() + t * n_in + b * 32;
-            xsum[t * nb + b] = vaddlvq_s8(vld1q_s8(q)) + vaddlvq_s8(vld1q_s8(q + 16));
+            const int32_t s = vaddlvq_s8(vld1q_s8(q)) + vaddlvq_s8(vld1q_s8(q + 16));
+            xm[t * nb + b] = a.xs[t * nb + b] * (float)s;
         }
-    auto f4 = [](const uint8_t* p) {   // 4 bytes -> float32x4
-        uint32_t v; std::memcpy(&v, p, 4);
-        return vcvtq_f32_u32(vmovl_u16(vget_low_u16(vmovl_u8(vcreate_u8((uint64_t)v)))));
+    auto bytes_to_f32 = [](uint8x16_t v, float32x4_t* o) {   // 16 bytes -> 4 x float32x4
+        const uint16x8_t l = vmovl_u8(vget_low_u8(v)), h = vmovl_u8(vget_high_u8(v));
+        o[0] = vcvtq_f32_u32(vmovl_u16(vget_low_u16(l))); o[1] = vcvtq_f32_u32(vmovl_u16(vget_high_u16(l)));
+        o[2] = vcvtq_f32_u32(vmovl_u16(vget_low_u16(h))); o[3] = vcvtq_f32_u32(vmovl_u16(vget_high_u16(h)));
     };
     auto body = [&](int, int64_t g0, int64_t g1) {
         const uint8x16_t m4 = vdupq_n_u8(0x0F), c63 = vdupq_n_u8(63), c15 = vdupq_n_u8(15);
+        // Decoded scales of one group, all super-blocks: [k][0..7] = d*sc, [k][8..15] = dmin*m
+        // per sub-block, one row per lane. Decoded once per group, shared by every token tile.
+        // Per-thread and reused: body() runs once per scheduler chunk, many times per token.
+        thread_local std::vector<float32x4_t> scl;
+        if (scl.size() < (size_t)nsb * 16) scl.resize((size_t)nsb * 16);
         for (int64_t g = g0; g < g1; ++g) {
-            for (int64_t t0 = 0; t0 < bs; t0 += kTile) {
-                const int nt = (int)std::min<int64_t>(kTile, bs - t0);
-                float32x4_t accv[kTile], accm[kTile];
-                for (int t = 0; t < kTile; ++t) { accv[t] = vdupq_n_f32(0.f); accm[t] = vdupq_n_f32(0.f); }
+            for (int64_t k = 0; k < nsb; ++k) {
+                const BlockQ4KIL4& b = Wp[g * nsb + k];
+                // get_scale_min_k4 for 8 sub-blocks x 4 rows from 3 vector loads;
+                // lanes are [sub-block (0..3 | 4..7)][row].
+                const uint8x16_t q0 = vld1q_u8(b.scales[0]), q4 = vld1q_u8(b.scales[4]), q8 = vld1q_u8(b.scales[8]);
+                float32x4_t sf[8], mf[8];
+                bytes_to_f32(vandq_u8(q0, c63), sf);
+                bytes_to_f32(vorrq_u8(vandq_u8(q8, c15), vshlq_n_u8(vshrq_n_u8(q0, 6), 4)), sf + 4);
+                bytes_to_f32(vandq_u8(q4, c63), mf);
+                bytes_to_f32(vorrq_u8(vshrq_n_u8(q8, 4), vshlq_n_u8(vshrq_n_u8(q4, 6), 4)), mf + 4);
+                // fp16 -> fp32 is exact; one vector convert covers the 4 rows.
+                const float32x4_t d4  = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(b.d)));
+                const float32x4_t dm4 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(b.dmin)));
+                float32x4_t* s = scl.data() + k * 16;
+                for (int i = 0; i < 8; ++i) { s[i] = vmulq_f32(d4, sf[i]); s[8 + i] = vmulq_f32(dm4, mf[i]); }
+            }
+            // NT tokens per tile as a compile-time constant: the accumulators stay
+            // in registers (a runtime count put them on the stack, and every FMA
+            // then waited on a store-to-load round trip).
+            auto tile = [&](auto NTc, int64_t t0) {
+                constexpr int nt = decltype(NTc)::value;
+                float32x4_t accv[nt], accm[nt];
+                for (int t = 0; t < nt; ++t) { accv[t] = vdupq_n_f32(0.f); accm[t] = vdupq_n_f32(0.f); }
                 for (int64_t k = 0; k < nsb; ++k) {
                     const BlockQ4KIL4& b = Wp[g * nsb + k];
-                    // get_scale_min_k4 for 8 sub-blocks x 4 rows from 3 vector loads;
-                    // lanes are [sub-block (0..3 | 4..7)][row].
-                    const uint8x16_t q0 = vld1q_u8(b.scales[0]), q4 = vld1q_u8(b.scales[4]), q8 = vld1q_u8(b.scales[8]);
-                    alignas(16) uint8_t scb[32], mb[32];
-                    vst1q_u8(scb,      vandq_u8(q0, c63));
-                    vst1q_u8(scb + 16, vorrq_u8(vandq_u8(q8, c15), vshlq_n_u8(vshrq_n_u8(q0, 6), 4)));
-                    vst1q_u8(mb,       vandq_u8(q4, c63));
-                    vst1q_u8(mb + 16,  vorrq_u8(vshrq_n_u8(q8, 4),  vshlq_n_u8(vshrq_n_u8(q4, 6), 4)));
-                    float dh[4], mh[4];
-                    for (int r = 0; r < 4; ++r) { dh[r] = f16_scale(reinterpret_cast<const uint8_t*>(&b.d[r]));
-                                                  mh[r] = f16_scale(reinterpret_cast<const uint8_t*>(&b.dmin[r])); }
-                    const float32x4_t d4 = vld1q_f32(dh), dm4 = vld1q_f32(mh);
+                    const float32x4_t* s = scl.data() + k * 16;
                     for (int j = 0; j < 4; ++j) {
                         uint8x16_t w[8];
                         for (int v = 0; v < 8; ++v) w[v] = vld1q_u8(b.qs[j][v]);
-                        const float32x4_t dsc_lo = vmulq_f32(d4,  f4(scb + 8 * j));
-                        const float32x4_t dsc_hi = vmulq_f32(d4,  f4(scb + 8 * j + 4));
-                        const float32x4_t dmm_lo = vmulq_f32(dm4, f4(mb + 8 * j));
-                        const float32x4_t dmm_hi = vmulq_f32(dm4, f4(mb + 8 * j + 4));
                         for (int t = 0; t < nt; ++t) {
                             const int64_t tt = t0 + t;
                             const int8_t* aq = a.xq.data() + tt * n_in + k * 256 + j * 64;
                             const int8x16_t a0 = vld1q_s8(aq), a1 = vld1q_s8(aq + 16);
                             const int8x16_t a2 = vld1q_s8(aq + 32), a3 = vld1q_s8(aq + 48);
-                            int32x4_t lo = vdupq_n_s32(0), hi = vdupq_n_s32(0);
-#define LLM_IL4_LO(v, A, L) lo = vdotq_laneq_s32(lo, vreinterpretq_s8_u8(vandq_u8(w[v], m4)), A, L)
-#define LLM_IL4_HI(v, A, L) hi = vdotq_laneq_s32(hi, vreinterpretq_s8_u8(vshrq_n_u8(w[v], 4)), A, L)
-                            LLM_IL4_LO(0, a0, 0); LLM_IL4_LO(1, a0, 1); LLM_IL4_LO(2, a0, 2); LLM_IL4_LO(3, a0, 3);
-                            LLM_IL4_LO(4, a1, 0); LLM_IL4_LO(5, a1, 1); LLM_IL4_LO(6, a1, 2); LLM_IL4_LO(7, a1, 3);
-                            LLM_IL4_HI(0, a2, 0); LLM_IL4_HI(1, a2, 1); LLM_IL4_HI(2, a2, 2); LLM_IL4_HI(3, a2, 3);
-                            LLM_IL4_HI(4, a3, 0); LLM_IL4_HI(5, a3, 1); LLM_IL4_HI(6, a3, 2); LLM_IL4_HI(7, a3, 3);
+                            // Two independent chains per half (integer, so the split is exact):
+                            // one token alone no longer waits on 8 dependent SDOTs.
+                            // One token alone: two chains per half, so it does not wait on
+                            // 8 dependent SDOTs. Two or more tokens already give independent
+                            // chains, so skip the extra adds (integer either way: exact).
+                            constexpr bool split = nt == 1;
+                            int32x4_t lo0 = vdupq_n_s32(0), lo1 = vdupq_n_s32(0), hi0 = vdupq_n_s32(0), hi1 = vdupq_n_s32(0);
+#define LLM_IL4_LO(acc, v, A, L) (acc) = vdotq_laneq_s32((acc), vreinterpretq_s8_u8(vandq_u8(w[v], m4)), A, L)
+#define LLM_IL4_HI(acc, v, A, L) (acc) = vdotq_laneq_s32((acc), vreinterpretq_s8_u8(vshrq_n_u8(w[v], 4)), A, L)
+                            LLM_IL4_LO(lo0, 0, a0, 0); LLM_IL4_LO(split ? lo1 : lo0, 1, a0, 1); LLM_IL4_LO(lo0, 2, a0, 2); LLM_IL4_LO(split ? lo1 : lo0, 3, a0, 3);
+                            LLM_IL4_LO(lo0, 4, a1, 0); LLM_IL4_LO(split ? lo1 : lo0, 5, a1, 1); LLM_IL4_LO(lo0, 6, a1, 2); LLM_IL4_LO(split ? lo1 : lo0, 7, a1, 3);
+                            LLM_IL4_HI(hi0, 0, a2, 0); LLM_IL4_HI(split ? hi1 : hi0, 1, a2, 1); LLM_IL4_HI(hi0, 2, a2, 2); LLM_IL4_HI(split ? hi1 : hi0, 3, a2, 3);
+                            LLM_IL4_HI(hi0, 4, a3, 0); LLM_IL4_HI(split ? hi1 : hi0, 5, a3, 1); LLM_IL4_HI(hi0, 6, a3, 2); LLM_IL4_HI(split ? hi1 : hi0, 7, a3, 3);
 #undef LLM_IL4_LO
 #undef LLM_IL4_HI
+                            int32x4_t lo = lo0, hi = hi0;
+                            if constexpr (split) { lo = vaddq_s32(lo0, lo1); hi = vaddq_s32(hi0, hi1); }
                             const int64_t sb = tt * nb + k * 8 + 2 * j;
-                            accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(lo), vmulq_n_f32(dsc_lo, a.xs[sb]));
-                            accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(hi), vmulq_n_f32(dsc_hi, a.xs[sb + 1]));
-                            accm[t] = vfmaq_n_f32(accm[t], dmm_lo, a.xs[sb] * (float)xsum[sb]);
-                            accm[t] = vfmaq_n_f32(accm[t], dmm_hi, a.xs[sb + 1] * (float)xsum[sb + 1]);
+                            accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(lo), vmulq_n_f32(s[2 * j], a.xs[sb]));
+                            accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(hi), vmulq_n_f32(s[2 * j + 1], a.xs[sb + 1]));
+                            accm[t] = vfmaq_n_f32(accm[t], s[8 + 2 * j], xm[sb]);
+                            accm[t] = vfmaq_n_f32(accm[t], s[8 + 2 * j + 1], xm[sb + 1]);
                         }
                     }
                 }
@@ -430,6 +452,162 @@ void matmul_q4_K_il4_sdot(float* Y, const void* Wil4, const float* X, int64_t bs
                     float* y = Y + (t0 + t) * n_out + g * 4;
                     y[0] = r[0]; y[1] = r[1]; y[2] = r[2]; y[3] = r[3];
                 }
+            };
+            int64_t t0 = 0;
+            for (; t0 + kTile <= bs; t0 += kTile) tile(std::integral_constant<int, kTile>{}, t0);
+            switch (bs - t0) {
+                case 1: tile(std::integral_constant<int, 1>{}, t0); break;
+                case 2: tile(std::integral_constant<int, 2>{}, t0); break;
+                case 3: tile(std::integral_constant<int, 3>{}, t0); break;
+                default: break;
+            }
+        }
+    };
+    if (pool && pool->size() > 1 && ng >= 8) pool->parallel_for(ng, body);
+    else body(0, 0, ng);
+}
+
+// ---------------------------------------------------------------------------
+// Wave 16: Q6_K x int8 on IL4-interleaved weights (see BlockQ6KIL4). Same
+// activation quantization as matmul_q6_K_sdot (int8 per 32 values). Q6_K's -32
+// offset is the starting value of each SDOT accumulator (-32 * sum of the 16
+// activations) and the int8 sub-block scales are applied in integer, so float
+// work is one convert + one FMA per 32 values per 4 rows. Exact integer up to
+// that point; only the float summation order differs from the row-major
+// kernel (test_neon bounds it).
+void matmul_q6_K_il4_sdot(float* Y, const void* Wil4, const float* X, int64_t bs,
+                          int64_t n_out, int64_t n_in, ThreadPool* pool) {
+    const int64_t nsb = n_in / 256, nb = n_in / 32, n16 = n_in / 16, ng = n_out / 4;
+    const BlockQ6KIL4* Wp = static_cast<const BlockQ6KIL4*>(Wil4);
+    const BatchQ8 a(X, bs, n_in);
+    std::vector<int32_t> x32((size_t)(bs * n16));   // -32 * sum(q) per 16 activations
+    for (int64_t t = 0; t < bs; ++t)
+        for (int64_t i = 0; i < n16; ++i)
+            x32[t * n16 + i] = -32 * (int32_t)vaddlvq_s8(vld1q_s8(a.xq.data() + t * n_in + i * 16));
+    auto body = [&](int, int64_t g0, int64_t g1) {
+        const uint8x16_t m03 = vdupq_n_u8(0x03), m30 = vdupq_n_u8(0x30);
+        // Per group, all super-blocks: 16 sub-block scales (int32, row per lane)
+        // and d (fp32, row per lane). Decoded once, shared by every token tile.
+        thread_local std::vector<int32x4_t> scl;     // per-thread, reused (see the Q4_K kernel)
+        thread_local std::vector<float32x4_t> dl;
+        if (scl.size() < (size_t)nsb * 16) scl.resize((size_t)nsb * 16);
+        if (dl.size() < (size_t)nsb) dl.resize((size_t)nsb);
+        for (int64_t g = g0; g < g1; ++g) {
+            for (int64_t k = 0; k < nsb; ++k) {
+                const BlockQ6KIL4& b = Wp[g * nsb + k];
+                dl[k] = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(b.d)));
+                for (int i = 0; i < 16; i += 4) {
+                    const int8x16_t s = vld1q_s8(b.scales[i]);
+                    const int16x8_t l = vmovl_s8(vget_low_s8(s)), h = vmovl_s8(vget_high_s8(s));
+                    int32x4_t* o = scl.data() + k * 16 + i;
+                    o[0] = vmovl_s16(vget_low_s16(l)); o[1] = vmovl_s16(vget_high_s16(l));
+                    o[2] = vmovl_s16(vget_low_s16(h)); o[3] = vmovl_s16(vget_high_s16(h));
+                }
+            }
+            auto tile = [&](auto NTc, int64_t t0) {   // compile-time NT, as in the Q4_K kernel
+                constexpr int nt = decltype(NTc)::value;
+                float32x4_t accv[nt];
+                for (int t = 0; t < nt; ++t) accv[t] = vdupq_n_f32(0.f);
+                for (int64_t k = 0; k < nsb; ++k) {
+                    const BlockQ6KIL4& b = Wp[g * nsb + k];
+                    const int32x4_t* sc = scl.data() + k * 16;
+                    const float32x4_t d4 = dl[k];
+                    if constexpr (nt == 1) {
+                        // One token (decode): two passes per half, quarters {0,2} then
+                        // {1,3}, so each pass reads one ql vector and one qh vector per
+                        // step (the quarter loop below reads qh four times and ql twice)
+                        // while about 16 vector registers stay live: no spills, which an
+                        // in-order core (Cortex-A55) cannot hide. Integer sums are exact
+                        // and the float FMAs run in quarter order, so results are identical.
+                        const int8_t* xrow = a.xq.data() + t0 * n_in;
+                        const int32_t* xi = x32.data() + t0 * n16;
+                        const float* xsr = a.xs.data() + t0 * nb;
+                        for (int h = 0; h < 2; ++h) {
+                            const int64_t b0 = k * 8 + h * 4;   // activation block of quarter 0
+                            int32x4_t sv[4];
+                            auto pass = [&](auto Pc) {           // P = 0: quarters 0,2; P = 1: quarters 1,3
+                                constexpr int P = decltype(Pc)::value, Qa = P, Qb = P + 2;
+                                const int8x16_t aA0 = vld1q_s8(xrow + (b0 + Qa) * 32), aA1 = vld1q_s8(xrow + (b0 + Qa) * 32 + 16);
+                                const int8x16_t aB0 = vld1q_s8(xrow + (b0 + Qb) * 32), aB1 = vld1q_s8(xrow + (b0 + Qb) * 32 + 16);
+                                int32x4_t dA0 = vdupq_n_s32(xi[2 * (b0 + Qa)]), dA1 = vdupq_n_s32(xi[2 * (b0 + Qa) + 1]);
+                                int32x4_t dB0 = vdupq_n_s32(xi[2 * (b0 + Qb)]), dB1 = vdupq_n_s32(xi[2 * (b0 + Qb) + 1]);
+                                auto step = [&](auto Vc) {
+                                    constexpr int v = decltype(Vc)::value, lane = v % 4;
+                                    const uint8x16_t L = vld1q_u8(b.ql[h][v + 8 * P]), H = vld1q_u8(b.qh[h][v]);
+                                    int8x16_t qa, qb;
+                                    if constexpr (P == 0) {
+                                        qa = vreinterpretq_s8_u8(vsliq_n_u8(L, vandq_u8(H, m03), 4));
+                                        qb = vreinterpretq_s8_u8(vsriq_n_u8(vandq_u8(H, m30), L, 4));
+                                    } else {
+                                        qa = vreinterpretq_s8_u8(vsliq_n_u8(L, vandq_u8(vshrq_n_u8(H, 2), m03), 4));
+                                        qb = vreinterpretq_s8_u8(vsriq_n_u8(vshrq_n_u8(H, 2), L, 4));
+                                    }
+                                    if constexpr (v < 4) { dA0 = vdotq_laneq_s32(dA0, qa, aA0, lane); dB0 = vdotq_laneq_s32(dB0, qb, aB0, lane); }
+                                    else                 { dA1 = vdotq_laneq_s32(dA1, qa, aA1, lane); dB1 = vdotq_laneq_s32(dB1, qb, aB1, lane); }
+                                };
+                                step(std::integral_constant<int, 0>{}); step(std::integral_constant<int, 1>{});
+                                step(std::integral_constant<int, 2>{}); step(std::integral_constant<int, 3>{});
+                                step(std::integral_constant<int, 4>{}); step(std::integral_constant<int, 5>{});
+                                step(std::integral_constant<int, 6>{}); step(std::integral_constant<int, 7>{});
+                                sv[Qa] = vmlaq_s32(vmulq_s32(dA0, sc[8 * h + 2 * Qa]), dA1, sc[8 * h + 2 * Qa + 1]);
+                                sv[Qb] = vmlaq_s32(vmulq_s32(dB0, sc[8 * h + 2 * Qb]), dB1, sc[8 * h + 2 * Qb + 1]);
+                            };
+                            pass(std::integral_constant<int, 0>{});
+                            pass(std::integral_constant<int, 1>{});
+                            for (int Q = 0; Q < 4; ++Q)
+                                accv[0] = vfmaq_f32(accv[0], vcvtq_f32_s32(sv[Q]), vmulq_n_f32(d4, xsr[b0 + Q]));
+                        }
+                        continue;
+                    }
+                    for (int h = 0; h < 2; ++h) {
+                        // Quarter Q of this half: 32 values, ql low (Q 0,1) or high
+                        // (Q 2,3) nibble, qh bits 2Q..2Q+1, scales 8h+2Q and 8h+2Q+1.
+                        auto quarter = [&](auto Qc) {
+                            constexpr int Q = decltype(Qc)::value;
+                            int8x16_t q[8];
+                            for (int v = 0; v < 8; ++v) {
+                                const uint8x16_t L = vld1q_u8(b.ql[h][v + ((Q & 1) ? 8 : 0)]);
+                                const uint8x16_t H = vld1q_u8(b.qh[h][v]);
+                                uint8x16_t u;
+                                if constexpr (Q == 0) u = vsliq_n_u8(L, vandq_u8(H, m03), 4);
+                                else if constexpr (Q == 1) u = vsliq_n_u8(L, vandq_u8(vshrq_n_u8(H, 2), m03), 4);
+                                else if constexpr (Q == 2) u = vsriq_n_u8(vandq_u8(H, m30), L, 4);
+                                else u = vsriq_n_u8(vshrq_n_u8(H, 2), L, 4);
+                                q[v] = vreinterpretq_s8_u8(u);   // 0..63
+                            }
+                            const int64_t bi = k * 8 + h * 4 + Q;      // 32-wide activation block
+                            const int32x4_t sA = sc[8 * h + 2 * Q], sB = sc[8 * h + 2 * Q + 1];
+                            for (int t = 0; t < nt; ++t) {
+                                const int64_t tt = t0 + t;
+                                const int8_t* aq = a.xq.data() + tt * n_in + bi * 32;
+                                const int8x16_t a0 = vld1q_s8(aq), a1 = vld1q_s8(aq + 16);
+                                // Two chains per token here (nt >= 2 in practice: nt == 1 takes
+                                // the two-pass path above), so several tokens interleave.
+                                int32x4_t dA = vdupq_n_s32(x32[tt * n16 + 2 * bi]);
+                                int32x4_t dB = vdupq_n_s32(x32[tt * n16 + 2 * bi + 1]);
+                                dA = vdotq_laneq_s32(dA, q[0], a0, 0); dB = vdotq_laneq_s32(dB, q[4], a1, 0);
+                                dA = vdotq_laneq_s32(dA, q[1], a0, 1); dB = vdotq_laneq_s32(dB, q[5], a1, 1);
+                                dA = vdotq_laneq_s32(dA, q[2], a0, 2); dB = vdotq_laneq_s32(dB, q[6], a1, 2);
+                                dA = vdotq_laneq_s32(dA, q[3], a0, 3); dB = vdotq_laneq_s32(dB, q[7], a1, 3);
+                                const int32x4_t s = vmlaq_s32(vmulq_s32(dA, sA), dB, sB);
+                                accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(s), vmulq_n_f32(d4, a.xs[tt * nb + bi]));
+                            }
+                        };
+                        quarter(std::integral_constant<int, 0>{});
+                        quarter(std::integral_constant<int, 1>{});
+                        quarter(std::integral_constant<int, 2>{});
+                        quarter(std::integral_constant<int, 3>{});
+                    }
+                }
+                for (int t = 0; t < nt; ++t) vst1q_f32(Y + (t0 + t) * n_out + g * 4, accv[t]);
+            };
+            int64_t t0 = 0;
+            for (; t0 + kTile <= bs; t0 += kTile) tile(std::integral_constant<int, kTile>{}, t0);
+            switch (bs - t0) {
+                case 1: tile(std::integral_constant<int, 1>{}, t0); break;
+                case 2: tile(std::integral_constant<int, 2>{}, t0); break;
+                case 3: tile(std::integral_constant<int, 3>{}, t0); break;
+                default: break;
             }
         }
     };
@@ -473,6 +651,9 @@ void matmul_q6_K_sdot_batch(float* Y, const void* W, const float* X, int64_t bs,
 void matmul_q4_K_il4_sdot(float*, const void*, const float*, int64_t, int64_t, int64_t, ThreadPool*) {
     // Unreachable: weights are only repacked when cpu_has_dotprod() is true,
     // which requires this file to have been built with dotprod.
+    LLM_CHECK(false, "IL4 weights without the SDOT kernel compiled in");
+}
+void matmul_q6_K_il4_sdot(float*, const void*, const float*, int64_t, int64_t, int64_t, ThreadPool*) {
     LLM_CHECK(false, "IL4 weights without the SDOT kernel compiled in");
 }
 } // namespace detail

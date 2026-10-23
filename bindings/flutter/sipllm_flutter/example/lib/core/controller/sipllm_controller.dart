@@ -59,7 +59,7 @@ class SipllmController extends ChangeNotifier {
   int threads = 0; // 0 = hardware_concurrency
   bool fastQuant = true;
   bool streamLmHead = false;
-  SchedulePolicy schedulePolicy = SchedulePolicy.proportional2;
+  SchedulePolicy schedulePolicy = SchedulePolicy.fixed16;
   double temperature = 0.7;
   double topP = 0.95;
   int maxTokens = 256;

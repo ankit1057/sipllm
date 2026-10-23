@@ -362,4 +362,35 @@ void matmul_q4_K_il4(float* Y, const void* W, const float* X, int64_t bs,
     detail::matmul_q4_K_il4_sdot(Y, W, X, bs, n_out, n_in, pool);
 }
 
+// ---- Wave 16: IL4 interleaved Q6_K -----------------------------------------
+void repack_q6_K_il4_inplace(void* data, int64_t n_out, int64_t n_in) {
+    LLM_CHECK(n_out % 4 == 0 && n_in % 256 == 0, "repack_q6_K_il4: n_out % 4 or n_in % 256");
+    const int64_t nsb = n_in / 256, row_bytes = nsb * 210;
+    uint8_t* base = static_cast<uint8_t*>(data);
+    std::vector<uint8_t> tmp((size_t)(4 * row_bytes));   // one group of scratch, as for Q4_K
+    for (int64_t g = 0; g < n_out / 4; ++g) {
+        uint8_t* region = base + g * 4 * row_bytes;
+        std::memcpy(tmp.data(), region, tmp.size());
+        for (int64_t k = 0; k < nsb; ++k) {
+            BlockQ6KIL4 b;
+            for (int r = 0; r < 4; ++r) {
+                const uint8_t* p = tmp.data() + r * row_bytes + k * 210;   // ql[128] qh[64] sc[16] d
+                std::memcpy(&b.d[r], p + 208, 2);
+                for (int i = 0; i < 16; ++i) b.scales[i][r] = static_cast<int8_t>(p[192 + i]);
+                for (int h = 0; h < 2; ++h) {
+                    for (int v = 0; v < 16; ++v) std::memcpy(&b.ql[h][v][r * 4], p + 64 * h + 4 * v, 4);
+                    for (int v = 0; v < 8; ++v)  std::memcpy(&b.qh[h][v][r * 4], p + 128 + 32 * h + 4 * v, 4);
+                }
+            }
+            std::memcpy(region + k * sizeof(BlockQ6KIL4), &b, sizeof b);
+        }
+    }
+}
+
+void matmul_q6_K_il4(float* Y, const void* W, const float* X, int64_t bs,
+                     int64_t n_out, int64_t n_in, ThreadPool* pool) {
+    LLM_CHECK(q4_K_interleave_supported(), "IL4 Q6_K weights need the ARM SDOT kernel");
+    detail::matmul_q6_K_il4_sdot(Y, W, X, bs, n_out, n_in, pool);
+}
+
 } // namespace llm
