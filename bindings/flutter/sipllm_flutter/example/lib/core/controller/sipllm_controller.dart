@@ -55,7 +55,7 @@ class SipllmController extends ChangeNotifier {
   bool loading = false;
 
   // ---- generation config ---------------------------------------------------
-  int ramBudgetMiB = 0; // 0 = unlimited streaming
+  int ramBudgetMiB = 0; // 0 = automatic (half of available RAM, issue #78)
   int threads = 0; // 0 = hardware_concurrency
   bool fastQuant = true;
   bool streamLmHead = false;
@@ -352,7 +352,7 @@ class SipllmController extends ChangeNotifier {
 
   // ---- runtime lifecycle ---------------------------------------------------
   SipllmParams get params => SipllmParams(
-        ramBudgetBytes: ramBudgetMiB * 1024 * 1024,
+        ramBudgetBytes: ramBudgetMiB == 0 ? SipllmParams.ramBudgetAuto : ramBudgetMiB * 1024 * 1024,
         threads: threads,
         maxCtx: maxCtx,
         fastQuant: fastQuant,
@@ -530,7 +530,7 @@ class SipllmController extends ChangeNotifier {
         cores: deviceProfile?.cores ?? hardwareConcurrency,
         threads: rt.threads,
         schedulePolicy: schedulePolicy.name,
-        ramBudgetBytes: ramBudgetMiB * 1024 * 1024,
+        ramBudgetBytes: ramBudgetMiB == 0 ? SipllmParams.ramBudgetAuto : ramBudgetMiB * 1024 * 1024,
         vulkan: vulkanAvailable ? 'active' : (vulkanCompiled ? 'compiled' : 'off'),
         engineVersion: engineVersion,
         stats: stats,

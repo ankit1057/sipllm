@@ -173,6 +173,8 @@ private:
     std::unique_ptr<class SpecDecoder> spec_decoder_;
     int max_draft_len_ = 0;
     int layer_begin_ = 0, layer_end_ = 0;   // #70: this node's layers
+    bool budgeted_ = false;        // #81: a --ram-budget plan governs this runtime
+    bool budget_forced_ = false;   // #81: ... and the operator forced it (--ram-budget-force)
 };
 
 } // namespace llm

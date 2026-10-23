@@ -49,10 +49,15 @@ enum {
 
 typedef struct sipllm_ctx sipllm_ctx; /* opaque runtime handle */
 
+/* #78: ram_budget_bytes value meaning "pick for me": half of the RAM the OS
+ * reports as available, best effort (an infeasible plan falls back to the
+ * minimum configuration). sipllm_params_default() uses it. */
+#define SIPLLM_RAM_BUDGET_AUTO UINT64_MAX
+
 /* Open-time knobs. Zero-initialize then override; sipllm_params_default() fills
  * the recommended edge defaults. All bool-ish fields are 0/non-0. */
 typedef struct {
-  uint64_t ram_budget_bytes; /* 0 = unlimited streaming; else hard peak-RSS ceiling (--ram-budget) */
+  uint64_t ram_budget_bytes; /* SIPLLM_RAM_BUDGET_AUTO (default) = half of available RAM; 0 = stream every layer; else hard peak-RSS ceiling */
   int32_t threads;           /* >0 fixed; 0 = hardware_concurrency; -1 = auto-tune+cache profile   */
   int32_t max_ctx;           /* 0 = engine default (4096)                                          */
   int32_t n_buffers;         /* async prefetch ring buffers (>=1)                                  */

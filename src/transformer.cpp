@@ -17,7 +17,9 @@ Transformer::Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool)
     q_.assign(cfg_.q_dim(), 0.f);
     k_.assign(cfg_.kv_dim(), 0.f);
     v_.assign(cfg_.kv_dim(), 0.f);
-    att_.assign(kv_->max_ctx(), 0.f);
+    // One max_ctx score buffer per pool worker: attention runs one (token, head)
+    // item per work unit on the pool.
+    att_.assign((size_t)kv_->max_ctx() * (pool_ ? std::max(1, pool_->size()) : 1), 0.f);
     attn_out_.assign(cfg_.q_dim(), 0.f);
     proj_.assign(cfg_.dim, 0.f);
     hb_.assign(cfg_.ffn_dim, 0.f);
@@ -279,18 +281,14 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
     // --- 5. Cache Write & 6. Attention Math ---
     const float scale = cfg_.query_pre_attn_scalar > 0.f ? (1.0f / std::sqrt(cfg_.query_pre_attn_scalar)) 
                                                          : (1.0f / std::sqrt((float)hd));
-    std::vector<float> head_scratch;
-    if (kv_->precision() == KVPrecision::Q8_0) head_scratch.resize(hd);
-
+    const bool q8 = kv_->precision() == KVPrecision::Q8_0;
+    const int64_t q8_bytes = type_nbytes(DType::Q8_0, hd);
     for (int64_t i = 0; i < bs; ++i) {
-        int64_t pos_i = pos + i;
+        const int64_t pos_i = pos + i;
         float* ki = k_.data() + i * kv_dim;
         float* vi = v_.data() + i * kv_dim;
-
-        if (kv_->precision() == KVPrecision::Q8_0) {
-            const int64_t q8_bytes = type_nbytes(DType::Q8_0, hd);
-            const int64_t n_kv_heads = cfg_.n_kv_heads;
-            for (int64_t h = 0; h < n_kv_heads; ++h) {
+        if (q8) {
+            for (int64_t h = 0; h < n_kv; ++h) {
                 uint8_t* k8 = (uint8_t*)kv_->k_ptr(layer, pos_i) + h * q8_bytes;
                 uint8_t* v8 = (uint8_t*)kv_->v_ptr(layer, pos_i) + h * q8_bytes;
                 quantize_q8_0(ki + h * hd, k8, hd);
@@ -300,44 +298,57 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             std::memcpy(kv_->k_ptr(layer, pos_i), ki, kv_dim * sizeof(float));
             std::memcpy(kv_->v_ptr(layer, pos_i), vi, kv_dim * sizeof(float));
         }
+    }
 
-        float* qi = q_.data() + i * q_dim;
-        float* attn_out_i = attn_out_.data() + i * q_dim;
-        
-        // The window applies to every layer, unless a local/global pattern says
-        // this one is global (Gemma 2/3: every Nth layer sees the full context).
-        const bool windowed = cfg_.sliding_window > 0 &&
-            (cfg_.sliding_window_pattern <= 0 || ((layer + 1) % cfg_.sliding_window_pattern) != 0);
-        const int64_t start_t = windowed ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
-        const int64_t window_len = pos_i - start_t + 1;
-        
-        for (int64_t h = 0; h < n_heads; ++h) {
-            const float* qh = qi + h * hd;
+    // The window applies to every layer, unless a local/global pattern says
+    // this one is global (Gemma 2/3: every Nth layer sees the full context).
+    const bool windowed = cfg_.sliding_window > 0 &&
+        (cfg_.sliding_window_pattern <= 0 || ((layer + 1) % cfg_.sliding_window_pattern) != 0);
+    const KVCache* kvc = kv_;   // const accessors: read-only, never grow
+    const int64_t att_stride = kv_->max_ctx();
+    const int64_t n_items = bs * n_heads;
+    // Per-worker dequant scratch for the Q8_0 KV path (hd floats each).
+    std::vector<float> head_scratch;
+    if (q8) head_scratch.resize((size_t)hd * (pool_ ? std::max(1, pool_->size()) : 1));
+
+    // One work item = one query token x one head: exactly the arithmetic of the
+    // serial loop, so results are bit-identical for any thread count.
+    auto attend = [&](int tid, int64_t begin, int64_t end) {
+        float* att = att_.data() + (size_t)tid * att_stride;
+        float* hs = q8 ? head_scratch.data() + (size_t)tid * hd : nullptr;
+        for (int64_t w = begin; w < end; ++w) {
+            const int64_t i = w / n_heads, h = w % n_heads;
+            const int64_t pos_i = pos + i;
+            const int64_t start_t = windowed ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
+            const int64_t window_len = pos_i - start_t + 1;
+            const float* qh = q_.data() + i * q_dim + h * hd;
             const int64_t kvh = h / group;
             for (int64_t t = start_t; t <= pos_i; ++t) {
-                if (kv_->precision() == KVPrecision::Q8_0) {
-                    const uint8_t* k8 = (const uint8_t*)kv_->k_ptr(layer, t) + kvh * type_nbytes(DType::Q8_0, hd);
-                    dequantize_row(DType::Q8_0, k8, head_scratch.data(), hd);
-                    att_[t] = dot_f32(qh, head_scratch.data(), hd) * scale;
+                if (q8) {
+                    const uint8_t* k8 = (const uint8_t*)kvc->k_ptr(layer, t) + kvh * q8_bytes;
+                    dequantize_row(DType::Q8_0, k8, hs, hd);
+                    att[t] = dot_f32(qh, hs, hd) * scale;
                 } else {
-                    att_[t] = dot_f32(qh, (const float*)kv_->k_ptr(layer, t) + kvh * hd, hd) * scale;
+                    att[t] = dot_f32(qh, (const float*)kvc->k_ptr(layer, t) + kvh * hd, hd) * scale;
                 }
             }
-            if (b.attn_softcap) softcap_inplace(att_.data() + start_t, window_len, cfg_.attn_logit_softcap);
-            softmax(att_.data() + start_t, window_len);
-            float* out = attn_out_i + h * hd;
+            if (b.attn_softcap) softcap_inplace(att + start_t, window_len, cfg_.attn_logit_softcap);
+            softmax(att + start_t, window_len);
+            float* out = attn_out_.data() + i * q_dim + h * hd;
             for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
             for (int64_t t = start_t; t <= pos_i; ++t) {
-                if (kv_->precision() == KVPrecision::Q8_0) {
-                    const uint8_t* v8 = (const uint8_t*)kv_->v_ptr(layer, t) + kvh * type_nbytes(DType::Q8_0, hd);
-                    dequantize_row(DType::Q8_0, v8, head_scratch.data(), hd);
-                    axpy_f32(out, head_scratch.data(), att_[t], hd);
+                if (q8) {
+                    const uint8_t* v8 = (const uint8_t*)kvc->v_ptr(layer, t) + kvh * q8_bytes;
+                    dequantize_row(DType::Q8_0, v8, hs, hd);
+                    axpy_f32(out, hs, att[t], hd);
                 } else {
-                    axpy_f32(out, (const float*)kv_->v_ptr(layer, t) + kvh * hd, att_[t], hd);
+                    axpy_f32(out, (const float*)kvc->v_ptr(layer, t) + kvh * hd, att[t], hd);
                 }
             }
         }
-    }
+    };
+    if (pool_ && pool_->size() > 1 && n_items > 1) pool_->parallel_for(n_items, attend, 1);
+    else attend(0, 0, n_items);
 
     // --- 7. Attention Out Projection ---
     linear_batch(proj_.data(), loader_->getWeight(Role::AttnOut), attn_out_.data(), bs, pool_);

@@ -89,7 +89,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                 max: 4096,
                 divisions: 4096 ~/ 64,
                 display: c.ramBudgetMiB == 0
-                    ? 'unlimited / stream'
+                    ? 'auto (half of free RAM)'
                     : '${c.ramBudgetMiB} MiB',
                 onChanged: (v) => setState(() => c.ramBudgetMiB = v.round()),
               ),

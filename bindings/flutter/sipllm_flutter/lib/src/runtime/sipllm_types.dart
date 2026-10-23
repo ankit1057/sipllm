@@ -31,10 +31,10 @@ enum Pooling {
 enum TokenizerKind { sentencePiece, bpe, byte }
 
 /// Open-time configuration. Zero-arg construction mirrors the engine defaults
-/// (streaming, quantized residency, hardware threads).
+/// (automatic RAM budget, quantized residency, hardware threads).
 class SipllmParams {
   const SipllmParams({
-    this.ramBudgetBytes = 0,
+    this.ramBudgetBytes = ramBudgetAuto,
     this.threads = 0,
     this.maxCtx = 0,
     this.nBuffers = 2,
@@ -48,8 +48,13 @@ class SipllmParams {
     this.specDraft = 0,
   });
 
-  /// Hard peak-RSS ceiling in bytes (`--ram-budget`). 0 = unlimited streaming.
+  /// Peak-RSS ceiling in bytes (`--ram-budget`). [ramBudgetAuto] (the default,
+  /// issue #78) = half of the RAM the OS reports as available, so a model that
+  /// fits is held resident; 0 = stream every layer from storage (slowest).
   final int ramBudgetBytes;
+
+  /// `SIPLLM_RAM_BUDGET_AUTO` (UINT64_MAX in the C ABI; -1 in a Dart int).
+  static const int ramBudgetAuto = -1;
 
   /// >0 fixed worker count; 0 = hardware_concurrency; -1 = auto-tune + cache.
   final int threads;

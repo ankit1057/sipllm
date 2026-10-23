@@ -73,6 +73,11 @@ public:
     }
     void clear() { seq_len_ = 0; }
 
+    // Issue #81: allocate the whole max_ctx window now. Under --ram-budget the
+    // planner prices the KV at full context; growing by doubling later would
+    // hold old+new buffers at once and overshoot that price.
+    void reserve_full() { grow_to(max_ctx_); }
+
     // Write/read accessors. The non-const overloads are the write path: they
     // grow the cache so `pos` is resident before handing back the pointer. The
     // const overloads are read-only and never grow (every position read has

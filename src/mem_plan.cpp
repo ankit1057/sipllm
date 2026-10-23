@@ -138,7 +138,7 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
     bool found = false;
 
     for (int ctx : ctx_candidates) {
-        size_t attn = (size_t)ctx * sizeof(float);
+        size_t attn = (size_t)ctx * sizeof(float) * (size_t)std::max(1, req.n_threads);
         size_t resid = (size_t)ctx * cfg.dim * sizeof(float);
         
         size_t kv_row_bytes = req.kv_precision == KVPrecision::Q8_0 ? type_nbytes(DType::Q8_0, cfg.kv_dim()) : cfg.kv_dim() * sizeof(float);
@@ -185,7 +185,7 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
     if (!found) {
         // Impossible to fit even the minimum configuration.
         int min_ctx = ctx_candidates.back();
-        size_t min_attn = (size_t)min_ctx * sizeof(float);
+        size_t min_attn = (size_t)min_ctx * sizeof(float) * (size_t)std::max(1, req.n_threads);
         size_t min_resid = (size_t)min_ctx * cfg.dim * sizeof(float);
         size_t min_kv = (size_t)cfg.n_layers * cfg.kv_dim() * min_ctx * 2 * sizeof(float);
         size_t min_head = tied ? 0 : out_streamed_size;

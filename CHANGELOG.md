@@ -54,6 +54,24 @@ Confidence:            High: phone numbers are medians of 3 interleaved reps wit
                        (repack on), not the ggml 0.27.0 of earlier scorecards.
 ```
 
+## [Unreleased]
+
+### Changed
+- **#78: with no `--ram-budget`, the CLI, `llm_server` and the C ABI default now use half of the available RAM.**
+  - Before, no budget meant "stream every layer from storage on every token", even when the model fit easily. A first run was the slowest mode the engine has: TinyLlama on a Dimensity 900 phone decoded at 2.5 tok/s with no flags.
+  - The default now holds as much of the model resident as fits in half of the RAM the OS reports as available: Linux/Android `MemAvailable`, macOS free + inactive pages. It is best-effort sizing: a plan that cannot fit falls back to the minimum configuration instead of failing.
+  - An explicit `--ram-budget 0` still streams every layer. The C ABI gains `SIPLLM_RAM_BUDGET_AUTO`, which `sipllm_params_default()` now uses. The Dart `SipllmParams` default is `ramBudgetAuto`, and the example app's "0" now means auto.
+  - `llm_server` now accepts `--ram-budget`.
+  - `scripts/bench.sh` passes `--ram-budget 0` explicitly so its streaming series stays comparable with earlier results.
+- **Attention runs on the thread pool** (#80, first step). Each (query token, head) pair is one work item, and the arithmetic per item is unchanged, so logits are bit-identical for any thread count (new test `attention_threads_bit_identical`, FP32 and Q8 KV). The planner prices one attention score buffer per worker.
+  - On the Dimensity 900 phone, SmolLM2-135M Q8_0 with a 1,006-token prompt (median of 2): prefill went from 47 to 107 tok/s, time to first token from 21.3 s to 9.7 s, and decode from 9.7 to 13.1 tok/s.
+  - llama.cpp on the same file reaches 293 tok/s prefill and 26.6 tok/s decode. The gap is narrower, not closed.
+
+### Fixed
+- **#77: the CLI auto-tuner is now opt-in (`--autotune`).** Without `--threads` or `--schedule`, v0.6.0 applied the tuner's result over the defaults. On a 2+6-core phone it picked 2 threads and `Proportional2`. With no writable `$HOME`, as in an Android `adb shell`, it also re-ran on every launch. `--no-autotune` meanwhile forced 4 threads. Now, unless `--autotune` or `--recalibrate` is given, the CLI uses every core and `fixed16`, as the C ABI and Dart SDK already did. `--no-autotune` is still accepted.
+- **#79: `-t` is the sampling temperature, and the CLI now says so.** Most runtimes use `-t` for threads, so `-t 8` silently set temperature 8.0. `-t` still works but prints a warning. `--temp T` is the explicit flag, and threads are `--threads N`.
+- **#81: `--ram-budget` keeps its ceiling for the KV cache and refuses the unpriced semantic cache.** The planner prices the KV cache at the full chosen context. Growing it by doubling could briefly hold more resident rows than that whenever the context is not a doubling step. Under a budget, the KV cache is now allocated once at the planned context. Peak memory under a budget therefore includes the full planned KV from the start, which is what the planner reports. Pass a smaller `--ctx` to lower it. `--semantic-cache-budget` with `--ram-budget` is refused unless `--ram-budget-force` is given, because the planner does not count the semantic cache. No budget means no change: the KV cache still grows on demand.
+
 ## [0.6.0] — Correct output beyond Llama, merged waves 12–16, LAN pooling (2026-10-23)
 
 Ships everything merged to `main` since v0.5.0 (wave 12 below, waves 13–16, LAN

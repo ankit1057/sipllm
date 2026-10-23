@@ -69,8 +69,11 @@ public:
 
     void set_policy(SchedulePolicy p) { policy = p; }
 
+    // chunk_override > 0 fixes the chunk size for this call (attention uses 1:
+    // few, heavy items). 0 keeps the schedule policy's chunking.
     void parallel_for(int64_t total,
-                      const std::function<void(int, int64_t, int64_t)>& fn) {
+                      const std::function<void(int, int64_t, int64_t)>& fn,
+                      int64_t chunk_override = 0) {
         if (total <= 0) return;
         if (n_ == 1) { fn(0, 0, total); return; }
 
@@ -88,7 +91,8 @@ public:
             else if (policy == SchedulePolicy::Proportional2) chunk_ = std::max<int64_t>(1, total / (n_ * 2));
             else if (policy == SchedulePolicy::Proportional4) chunk_ = std::max<int64_t>(1, total / (n_ * 4));
             else if (policy == SchedulePolicy::Adaptive) chunk_ = std::max<int64_t>(16, total / (n_ * 4));
-            
+            if (chunk_override > 0) chunk_ = chunk_override;
+
             remaining_ = n_ - 1;   // workers we wait on (calling thread does its own)
             ++generation_;
         }

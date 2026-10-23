@@ -15,6 +15,7 @@
 #include <string>
 
 #include <algorithm>
+#include <thread>
 
 namespace llm {
 
@@ -67,6 +68,8 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     req.force = force_budget;
     req.default_ctx_cap = 4096;
     req.kv_precision = kv_precision;
+    // Attention keeps one max_ctx score buffer per pool worker (see Transformer).
+    req.n_threads = threads > 0 ? threads : std::max(1, (int)std::thread::hardware_concurrency());
 
     MemoryPlan plan = plan_memory(*src_, plan_cfg, req);
 
@@ -98,6 +101,11 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     loader_ = std::make_unique<LayerLoader>(src_.get(), cfg_, opt_);
     kv_ = std::make_unique<KVCache>(layer_end_ - layer_begin_, cfg_.kv_dim(), ctx, kv_precision,
                                     layer_begin_);
+    // #81: the plan priced the KV at the full chosen ctx; allocate it once so
+    // doubling never holds old+new buffers above that price.
+    budgeted_ = ram_budget_total > 0;
+    budget_forced_ = force_budget;
+    if (budgeted_) kv_->reserve_full();
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
     tok_ = Tokenizer::from_source(*src_);
 }
@@ -109,6 +117,11 @@ void Runtime::enable_semantic_cache(size_t max_bytes) {
               "--semantic-cache-budget needs the FP32 KV cache (drop --kv-q8)");
     LLM_CHECK(layer_begin_ == 0 && layer_end_ == (int)cfg_.n_layers,
               "--semantic-cache-budget is not supported on a LAN worker");
+    // #81: the memory planner does not price the semantic cache, so it would sit
+    // outside the --ram-budget ceiling.
+    LLM_CHECK(!budgeted_ || budget_forced_,
+              "--semantic-cache-budget is not counted by the --ram-budget planner; "
+              "drop one of them, or pass --ram-budget-force");
     if (!semantic_cache_) {
         semantic_cache_ = std::make_unique<SemanticCache>(max_bytes, cfg_.n_layers, cfg_.kv_dim());
     }

@@ -155,4 +155,13 @@ RuntimeProfile tune_if_needed(const HardwareInfo& hw, const AutoTunerOptions& op
     return profile;
 }
 
+RuntimeProfile cli_runtime_profile(const HardwareInfo& hw, bool autotune_requested,
+                                   const AutoTunerOptions& opt) {
+    if (autotune_requested && !opt.disable_autotune) return tune_if_needed(hw, opt);
+    RuntimeProfile profile;
+    profile.threads = 0;           // ThreadPool: every core
+    profile.schedule_policy = -1;  // keep the caller's default (fixed16)
+    return profile;
+}
+
 } // namespace llm

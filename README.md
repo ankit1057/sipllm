@@ -317,7 +317,7 @@ Nishachar is SipLLM's reference goal-driven autonomous agent runtime (`goal -> p
 Built specifically for edge and resource-constrained environments:
 - **ARM64 NEON Kernels**: int8 `sdot` dot-product kernels for Q8_0, Q4_K and Q6_K (`--fast`), NEON-assisted fp32 dequantization for the exact path, NEON fp16→fp32 conversion.
 - **x86_64 AVX2 / FMA Vector Paths**: Optimized vector dot products with automatic CPU runtime detection and portable scalar fallbacks.
-- **Hardware-Calibrated Auto-Tuning**: `AutoTuner` and `DeviceProfile` automatically benchmark the host hardware on first launch, selecting the optimal thread count and scheduling policy.
+- **Hardware-Calibrated Auto-Tuning (opt-in)**: `--autotune` runs `AutoTuner` micro-benchmarks to pick a thread count and scheduling policy, then caches the result. It is off by default because on big.LITTLE phones it picked slower settings than the defaults (every core, `fixed16`).
 - **Mobile & Embedded**: builds on Android (NDK, static libc++), Termux, Apple Silicon and Linux SBCs. First phone numbers (Dimensity 900, 2026-10-19) are in the demo above and in `bench/results/device-*.json`; the harness is `scripts/device/`.
 
 ## Validated against llama.cpp
