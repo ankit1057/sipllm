@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # sipllm — an Ollama-style front-end for the sipllm streaming inference engine.
 #
 #   sipllm run   tinyllama -p "The capital of France is"
@@ -15,7 +15,7 @@ set -euo pipefail
 SIPLLM_HOME="${SIPLLM_HOME:-$HOME/.sipllm}"
 MODELS_DIR="$SIPLLM_HOME/models"
 REGISTRY_FILE="$SIPLLM_HOME/registry.conf"
-VERSION="1.0.0"
+VERSION="0.6.0"
 
 mkdir -p "$MODELS_DIR"
 
