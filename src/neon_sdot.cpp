@@ -7,6 +7,7 @@
 // runtime. Bodies moved verbatim from neon.cpp's former
 // `#if defined(__ARM_FEATURE_DOTPROD)` branches.
 #include "neon_internal.h"
+#include "llm/common.h"
 
 #if defined(__aarch64__) && defined(__ARM_FEATURE_DOTPROD)
 
@@ -350,6 +351,92 @@ void matmul_q6_K_sdot_batch(float* Y, const void* W, const float* X, int64_t bs,
     else body(0, 0, n_out);
 }
 
+
+// ---------------------------------------------------------------------------
+// Wave 15: Q4_K x int8 on IL4-interleaved weights (see BlockQ4KIL4). Same
+// activation quantization as matmul_q4_K_sdot (int8 per 32 values); the four
+// rows of a group live in the four lanes of every accumulator, so the per-32
+// float scaling runs once per 4 rows instead of once per row. Only the float
+// summation order differs from the row-major kernels (results agree to ~1e-6
+// relative; test_neon bounds it).
+void matmul_q4_K_il4_sdot(float* Y, const void* Wil4, const float* X, int64_t bs,
+                          int64_t n_out, int64_t n_in, ThreadPool* pool) {
+    const int64_t nsb = n_in / 256, nb = n_in / 32, ng = n_out / 4;
+    const BlockQ4KIL4* Wp = static_cast<const BlockQ4KIL4*>(Wil4);
+    const BatchQ8 a(X, bs, n_in);
+    std::vector<int32_t> xsum((size_t)(bs * nb));
+    for (int64_t t = 0; t < bs; ++t)
+        for (int64_t b = 0; b < nb; ++b) {
+            const int8_t* q = a.xq.data() + t * n_in + b * 32;
+            xsum[t * nb + b] = vaddlvq_s8(vld1q_s8(q)) + vaddlvq_s8(vld1q_s8(q + 16));
+        }
+    auto f4 = [](const uint8_t* p) {   // 4 bytes -> float32x4
+        uint32_t v; std::memcpy(&v, p, 4);
+        return vcvtq_f32_u32(vmovl_u16(vget_low_u16(vmovl_u8(vcreate_u8((uint64_t)v)))));
+    };
+    auto body = [&](int, int64_t g0, int64_t g1) {
+        const uint8x16_t m4 = vdupq_n_u8(0x0F), c63 = vdupq_n_u8(63), c15 = vdupq_n_u8(15);
+        for (int64_t g = g0; g < g1; ++g) {
+            for (int64_t t0 = 0; t0 < bs; t0 += kTile) {
+                const int nt = (int)std::min<int64_t>(kTile, bs - t0);
+                float32x4_t accv[kTile], accm[kTile];
+                for (int t = 0; t < kTile; ++t) { accv[t] = vdupq_n_f32(0.f); accm[t] = vdupq_n_f32(0.f); }
+                for (int64_t k = 0; k < nsb; ++k) {
+                    const BlockQ4KIL4& b = Wp[g * nsb + k];
+                    // get_scale_min_k4 for 8 sub-blocks x 4 rows from 3 vector loads;
+                    // lanes are [sub-block (0..3 | 4..7)][row].
+                    const uint8x16_t q0 = vld1q_u8(b.scales[0]), q4 = vld1q_u8(b.scales[4]), q8 = vld1q_u8(b.scales[8]);
+                    alignas(16) uint8_t scb[32], mb[32];
+                    vst1q_u8(scb,      vandq_u8(q0, c63));
+                    vst1q_u8(scb + 16, vorrq_u8(vandq_u8(q8, c15), vshlq_n_u8(vshrq_n_u8(q0, 6), 4)));
+                    vst1q_u8(mb,       vandq_u8(q4, c63));
+                    vst1q_u8(mb + 16,  vorrq_u8(vshrq_n_u8(q8, 4),  vshlq_n_u8(vshrq_n_u8(q4, 6), 4)));
+                    float dh[4], mh[4];
+                    for (int r = 0; r < 4; ++r) { dh[r] = f16_scale(reinterpret_cast<const uint8_t*>(&b.d[r]));
+                                                  mh[r] = f16_scale(reinterpret_cast<const uint8_t*>(&b.dmin[r])); }
+                    const float32x4_t d4 = vld1q_f32(dh), dm4 = vld1q_f32(mh);
+                    for (int j = 0; j < 4; ++j) {
+                        uint8x16_t w[8];
+                        for (int v = 0; v < 8; ++v) w[v] = vld1q_u8(b.qs[j][v]);
+                        const float32x4_t dsc_lo = vmulq_f32(d4,  f4(scb + 8 * j));
+                        const float32x4_t dsc_hi = vmulq_f32(d4,  f4(scb + 8 * j + 4));
+                        const float32x4_t dmm_lo = vmulq_f32(dm4, f4(mb + 8 * j));
+                        const float32x4_t dmm_hi = vmulq_f32(dm4, f4(mb + 8 * j + 4));
+                        for (int t = 0; t < nt; ++t) {
+                            const int64_t tt = t0 + t;
+                            const int8_t* aq = a.xq.data() + tt * n_in + k * 256 + j * 64;
+                            const int8x16_t a0 = vld1q_s8(aq), a1 = vld1q_s8(aq + 16);
+                            const int8x16_t a2 = vld1q_s8(aq + 32), a3 = vld1q_s8(aq + 48);
+                            int32x4_t lo = vdupq_n_s32(0), hi = vdupq_n_s32(0);
+#define LLM_IL4_LO(v, A, L) lo = vdotq_laneq_s32(lo, vreinterpretq_s8_u8(vandq_u8(w[v], m4)), A, L)
+#define LLM_IL4_HI(v, A, L) hi = vdotq_laneq_s32(hi, vreinterpretq_s8_u8(vshrq_n_u8(w[v], 4)), A, L)
+                            LLM_IL4_LO(0, a0, 0); LLM_IL4_LO(1, a0, 1); LLM_IL4_LO(2, a0, 2); LLM_IL4_LO(3, a0, 3);
+                            LLM_IL4_LO(4, a1, 0); LLM_IL4_LO(5, a1, 1); LLM_IL4_LO(6, a1, 2); LLM_IL4_LO(7, a1, 3);
+                            LLM_IL4_HI(0, a2, 0); LLM_IL4_HI(1, a2, 1); LLM_IL4_HI(2, a2, 2); LLM_IL4_HI(3, a2, 3);
+                            LLM_IL4_HI(4, a3, 0); LLM_IL4_HI(5, a3, 1); LLM_IL4_HI(6, a3, 2); LLM_IL4_HI(7, a3, 3);
+#undef LLM_IL4_LO
+#undef LLM_IL4_HI
+                            const int64_t sb = tt * nb + k * 8 + 2 * j;
+                            accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(lo), vmulq_n_f32(dsc_lo, a.xs[sb]));
+                            accv[t] = vfmaq_f32(accv[t], vcvtq_f32_s32(hi), vmulq_n_f32(dsc_hi, a.xs[sb + 1]));
+                            accm[t] = vfmaq_n_f32(accm[t], dmm_lo, a.xs[sb] * (float)xsum[sb]);
+                            accm[t] = vfmaq_n_f32(accm[t], dmm_hi, a.xs[sb + 1] * (float)xsum[sb + 1]);
+                        }
+                    }
+                }
+                for (int t = 0; t < nt; ++t) {
+                    float r[4];
+                    vst1q_f32(r, vsubq_f32(accv[t], accm[t]));
+                    float* y = Y + (t0 + t) * n_out + g * 4;
+                    y[0] = r[0]; y[1] = r[1]; y[2] = r[2]; y[3] = r[3];
+                }
+            }
+        }
+    };
+    if (pool && pool->size() > 1 && ng >= 8) pool->parallel_for(ng, body);
+    else body(0, 0, ng);
+}
+
 } // namespace detail
 } // namespace llm
 
@@ -382,6 +469,11 @@ void matmul_q4_K_sdot_batch(float* Y, const void* W, const float* X, int64_t bs,
 }
 void matmul_q6_K_sdot_batch(float* Y, const void* W, const float* X, int64_t bs, int64_t n_out, int64_t n_in, ThreadPool* pool) {
     matmul_quant_batch(Y, W, DType::Q6_K, X, bs, n_out, n_in, pool);
+}
+void matmul_q4_K_il4_sdot(float*, const void*, const float*, int64_t, int64_t, int64_t, ThreadPool*) {
+    // Unreachable: weights are only repacked when cpu_has_dotprod() is true,
+    // which requires this file to have been built with dotprod.
+    LLM_CHECK(false, "IL4 weights without the SDOT kernel compiled in");
 }
 } // namespace detail
 } // namespace llm

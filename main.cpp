@@ -399,7 +399,8 @@ int main(int argc, char** argv) {
             "sched barrier:   %.2f ms\n",
             rss / 1e6,
             st.pinned_layers, (int)rt.config().n_layers, budget_note,
-            !opt.fast_quant ? "off" : fast_quant_enabled() ? "on" : "off (no int8 kernel for this CPU)",
+            !opt.fast_quant ? "off" : !fast_quant_enabled() ? "off (no int8 kernel for this CPU)"
+                : rt.interleaved_matrices() > 0 ? "on, Q4_K interleaved (SIPLLM_FAST_LAYOUT=il4)" : "on",
             st.decode_tok_s, st.prefill_tok_s, st.ttft_s,
             st.prompt_tokens, st.gen_tokens,
             st.weights_resident_bytes / 1e6, st.kv_bytes / 1e6,
