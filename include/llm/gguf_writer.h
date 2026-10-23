@@ -186,12 +186,8 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     if (c.rope_local > 0.f)    w.f32(a + "rope.local_freq_base", c.rope_local);
     if (c.swa_pattern > 0)     w.u32(a + "attention.sliding_window_pattern", (uint32_t)c.swa_pattern);
     if (c.sliding_window > 0)  w.u32(a + "attention.sliding_window", (uint32_t)c.sliding_window);
-    if (c.fused_qkv) {
-        // Pin head_dim explicitly so rope.dimension_count (partial rotary) is
-        // not mistaken for it during config discovery.
-        w.u32(a + "attention.key_length", (uint32_t)head_dim);
-        if (c.rope_dim > 0) w.u32(a + "rope.dimension_count", (uint32_t)c.rope_dim);
-    }
+    // Like real Phi GGUFs: rope.dimension_count only, no attention.key_length.
+    if (c.fused_qkv && c.rope_dim > 0) w.u32(a + "rope.dimension_count", (uint32_t)c.rope_dim);
     if (c.n_experts > 0) {
         w.u32(a + "expert_count", (uint32_t)c.n_experts);
         w.u32(a + "expert_used_count",

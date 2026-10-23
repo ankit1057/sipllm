@@ -117,9 +117,10 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
                           "llama.attention.layer_norm_rms_epsilon", "rms_eps"}, f))
         c.rms_eps = (float)f;
 
-    // head_dim: explicit key, else dim / n_heads.
-    if (first_int(src, {K("attention.key_length"), K("rope.dimension_count"),
-                        "llama.attention.key_length", "llama.rope.dimension_count", "head_dim"}, v))
+    // head_dim: explicit key, else dim / n_heads. Not rope.dimension_count:
+    // that is the rotary width, smaller than head_dim under partial rotary
+    // (Phi-2: 32 of 80), and is read as rope_dim below.
+    if (first_int(src, {K("attention.key_length"), "llama.attention.key_length", "head_dim"}, v))
         c.head_dim = v;
     else if (c.n_heads > 0)
         c.head_dim = c.dim / c.n_heads;
