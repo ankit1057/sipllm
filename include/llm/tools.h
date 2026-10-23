@@ -125,6 +125,7 @@ enum class ChatTemplateStyle {
     Mistral,
     Qwen2,
     Gemma,
+    Gemma4,   // <|turn>role ... <turn|>, empty thought channel on the gen prompt
     Phi3,
     GPT2,
     ChatML,

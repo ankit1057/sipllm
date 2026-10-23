@@ -10,7 +10,7 @@
 # ~/.sipllm/models, and hands it to the engine binary (which STREAMS the weights
 # off disk — so even a model larger than RAM runs). Add your own models with a
 # line "name<TAB>url" in ~/.sipllm/registry.conf, or just pass a URL / path.
-set -euo pipefail
+set -eu
 
 SIPLLM_HOME="${SIPLLM_HOME:-$HOME/.sipllm}"
 MODELS_DIR="$SIPLLM_HOME/models"
@@ -78,18 +78,27 @@ builtin_url() {
             echo "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" ;;
         llama3.1:8b:q8_0)
             echo "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf" ;;
-        # ---- Kimi K1.5 7B Instruct (Moonshot) ----
-        kimi|kimi:k1.5|kimi:7b)
-            echo "https://huggingface.co/bartowski/Kimi-k1.5-7B-Instruct-GGUF/resolve/main/Kimi-k1.5-7B-Instruct-Q4_K_M.gguf" ;;
-        # ---- Gemma 4 9B Instruct ----
-        gemma4|gemma4:9b)
-            echo "https://huggingface.co/bartowski/gemma-4-9b-it-GGUF/resolve/main/gemma-4-9b-it-Q4_K_M.gguf" ;;
-        # ---- DeepSeek R1 Distill Qwen 7B ----
+        # ---- Gemma 4 Instruct (Google; dense, 128-256k ctx, SWA + global attn) ----
+        # Real sizes are E2B / E4B / 12B / 26B-A4B / 31B; the engine runs the
+        # dense 12B (E2B/E4B per-layer embeddings and the 26B MoE are not yet
+        # supported). There is no "9b".
+        gemma4|gemma4:12b|gemma4:12b:q4_k_m)
+            echo "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q4_K_M.gguf" ;;
+        gemma4:12b:q8_0)
+            echo "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q8_0.gguf" ;;
+        # ---- Qwen2.5-Coder Instruct (code-specialised, arch qwen2) ----
+        qwen2.5-coder|qwen2.5-coder:7b|qwen2.5-coder:7b:q4_k_m)
+            echo "https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf" ;;
+        qwen2.5-coder:3b|qwen2.5-coder:3b:q4_k_m)
+            echo "https://huggingface.co/bartowski/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf" ;;
+        qwen2.5-coder:14b|qwen2.5-coder:14b:q4_k_m)
+            echo "https://huggingface.co/bartowski/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf" ;;
+        # ---- DeepSeek R1 Distill Qwen 7B (arch qwen2) ----
         deepseek|deepseek-r1|deepseek:7b)
-            echo "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf" ;;
-        # ---- Phi-4 14B Instruct ----
+            echo "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf" ;;
+        # ---- Phi-4 14B Instruct (arch phi3) ----
         phi4|phi4:14b)
-            echo "https://huggingface.co/microsoft/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf" ;;
+            echo "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf" ;;
         # ---- TinyLlama 1.1B Chat ----
         tinyllama|tinyllama:q4_k_m)
             echo "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf" ;;
@@ -109,7 +118,9 @@ registry_names() {
         smollm2:360m smollm2:360m:q4_k_m smollm2:135m smollm2:135m:q4_k_m \
         llama3.2 llama3.2:1b llama3.2:1b:q8_0 llama3.2:3b llama3.2:3b:q8_0 \
         llama3.1 llama3.1:8b llama3.1:8b:q8_0 \
-        kimi gemma4 deepseek-r1 phi4 \
+        gemma4 gemma4:12b gemma4:12b:q8_0 \
+        qwen2.5-coder qwen2.5-coder:3b qwen2.5-coder:7b qwen2.5-coder:14b \
+        deepseek-r1 phi4 \
         tinyllama tinyllama:q4_k_m tinyllama:q5_k_m tinyllama:q8_0 tinyllama:q2_k
     [ -f "$REGISTRY_FILE" ] && awk 'NF && $1!~/^#/ {print $1}' "$REGISTRY_FILE" || true
 }

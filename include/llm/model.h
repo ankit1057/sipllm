@@ -9,6 +9,7 @@
 #include "llm/weight_source.h"
 
 #include <string>
+#include <vector>
 
 namespace llm {
 
@@ -60,6 +61,11 @@ enum class RopeKind {
     Llama3Scaled,  // Full + per-wavelength frequency stretch (Llama 3.x)
 };
 
+// How RoPE pairs dimensions. Llama GGUFs permute q/k at conversion so adjacent
+// pairs (2i, 2i+1) reproduce HF rotate_half; NeoX-style archs (Gemma 4) are not
+// permuted and rotate the half-split pairs (i, i + rot_dim/2) instead.
+enum class RopePairing { Adjacent, NeoX };
+
 const char* norm_kind_name(NormKind);
 const char* ffn_kind_name(FfnKind);
 const char* rope_kind_name(RopeKind);
@@ -83,6 +89,10 @@ struct BlockSpec {
     bool     post_ffn_norm = false;      // norm the ffn output before the residual (Gemma2)
     bool     parallel_residual = false;  // attn & ffn read one shared norm, both added (Phi2)
     bool     proj_bias = false;          // attn_output / ffn projections are biased (GPT-2, Phi-2)
+    RopePairing rope_pairing = RopePairing::Adjacent;
+    bool     plain_norm_weights = false; // Gemma 4: norms are x/rms(x)*w (no 1+w offset)
+    bool     v_norm = false;             // Gemma 4: weightless RMSNorm on each V head
+    bool     layer_out_scale = false;    // Gemma 4: residual *= per-layer scalar after the block
     bool     moe = false;                // router + top-k expert FFNs (Mixtral)
     int64_t  n_experts = 0;              // total experts (MoE)
     int64_t  n_experts_used = 0;         // experts per token (MoE)
@@ -132,17 +142,52 @@ struct ModelConfig {
     float   attn_logit_softcap = 0.f;  // cap on attention scores (Gemma2 ~50)
     float   final_logit_softcap = 0.f; // cap on output logits (Gemma2 ~30)
     float   query_pre_attn_scalar = 0.f; // attn scale denom; 0 => head_dim
+    float   attn_scale = 0.f;            // explicit attn score scale (Gemma 4: 1.0); 0 => derived
     float   rope_theta_local = 0.f;      // RoPE base for local (sliding) layers
     int64_t sliding_window_pattern = 0;  // global layer every Nth (Gemma3: 6)
     int64_t sliding_window = 0;          // max context attention size (Mistral: 4096)
     bool    learned_pos_emb  = false;   // add position_embd[pos] to the embedding
     float   layernorm_eps    = 1e-5f;   // LayerNorm epsilon
 
+    // ---- per-layer attention geometry (Gemma 4) --------------------------
+    // Empty vectors => every layer uses the scalar fields above, so all other
+    // architectures are unaffected. Gemma 4 interleaves sliding-window layers
+    // (8 kv heads x 256) with global layers (1 kv head x 512, K doubles as V).
+    std::vector<int64_t> layer_n_kv_heads;   // per-layer kv head count
+    std::vector<int64_t> layer_head_dim;     // per-layer head dim (q, k and v)
+    std::vector<uint8_t> layer_swa;          // 1 = sliding-window layer, 0 = global
+    int64_t head_dim_swa = 0;                // head dim of sliding-window layers
+    int64_t rope_dim_swa = 0;                // rotary dims of sliding-window layers
+    std::vector<float> rope_freq_factors;    // global-layer RoPE freq divisors (rope_freqs.weight)
+
     bool is_moe() const { return block_spec.moe; }
 
-    int64_t q_dim()  const { return n_heads * head_dim; }
-    int64_t kv_dim() const { return n_kv_heads * head_dim; }
+    int64_t kv_heads_at(int64_t l) const {
+        return layer_n_kv_heads.empty() ? n_kv_heads : layer_n_kv_heads[(size_t)l];
+    }
+    int64_t head_dim_at(int64_t l) const {
+        return layer_head_dim.empty() ? head_dim : layer_head_dim[(size_t)l];
+    }
+    // Whether layer l attends through a sliding window. Without a per-layer
+    // pattern a nonzero sliding_window applies to every layer (Mistral).
+    bool is_swa_layer(int64_t l) const {
+        return layer_swa.empty() ? sliding_window > 0 : layer_swa[(size_t)l] != 0;
+    }
+    int64_t q_dim_at(int64_t l)  const { return n_heads * head_dim_at(l); }
+    int64_t kv_dim_at(int64_t l) const { return kv_heads_at(l) * head_dim_at(l); }
+
+    // Buffer-sizing dims: the maximum over layers (== the scalar formula when
+    // there is no per-layer geometry). The KV cache rows are kv_dim() wide and
+    // a layer with a narrower kv_dim_at() uses a prefix of its row.
+    int64_t q_dim()  const;
+    int64_t kv_dim() const;
     int64_t gqa_group() const { return n_heads / n_kv_heads; }
+
+    // Resident K+V bytes for `ctx` positions, matching the Runtime's KVCache
+    // layout: uniform [layer][pos][kv_dim] rows, or (per-layer geometry) each
+    // layer's own width with sliding-window layers capped at their window.
+    // `q8` = Q8_0 rows (34 bytes per 32 values) instead of fp32.
+    size_t kv_cache_bytes(int64_t ctx, bool q8) const;
 
     // Build from a WeightSource's metadata, accepting both GGUF ("<arch>.*")
     // keys and the toy .llmw short keys. Falls back to tensor shapes where a

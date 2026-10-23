@@ -38,6 +38,7 @@ const char* LayerLoader::role_suffix(Role r) {
         case Role::AttnOutBias:  return "attn_output.bias";
         case Role::FfnUpBias:    return "ffn_up.bias";
         case Role::FfnDownBias:  return "ffn_down.bias";
+        case Role::LayerOutScale: return "layer_output_scale.weight";
         default:             return "?";
     }
 }
@@ -73,11 +74,11 @@ static bool is_moe_role(Role r) {
            r == Role::FfnUpExps || r == Role::FfnDownExps;
 }
 // 1-D fp32 weights (norms, biases): tiny, always dequantized on load.
-static bool is_1d_fp32(Role r) { return is_norm(r) || is_bias(r); }
+static bool is_1d_fp32(Role r) { return is_norm(r) || is_bias(r) || r == Role::LayerOutScale; }
 // Roles that may legitimately be absent (arch-dependent). Missing -> invalid ref.
 static bool is_optional(Role r) {
     return is_bias(r) || is_post_norm(r) || is_qk_norm(r) || is_split_proj(r) ||
-           r == Role::AttnQKV || is_moe_role(r);
+           r == Role::AttnQKV || is_moe_role(r) || r == Role::LayerOutScale;
 }
 LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     : src_(src), cfg_(cfg), opt_(opt), n_layers_(cfg.n_layers) {
@@ -184,7 +185,10 @@ size_t LayerLoader::estimate_layer_bytes(int layer) const {
 void LayerLoader::plan_and_pin_layers() {
     const size_t budget  = opt_.ram_budget_bytes;
     const size_t globals = out_norm_.size() + out_weight_.size() + embd_resident_.size();
-    const size_t per_layer = estimate_layer_bytes(0);
+    // Size by the largest layer: heterogeneous stacks (Gemma 4's wider global
+    // layers) must not under-reserve. Identical to layer 0 for uniform stacks.
+    size_t per_layer = 0;
+    for (int l = 0; l < n_layers_; ++l) per_layer = std::max(per_layer, estimate_layer_bytes(l));
     if (per_layer == 0) return;
 
     const size_t all_weights = globals + (size_t)n_layers_ * per_layer;

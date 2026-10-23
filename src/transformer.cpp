@@ -113,6 +113,35 @@ static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
     }
 }
 
+// NeoX-style RoPE: rotate the half-split pairs (i, i + rot_dim/2) of the first
+// rot_dim dims of each head. `freq_factors` (optional, rot_dim/2 entries)
+// divides each pair's frequency like ggml's rope freq_factors (Gemma 4's
+// proportional global RoPE: a 1e30 factor leaves that pair unrotated).
+static void rope_neox(float* vec, int64_t n_heads, int64_t head_dim, int64_t rot_dim,
+                      int64_t pos, float theta, const float* freq_factors) {
+    const int64_t half = rot_dim / 2;
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* p = vec + h * head_dim;
+        for (int64_t i = 0; i < half; ++i) {
+            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+            if (freq_factors) freq /= freq_factors[i];
+            float angle = (float)pos * freq;
+            float c = std::cos(angle), s = std::sin(angle);
+            float x0 = p[i], x1 = p[i + half];
+            p[i]        = x0 * c - x1 * s;
+            p[i + half] = x0 * s + x1 * c;
+        }
+    }
+}
+
+// Weightless RMSNorm (Gemma 4's per-head V norm).
+static void rmsnorm_noweight(float* x, int64_t n, float eps) {
+    float ss = 0.f;
+    for (int64_t i = 0; i < n; ++i) ss += x[i] * x[i];
+    const float scale = 1.0f / std::sqrt(ss / (float)n + eps);
+    for (int64_t i = 0; i < n; ++i) x[i] *= scale;
+}
+
 // Single data-driven transformer block pipeline (Issue #44).
 // Conditionally applies all per-architecture features based on cfg_.block_spec.
 void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
@@ -120,25 +149,33 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
     if (x_in == nullptr) { x_in = x_.data(); bs = 1; }
 
     const int64_t dim = cfg_.dim;
-    const int64_t hd = cfg_.head_dim;
+    // Per-layer attention geometry (uniform for every arch but Gemma 4).
+    const int64_t hd = cfg_.head_dim_at(layer);
     const int64_t n_heads = cfg_.n_heads;
-    const int64_t n_kv = cfg_.n_kv_heads;
-    const int64_t kv_dim = cfg_.kv_dim();
-    const int64_t q_dim = cfg_.q_dim();
-    const int64_t group = cfg_.gqa_group();
+    const int64_t n_kv = cfg_.kv_heads_at(layer);
+    const int64_t kv_dim = cfg_.kv_dim_at(layer);
+    const int64_t q_dim = cfg_.q_dim_at(layer);
+    const int64_t group = n_heads / n_kv;
     const BlockSpec& b = cfg_.block_spec;
+    // Weighted RMSNorm for the post/qk norms: Gemma 2/3 store w with the +1
+    // offset applied at runtime; Gemma 4 GGUFs store the effective scale.
+    auto norm_w = [&](float* out, const float* in, const WeightRef& w, int64_t n) {
+        if (b.plain_norm_weights) rmsnorm(out, in, static_cast<const float*>(w.data), n, cfg_.rms_eps);
+        else rmsnorm_gemma(out, in, static_cast<const float*>(w.data), n, cfg_.rms_eps);
+    };
 
-    // Ensure buffers are large enough for bs
+    // Ensure buffers are large enough for bs (sized by the widest layer).
     if (xb_.size() < (size_t)bs * dim) {
+        const int64_t q_max = cfg_.q_dim(), kv_max = cfg_.kv_dim();
         xb_.resize(bs * dim);
-        q_.resize(bs * q_dim);
-        k_.resize(bs * kv_dim);
-        v_.resize(bs * kv_dim);
-        attn_out_.resize(bs * q_dim);
+        q_.resize(bs * q_max);
+        k_.resize(bs * kv_max);
+        v_.resize(bs * kv_max);
+        attn_out_.resize(bs * q_max);
         proj_.resize(bs * dim);
         hb_.resize(bs * cfg_.ffn_dim);
         hb2_.resize(bs * cfg_.ffn_dim);
-        fused_.resize(bs * std::max(q_dim + 2 * kv_dim, 2 * cfg_.ffn_dim));
+        fused_.resize(bs * std::max(q_max + 2 * kv_max, 2 * cfg_.ffn_dim));
         if (b.n_experts > 0) {
             router_.resize(bs * b.n_experts);
             moe_.resize(bs * dim);
@@ -177,7 +214,10 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
     } else {
         linear_batch(q_.data(), loader_->getWeight(Role::AttnQ), xb_.data(), bs, pool_);
         linear_batch(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), bs, pool_);
-        linear_batch(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), bs, pool_);
+        WeightRef wv = loader_->getWeight(Role::AttnV);
+        if (wv.valid()) linear_batch(v_.data(), wv, xb_.data(), bs, pool_);
+        // Gemma 4 global layers have no attn_v: V is the raw (pre-norm, pre-RoPE) K.
+        else std::memcpy(v_.data(), k_.data(), (size_t)bs * kv_dim * sizeof(float));
         for (int64_t i = 0; i < bs; ++i) {
             add_bias(q_.data() + i * q_dim, loader_->getWeight(Role::AttnQBias), q_dim);
             add_bias(k_.data() + i * kv_dim, loader_->getWeight(Role::AttnKBias), kv_dim);
@@ -193,26 +233,43 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             if (qn.valid())
                 for (int64_t h = 0; h < n_heads; ++h) {
                     float* qh = q_.data() + i * q_dim + h * hd;
-                    rmsnorm_gemma(qh, qh, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
+                    norm_w(qh, qh, qn, hd);
                 }
             if (kn.valid())
                 for (int64_t h = 0; h < n_kv; ++h) {
                     float* kh = k_.data() + i * kv_dim + h * hd;
-                    rmsnorm_gemma(kh, kh, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
+                    norm_w(kh, kh, kn, hd);
                 }
         }
+    }
+    if (b.v_norm) {
+        for (int64_t i = 0; i < bs * n_kv; ++i) rmsnorm_noweight(v_.data() + i * hd, hd, cfg_.rms_eps);
     }
 
     // --- 4. RoPE ---
     if (b.rope != RopeKind::None) {
         float theta_base = cfg_.rope_theta;
-        if (b.rope_dual_base && ((layer + 1) % cfg_.sliding_window_pattern) != 0)
-            theta_base = cfg_.rope_theta_local;
-            
+        const bool swa_layer = cfg_.is_swa_layer(layer);
+        if (b.rope_dual_base) {
+            const bool local = cfg_.layer_swa.empty()
+                ? ((layer + 1) % cfg_.sliding_window_pattern) != 0
+                : swa_layer;
+            if (local) theta_base = cfg_.rope_theta_local;
+        }
+        // Gemma 4: global layers apply rope_freqs factors over their full head.
+        const float* ff = (!swa_layer && !cfg_.rope_freq_factors.empty() &&
+                           (int64_t)cfg_.rope_freq_factors.size() * 2 == hd)
+                              ? cfg_.rope_freq_factors.data() : nullptr;
+
         for (int64_t i = 0; i < bs; ++i) {
             float* qi = q_.data() + i * q_dim;
             float* ki = k_.data() + i * kv_dim;
             int64_t pos_i = pos + i;
+            if (b.rope_pairing == RopePairing::NeoX) {
+                rope_neox(qi, n_heads, hd, hd, pos_i, theta_base, ff);
+                rope_neox(ki, n_kv,    hd, hd, pos_i, theta_base, ff);
+                continue;
+            }
             switch (b.rope) {
                 case RopeKind::None: break;
                 case RopeKind::Partial:
@@ -239,7 +296,8 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
     }
 
     // --- 5. Cache Write & 6. Attention Math ---
-    const float scale = cfg_.query_pre_attn_scalar > 0.f ? (1.0f / std::sqrt(cfg_.query_pre_attn_scalar)) 
+    const float scale = cfg_.attn_scale > 0.f ? cfg_.attn_scale
+                      : cfg_.query_pre_attn_scalar > 0.f ? (1.0f / std::sqrt(cfg_.query_pre_attn_scalar))
                                                          : (1.0f / std::sqrt((float)hd));
     std::vector<float> head_scratch;
     if (kv_->precision() == KVPrecision::Q8_0) head_scratch.resize(hd);
@@ -251,8 +309,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
 
         if (kv_->precision() == KVPrecision::Q8_0) {
             const int64_t q8_bytes = type_nbytes(DType::Q8_0, hd);
-            const int64_t n_kv_heads = cfg_.n_kv_heads;
-            for (int64_t h = 0; h < n_kv_heads; ++h) {
+            for (int64_t h = 0; h < n_kv; ++h) {
                 uint8_t* k8 = (uint8_t*)kv_->k_ptr(layer, pos_i) + h * q8_bytes;
                 uint8_t* v8 = (uint8_t*)kv_->v_ptr(layer, pos_i) + h * q8_bytes;
                 quantize_q8_0(ki + h * hd, k8, hd);
@@ -266,7 +323,8 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         float* qi = q_.data() + i * q_dim;
         float* attn_out_i = attn_out_.data() + i * q_dim;
         
-        const int64_t start_t = cfg_.sliding_window > 0 ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
+        const int64_t start_t = (cfg_.sliding_window > 0 && cfg_.is_swa_layer(layer))
+            ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
         const int64_t window_len = pos_i - start_t + 1;
         
         for (int64_t h = 0; h < n_heads; ++h) {
@@ -305,7 +363,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         add_bias(proj_i, loader_->getWeight(Role::AttnOutBias), dim);
         if (b.post_attn_norm) {
             WeightRef apn = loader_->getWeight(Role::AttnPostNorm);
-            if (apn.valid()) rmsnorm_gemma(proj_i, proj_i, static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
+            if (apn.valid()) norm_w(proj_i, proj_i, apn, dim);
         }
         vec_add_inplace(x_i, proj_i, dim);
     }
@@ -436,15 +494,17 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
         for (int64_t i = 0; i < bs; ++i) {
             float* ffn_out_i = ffn_out + i * dim;
-            if (fpn.valid()) rmsnorm_gemma(ffn_out_i, ffn_out_i, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
+            if (fpn.valid()) norm_w(ffn_out_i, ffn_out_i, fpn, dim);
         }
     }
 
-    // --- 11. Residual Add ---
+    // --- 11. Residual Add (+ Gemma 4 per-layer output scale) ---
+    const WeightRef los = b.layer_out_scale ? loader_->getWeight(Role::LayerOutScale) : WeightRef{};
     for (int64_t i = 0; i < bs; ++i) {
         float* x_i = x_in + i * dim;
         float* ffn_out_i = ffn_out + i * dim;
         vec_add_inplace(x_i, ffn_out_i, dim);
+        if (los.valid()) scale_f32(x_i, *static_cast<const float*>(los.data), dim);
         if (hidden_hook_) hidden_hook_((int)layer, x_i, dim);
     }
 }

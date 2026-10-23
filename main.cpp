@@ -247,18 +247,45 @@ int main(int argc, char** argv) {
             ToolRegistry tools;
             ChatTemplateStyle chat_style = style_from_model(rt.config());
 
+            // `fed` is exactly the text whose tokens are in the KV cache: every
+            // rendered prompt plus the model's own generated reply. When the
+            // re-rendered history extends it verbatim (prefix-stable templates),
+            // a turn feeds ONLY the new suffix on top of the model's exact
+            // tokens — O(new text) per turn, and safe with sliding-window ring
+            // caches that cannot rewind. Otherwise fall back to prefix reuse.
+            std::string fed;
             auto run_turn = [&](const std::string& user_text) {
                 history.push_back({ChatMessage::Role::User, user_text, ""});
                 std::string rendered = render_chat(history, tools, chat_style, /*add_gen_prompt=*/true);
+                const bool append = !fed.empty() && rendered.size() > fed.size() &&
+                                    rendered.compare(0, fed.size(), fed) == 0;
                 GenStats st;
-                std::string assistant_text = rt.generate(rendered, max_new, scfg,
-                    [](const std::string& piece, int64_t) {
-                        printf("%s", piece.c_str());
-                        fflush(stdout);
-                        return true;
-                    }, &st);
+                std::string assistant_text;
+                try {
+                    rt.set_context_reuse(!append);
+                    assistant_text = rt.generate(append ? rendered.substr(fed.size()) : rendered,
+                        max_new, scfg,
+                        [](const std::string& piece, int64_t) {
+                            printf("%s", piece.c_str());
+                            fflush(stdout);
+                            return true;
+                        }, &st);
+                    rt.set_context_reuse(true);
+                } catch (const std::exception& e) {
+                    rt.set_context_reuse(true);
+                    history.pop_back();
+                    printf("\n[error] %s\n[hint] the context window is full or invalid; /clear starts a fresh session (or raise --ctx)\n", e.what());
+                    fflush(stdout);
+                    return;
+                }
                 printf("\n");
                 fflush(stdout);
+                if (getenv("SIPLLM_TURN_STATS"))
+                    fprintf(stderr, "[turn] %s  prompt %d tok (processed %d, reused %d)  ttft %.2fs  decode %.2f tok/s  ctx %d/%d\n",
+                            append ? "append" : "reuse", st.prompt_tokens, st.processed_tokens,
+                            st.reused_prefix_tokens, st.ttft_s, st.decode_tok_s, st.ctx_used, st.ctx_max);
+                fflush(stdout);
+                fed = rendered + assistant_text;
                 history.push_back({ChatMessage::Role::Assistant, assistant_text, ""});
             };
 
@@ -310,6 +337,7 @@ int main(int argc, char** argv) {
                     } else if (trimmed == "/clear") {
                         rt.reset();
                         history.clear();
+                        fed.clear();
                         printf("Session cleared.\n");
                         continue;
                     } else if (trimmed == "/help") {
@@ -357,7 +385,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "model: %s\nconfig: %s\ntokenizer: %s vocab=%lld\n",
                 model.c_str(), rt.config().summary().c_str(),
                 rt.tokenizer().kind() == Tokenizer::Kind::BPE ? "BPE" :
-                rt.tokenizer().kind() == Tokenizer::Kind::SentencePiece ? "SPM" : "byte",
+                rt.tokenizer().kind() == Tokenizer::Kind::SentencePiece ? "SPM" :
+                rt.tokenizer().kind() == Tokenizer::Kind::SpmBpe ? "SPM-BPE" : "byte",
                 (long long)rt.tokenizer().vocab_size());
         fprintf(stderr, "residency=%s async=%d buffers=%d mmap=%d\n\n",
                 opt.residency == Residency::FP32 ? "fp32" : "quant",

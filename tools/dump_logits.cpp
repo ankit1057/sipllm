@@ -54,20 +54,24 @@ static void write_dump(const std::string& path,
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { fprintf(stderr, "usage: dump_logits <model> [-p prompt] [-k K] [--no-layers]\n"); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: dump_logits <model> [-p prompt] [-k K] [--no-layers] [--fast] [--ctx N] [--threads N] [--raw out.dump]\n"); return 2; }
     std::string model = argv[1], prompt = "The capital of France is", raw_out;
-    int topk = 8; bool layers = true;
+    int topk = 8, ctx = 0, threads = 0; bool layers = true, fast = false;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-p" && i + 1 < argc) prompt = argv[++i];
         else if (a == "-k" && i + 1 < argc) topk = std::stoi(argv[++i]);
         else if (a == "--no-layers") layers = false;
         else if (a == "--raw" && i + 1 < argc) raw_out = argv[++i];
+        else if (a == "--fast") fast = true;   // int8-activation kernels (as in llm --fast)
+        else if (a == "--ctx" && i + 1 < argc) ctx = std::stoi(argv[++i]);
+        else if (a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
     }
     try {
         auto src = open_model(model);
         LayerLoader::Options opt; opt.residency = Residency::Quantized;
-        Runtime rt(std::move(src), opt);
+        opt.fast_quant = fast;
+        Runtime rt(std::move(src), opt, ctx, threads);
         printf("# model:  %s\n# config: %s\n# prompt: \"%s\"\n",
                model.c_str(), rt.config().summary().c_str(), prompt.c_str());
 

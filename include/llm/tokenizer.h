@@ -6,6 +6,10 @@
 //                   space, <0xNN> byte fallback.
 //   BPE           : Llama-3 / GPT-2 byte-level BPE — byte->unicode remap, then
 //                   rank-ordered merges from the merges list.
+//   SpmBpe        : Gemma 4 — rank-ordered BPE merges over raw UTF-8 with ' '
+//                   escaped to '▁', split only at newline runs, <0xNN> byte
+//                   fallback, and control/user-defined tokens (chat markers like
+//                   <|turn>) matched literally in the text.
 //
 // decode() is the inverse and, importantly, is safe to call incrementally on a
 // single new id during streaming generation.
@@ -22,7 +26,7 @@ namespace llm {
 
 class Tokenizer {
 public:
-    enum class Kind { Byte, SentencePiece, BPE };
+    enum class Kind { Byte, SentencePiece, BPE, SpmBpe };
 
     // Build from a model's tokenizer metadata; falls back to Byte if absent.
     static Tokenizer from_source(const WeightSource& src);
@@ -42,6 +46,8 @@ public:
 private:
     std::vector<int64_t> encode_spm(const std::string& text) const;
     std::vector<int64_t> encode_bpe(const std::string& text) const;
+    std::vector<int64_t> encode_spm_bpe(const std::string& text) const;
+    void spm_bpe_chunk(const std::string& chunk, std::vector<int64_t>& out) const;
 
     Kind kind_ = Kind::Byte;
     std::vector<std::string> id_to_tok_;
@@ -52,6 +58,7 @@ private:
     // byte-level BPE remap tables
     std::vector<std::string> byte_to_unicode_;    // 256 entries
     std::unordered_map<std::string, uint8_t> unicode_to_byte_;
+    std::vector<std::string> specials_;           // SpmBpe: literal special tokens, longest first
     int64_t bos_ = -1, eos_ = -1;
     std::vector<int64_t> eog_ids_;
 };

@@ -73,7 +73,18 @@ Tokenizer Tokenizer::from_source(const WeightSource& src) {
     bool is_bpe = (model == "gpt2") ||
                   (model.empty() && merges && merges->kind == MetaValue::Kind::StrArr &&
                    !merges->sa.empty() && t.scores_.empty());
-    if (is_bpe) {
+    if (model == "gemma4") {
+        t.kind_ = Kind::SpmBpe;
+        if (merges && merges->kind == MetaValue::Kind::StrArr)
+            for (int32_t r = 0; r < (int32_t)merges->sa.size(); ++r)
+                t.merge_rank_[merges->sa[r]] = r;
+        // CONTROL (3) and USER_DEFINED (4) tokens are matched literally.
+        for (size_t i = 0; i < t.types_.size() && i < t.id_to_tok_.size(); ++i)
+            if ((t.types_[i] == 3 || t.types_[i] == 4) && !t.id_to_tok_[i].empty())
+                t.specials_.push_back(t.id_to_tok_[i]);
+        std::sort(t.specials_.begin(), t.specials_.end(),
+                  [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
+    } else if (is_bpe) {
         t.kind_ = Kind::BPE;
         if (merges && merges->kind == MetaValue::Kind::StrArr)
             for (int32_t r = 0; r < (int32_t)merges->sa.size(); ++r)
@@ -89,6 +100,11 @@ Tokenizer Tokenizer::from_source(const WeightSource& src) {
     // Llama-3 also ends turns on <|eot_id|>.
     if (auto it = t.tok_to_id_.find("<|eot_id|>"); it != t.tok_to_id_.end())
         t.eog_ids_.push_back(it->second);
+    // Gemma 4 ends a turn on <turn|> (the GGUF eos) and also emits <eos>.
+    if (t.kind_ == Kind::SpmBpe)
+        for (const char* e : {"<eos>", "<turn|>"})
+            if (auto it = t.tok_to_id_.find(e); it != t.tok_to_id_.end() && !t.is_eog(it->second))
+                t.eog_ids_.push_back(it->second);
     return t;
 }
 
@@ -212,6 +228,76 @@ std::vector<int64_t> Tokenizer::encode_bpe(const std::string& text) const {
     return out;
 }
 
+// ---- Gemma 4 SPM-style BPE ------------------------------------------------
+// Mirrors llama.cpp's LLAMA_VOCAB_PRE_TYPE_GEMMA4: special tokens are split out
+// first; in the remaining text ' ' -> '▁', then the text is cut into runs of
+// non-newlines and runs of newlines, and each run is merged by BPE rank over
+// UTF-8 characters. Symbols missing from the vocab fall back to <0xNN> bytes.
+void Tokenizer::spm_bpe_chunk(const std::string& chunk, std::vector<int64_t>& out) const {
+    if (chunk.empty()) return;
+    if (chunk.find_first_not_of('\n') == std::string::npos) {
+        // A pure newline run is a single vocab token when one exists.
+        if (auto it = tok_to_id_.find(chunk); it != tok_to_id_.end()) { out.push_back(it->second); return; }
+    }
+    std::vector<std::string> syms;
+    for (size_t i = 0; i < chunk.size();) {
+        unsigned char c = chunk[i];
+        size_t len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        len = std::min(len, chunk.size() - i);
+        syms.push_back(chunk.substr(i, len));
+        i += len;
+    }
+    // Merge the lowest-rank adjacent pair until none applies. Ties resolve to
+    // the leftmost pair, as llama.cpp's bigram queue does.
+    for (;;) {
+        int best = INT32_MAX, besti = -1;
+        for (size_t i = 0; i + 1 < syms.size(); ++i) {
+            auto it = merge_rank_.find(syms[i] + " " + syms[i + 1]);
+            if (it != merge_rank_.end() && it->second < best) { best = it->second; besti = (int)i; }
+        }
+        if (besti < 0) break;
+        syms[besti] += syms[besti + 1];
+        syms.erase(syms.begin() + besti + 1);
+    }
+    for (const std::string& sym : syms) {
+        if (auto it = tok_to_id_.find(sym); it != tok_to_id_.end()) { out.push_back(it->second); continue; }
+        for (unsigned char b : sym) {
+            char buf[8]; snprintf(buf, sizeof(buf), "<0x%02X>", b);
+            if (auto it = tok_to_id_.find(buf); it != tok_to_id_.end()) out.push_back(it->second);
+        }
+    }
+}
+
+std::vector<int64_t> Tokenizer::encode_spm_bpe(const std::string& text) const {
+    std::vector<int64_t> out;
+    auto encode_raw = [&](const std::string& raw) {
+        std::string esc;
+        esc.reserve(raw.size() + raw.size() / 2);
+        for (char c : raw) { if (c == ' ') esc += "\xE2\x96\x81"; else esc += c; }
+        for (size_t i = 0; i < esc.size();) {
+            const bool nl = esc[i] == '\n';
+            size_t j = i;
+            while (j < esc.size() && (esc[j] == '\n') == nl) ++j;
+            spm_bpe_chunk(esc.substr(i, j - i), out);
+            i = j;
+        }
+    };
+    size_t start = 0, i = 0;
+    while (i < text.size()) {
+        const std::string* hit = nullptr;
+        if (text[i] == '<' || text[i] == '[')
+            for (const std::string& sp : specials_)
+                if (text.compare(i, sp.size(), sp) == 0) { hit = &sp; break; }
+        if (!hit) { ++i; continue; }
+        encode_raw(text.substr(start, i - start));
+        out.push_back(tok_to_id_.at(*hit));
+        i += hit->size();
+        start = i;
+    }
+    encode_raw(text.substr(start));
+    return out;
+}
+
 std::vector<int64_t> Tokenizer::encode(const std::string& text, bool add_bos) const {
     std::vector<int64_t> ids;
     if (add_bos && bos_ >= 0) ids.push_back(bos_);
@@ -222,6 +308,7 @@ std::vector<int64_t> Tokenizer::encode(const std::string& text, bool add_bos) co
             break;
         case Kind::SentencePiece: body = encode_spm(text); break;
         case Kind::BPE:           body = encode_bpe(text); break;
+        case Kind::SpmBpe:        body = encode_spm_bpe(text); break;
     }
     ids.insert(ids.end(), body.begin(), body.end());
     return ids;
@@ -231,7 +318,7 @@ std::string Tokenizer::decode_token(int64_t id) const {
     if (id < 0 || id >= (int64_t)id_to_tok_.size()) return "";
     if (kind_ == Kind::Byte) return id_to_tok_[id];
     const std::string& t = id_to_tok_[id];
-    if (kind_ == Kind::SentencePiece) {
+    if (kind_ == Kind::SentencePiece || kind_ == Kind::SpmBpe) {
         // <0xNN> -> raw byte; ▁ -> space
         if (t.size() == 6 && t[0] == '<' && t[1] == '0' && t[2] == 'x') {
             int v = std::stoi(t.substr(3, 2), nullptr, 16);

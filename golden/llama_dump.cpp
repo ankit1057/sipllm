@@ -16,6 +16,7 @@
 //
 // NOTE: llama.cpp's C API evolves; if a symbol is missing, check its current
 // llama.h. The logic (decode prompt, grab l_out-<il> + final logits) is stable.
+#include <cstdlib>
 #include "llama.h"
 
 #include <cmath>
@@ -60,9 +61,18 @@ int main(int argc, char** argv) {
 
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx = 512;
+    if (const char* c = getenv("LLAMA_DUMP_CTX")) cp.n_ctx = (uint32_t)atoi(c);   // long-prompt goldens
+    cp.n_batch = cp.n_ubatch = cp.n_ctx;   // whole prompt in one decode call
     cp.cb_eval = cb_eval;
     cp.cb_eval_user_data = nullptr;
     cp.embeddings = false;
+    // LLAMA_DUMP_EXACT=1: f32 KV cache + no flash attention, removing two of
+    // llama.cpp's default approximations (f16 KV, FA) from the golden reference.
+    if (const char* e = getenv("LLAMA_DUMP_EXACT"); e && e[0] == '1') {
+        cp.type_k = GGML_TYPE_F32;
+        cp.type_v = GGML_TYPE_F32;
+        cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    }
     llama_context* ctx = llama_init_from_model(model, cp);
 
     const llama_vocab* vocab = llama_model_get_vocab(model);

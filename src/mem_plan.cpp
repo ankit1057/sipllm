@@ -141,8 +141,7 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
         size_t attn = (size_t)ctx * sizeof(float);
         size_t resid = (size_t)ctx * cfg.dim * sizeof(float);
         
-        size_t kv_row_bytes = req.kv_precision == KVPrecision::Q8_0 ? type_nbytes(DType::Q8_0, cfg.kv_dim()) : cfg.kv_dim() * sizeof(float);
-        size_t kv = (size_t)cfg.n_layers * kv_row_bytes * ctx * 2;
+        size_t kv = cfg.kv_cache_bytes(ctx, req.kv_precision == KVPrecision::Q8_0);
 
         std::vector<bool> stream_head_opts = {req.stream_head_req};
         if (!req.stream_head_req && !tied) stream_head_opts.push_back(true);
@@ -187,7 +186,7 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
         int min_ctx = ctx_candidates.back();
         size_t min_attn = (size_t)min_ctx * sizeof(float);
         size_t min_resid = (size_t)min_ctx * cfg.dim * sizeof(float);
-        size_t min_kv = (size_t)cfg.n_layers * cfg.kv_dim() * min_ctx * 2 * sizeof(float);
+        size_t min_kv = cfg.kv_cache_bytes(min_ctx, false);
         size_t min_head = tied ? 0 : out_streamed_size;
         size_t min_ring = layer_size; // 1 buffer
         

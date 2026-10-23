@@ -72,7 +72,20 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     pool_ = std::make_unique<ThreadPool>(threads);
     opt_.dequant_pool = pool_.get();
     loader_ = std::make_unique<LayerLoader>(src_.get(), cfg_, opt_);
-    kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx, kv_precision);
+    if (!cfg_.layer_swa.empty() || !cfg_.layer_head_dim.empty() || !cfg_.layer_n_kv_heads.empty()) {
+        // Per-layer geometry (Gemma 4): each layer's rows are exactly its kv
+        // width, and sliding-window layers keep only a window-sized ring, so a
+        // long session's KV grows with the few global layers alone.
+        std::vector<int64_t> dims((size_t)cfg_.n_layers), wins((size_t)cfg_.n_layers, 0);
+        for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+            dims[(size_t)l] = cfg_.kv_dim_at(l);
+            if (!cfg_.layer_swa.empty() && cfg_.layer_swa[(size_t)l] && cfg_.sliding_window > 0)
+                wins[(size_t)l] = cfg_.sliding_window;
+        }
+        kv_ = std::make_unique<KVCache>(dims, wins, ctx, kv_precision);
+    } else {
+        kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx, kv_precision);
+    }
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
     tok_ = Tokenizer::from_source(*src_);
 }
@@ -170,6 +183,9 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         if (reuse_r > (int64_t)prompt_ids.size() - 1)
             reuse_r = (int64_t)prompt_ids.size() - 1;
         if (reuse_r < 0) reuse_r = 0;
+        // A sliding-window ring may already have overwritten the history the
+        // rewound tail would attend to; then recompute from scratch.
+        if (!kv_->can_rewind(reuse_r, (int64_t)committed_.size())) reuse_r = 0;
         pos_ = reuse_r;
         committed_.resize((size_t)reuse_r);
         st.reused_prefix_tokens = (int)reuse_r;

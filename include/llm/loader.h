@@ -51,6 +51,8 @@ enum class Role {
     FfnGateInp, FfnGateExps, FfnUpExps, FfnDownExps,
     // Optional LayerNorm + projection biases (GPT-2 / Phi-2, fully-biased archs).
     AttnNormBias, FfnNormBias, AttnQKVBias, AttnOutBias, FfnUpBias, FfnDownBias,
+    // Optional per-layer scalar applied to the residual after the block (Gemma 4).
+    LayerOutScale,
     COUNT
 };
 

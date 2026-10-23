@@ -25,6 +25,7 @@
 #include "llm/common.h"
 #include "llm/dtype.h"
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -32,31 +33,71 @@ namespace llm {
 
 enum class KVPrecision { FP32, Q8_0 };
 
+// Per-layer layout (Gemma 4). Every layer may have its own row width, and a
+// layer with window W > 0 is a RING of min(W, max_ctx) rows: position p lives
+// in slot p % W, because a sliding-window layer never attends further back
+// than W-1 positions. The uniform constructor gives every layer the same width
+// and no window, which is byte-for-byte the classic [layer][pos][kv_dim] cache.
+// kv_dim() reports the widest row (what a per-position buffer must hold).
 class KVCache {
 public:
     KVCache(int64_t n_layers, int64_t kv_dim, int64_t max_ctx, KVPrecision precision = KVPrecision::FP32)
-        : n_layers_(n_layers), kv_dim_(kv_dim), max_ctx_(max_ctx), precision_(precision) {
+        : KVCache(std::vector<int64_t>((size_t)n_layers, kv_dim),
+                  std::vector<int64_t>((size_t)n_layers, 0), max_ctx, precision) {}
+
+    KVCache(const std::vector<int64_t>& layer_kv_dim, const std::vector<int64_t>& layer_window,
+            int64_t max_ctx, KVPrecision precision = KVPrecision::FP32)
+        : n_layers_((int64_t)layer_kv_dim.size()), max_ctx_(max_ctx), precision_(precision) {
         // Start with a small capacity instead of the full max_ctx window. Most
         // sessions are far shorter than the trained context, and growth is
         // amortized O(1) via doubling. Never exceed max_ctx (the hard ceiling
         // the runtime enforces before every forward) or underflow to zero.
         cap_ = max_ctx_ < kInitialCap ? max_ctx_ : kInitialCap;
         if (cap_ < 1) cap_ = max_ctx_ < 1 ? 1 : max_ctx_;
-        
-        if (precision_ == KVPrecision::Q8_0) {
-            bytes_per_row_ = type_nbytes(DType::Q8_0, kv_dim_);
-        } else {
-            bytes_per_row_ = kv_dim_ * sizeof(float);
+        layers_.resize((size_t)n_layers_);
+        for (int64_t l = 0; l < n_layers_; ++l) {
+            Layer& L = layers_[(size_t)l];
+            L.kv_dim = layer_kv_dim[(size_t)l];
+            const int64_t w = l < (int64_t)layer_window.size() ? layer_window[(size_t)l] : 0;
+            L.window = (w > 0 && w < max_ctx_) ? w : 0;   // a window >= ctx is no ring
+            L.row_bytes = precision_ == KVPrecision::Q8_0 ? type_nbytes(DType::Q8_0, L.kv_dim)
+                                                          : (size_t)L.kv_dim * sizeof(float);
+            kv_dim_ = std::max(kv_dim_, L.kv_dim);
+            if (L.window > 0) has_ring_ = true;
+            L.cap = eff_cap(L, cap_);
+            L.k.assign((size_t)L.cap * L.row_bytes, 0);
+            L.v.assign((size_t)L.cap * L.row_bytes, 0);
         }
-        alloc(cap_);
     }
 
     int64_t max_ctx()  const { return max_ctx_; }
     int64_t kv_dim()   const { return kv_dim_; }
+    int64_t kv_dim(int64_t layer) const { return layers_[(size_t)layer].kv_dim; }
+    int64_t window(int64_t layer) const { return layers_[(size_t)layer].window; }
+    size_t  row_bytes(int64_t layer) const { return layers_[(size_t)layer].row_bytes; }
+    bool    has_ring() const { return has_ring_; }
     int64_t n_layers() const { return n_layers_; }
     int64_t seq_len()  const { return seq_len_; }
     int64_t capacity() const { return cap_; }   // currently-resident positions
     KVPrecision precision() const { return precision_; }
+
+    // Oldest position of `layer` still resident once `seq_len` positions have
+    // been written (ring layers forget everything older than their window).
+    int64_t first_valid(int64_t layer, int64_t seq_len) const {
+        const int64_t w = layers_[(size_t)layer].window;
+        return (w > 0 && seq_len > w) ? seq_len - w : 0;
+    }
+    // Can the sequence be rewound to `pos` (keeping [0,pos)) after `written`
+    // positions, with every position a later query can attend still resident?
+    // Always true without ring layers; with them, only when nothing in the
+    // window behind `pos` has been overwritten.
+    bool can_rewind(int64_t pos, int64_t written) const {
+        for (const Layer& L : layers_) {
+            if (L.window == 0 || written <= L.window) continue;
+            if (pos < written - 1) return false;
+        }
+        return true;
+    }
 
     // Advance the filled length after writing position `pos`. Also ensures the
     // backing store can hold `n` positions (writes normally grow it first via
@@ -73,17 +114,21 @@ public:
     // already been written, hence is within cap_).
     void* k_ptr(int64_t layer, int64_t pos) {
         if (pos >= cap_) grow_to(pos + 1);
-        return (void*)(k_.data() + offset_bytes(layer, pos));
+        Layer& L = layers_[(size_t)layer];
+        return (void*)(L.k.data() + slot(L, pos) * L.row_bytes);
     }
     void* v_ptr(int64_t layer, int64_t pos) {
         if (pos >= cap_) grow_to(pos + 1);
-        return (void*)(v_.data() + offset_bytes(layer, pos));
+        Layer& L = layers_[(size_t)layer];
+        return (void*)(L.v.data() + slot(L, pos) * L.row_bytes);
     }
     const void* k_ptr(int64_t layer, int64_t pos) const {
-        return (const void*)(k_.data() + offset_bytes(layer, pos));
+        const Layer& L = layers_[(size_t)layer];
+        return (const void*)(L.k.data() + slot(L, pos) * L.row_bytes);
     }
     const void* v_ptr(int64_t layer, int64_t pos) const {
-        return (const void*)(v_.data() + offset_bytes(layer, pos));
+        const Layer& L = layers_[(size_t)layer];
+        return (const void*)(L.v.data() + slot(L, pos) * L.row_bytes);
     }
 
     float* k(int64_t layer, int64_t pos) { return (float*)k_ptr(layer, pos); }
@@ -91,7 +136,17 @@ public:
     const float* k(int64_t layer, int64_t pos) const { return (const float*)k_ptr(layer, pos); }
     const float* v(int64_t layer, int64_t pos) const { return (const float*)v_ptr(layer, pos); }
 
-    size_t bytes() const { return k_.size() + v_.size(); }
+    size_t bytes() const {
+        size_t b = 0;
+        for (const Layer& L : layers_) b += L.k.size() + L.v.size();
+        return b;
+    }
+    // Resident bytes for `n` positions under this layout (planning / reports).
+    size_t bytes_for(int64_t n) const {
+        size_t b = 0;
+        for (const Layer& L : layers_) b += 2 * (size_t)eff_cap(L, std::min(n, max_ctx_)) * L.row_bytes;
+        return b;
+    }
 
     // Inject contiguous float KV data into layer from pos=0 to num_positions
     void inject(int64_t layer, const float* k_src, const float* v_src, int64_t num_positions) {
@@ -104,45 +159,44 @@ public:
 private:
     static constexpr int64_t kInitialCap = 64;
 
-    size_t offset_bytes(int64_t layer, int64_t pos) const {
-        return (((size_t)layer * cap_) + pos) * bytes_per_row_;
+    struct Layer {
+        int64_t kv_dim = 0, window = 0, cap = 0;
+        size_t row_bytes = 0;
+        std::vector<uint8_t> k, v;
+    };
+
+    static int64_t eff_cap(const Layer& L, int64_t cap) {
+        return L.window > 0 ? std::min(cap, L.window) : cap;
+    }
+    static size_t slot(const Layer& L, int64_t pos) {
+        return (size_t)(L.window > 0 ? pos % L.window : pos);
     }
 
-    void alloc(int64_t cap) {
-        const size_t per = (size_t)n_layers_ * cap * bytes_per_row_;
-        k_.assign(per, 0);
-        v_.assign(per, 0);
-    }
-
-    // Grow capacity to at least `need` positions (doubling, capped at max_ctx),
-    // re-laying-out existing rows because the per-layer stride is `cap_`.
+    // Grow capacity to at least `need` positions (doubling, capped at max_ctx).
+    // A ring layer stops growing at its window; before it wraps, slot == pos,
+    // so copying its leading rows preserves every value verbatim.
     void grow_to(int64_t need) {
         if (need <= cap_) return;
         int64_t nc = cap_ > 0 ? cap_ : 1;
         while (nc < need) nc <<= 1;
         if (nc > max_ctx_) nc = max_ctx_;   // need <= max_ctx_ (runtime-enforced)
-
-        const size_t per = (size_t)n_layers_ * nc * bytes_per_row_;
-        std::vector<uint8_t> nk(per, 0), nv(per, 0);
-        // Copy each layer's rows from the old stride (cap_) to the new (nc).
-        const size_t old_row = (size_t)cap_ * bytes_per_row_;
-        for (int64_t l = 0; l < n_layers_; ++l) {
-            const size_t src = (size_t)l * cap_ * bytes_per_row_;
-            const size_t dst = (size_t)l * nc * bytes_per_row_;
-            std::memcpy(nk.data() + dst, k_.data() + src, old_row);
-            std::memcpy(nv.data() + dst, v_.data() + src, old_row);
+        for (Layer& L : layers_) {
+            const int64_t ncap = eff_cap(L, nc);
+            if (ncap == L.cap) continue;
+            L.k.resize((size_t)ncap * L.row_bytes, 0);
+            L.v.resize((size_t)ncap * L.row_bytes, 0);
+            L.cap = ncap;
         }
-        k_.swap(nk);
-        v_.swap(nv);
         cap_ = nc;
     }
 
-    int64_t n_layers_, kv_dim_, max_ctx_;
+    int64_t n_layers_, max_ctx_;
+    int64_t kv_dim_ = 0;
     KVPrecision precision_;
-    size_t bytes_per_row_;
+    bool has_ring_ = false;
     int64_t cap_ = 0;
     int64_t seq_len_ = 0;
-    std::vector<uint8_t> k_, v_;
+    std::vector<Layer> layers_;
 };
 
 } // namespace llm

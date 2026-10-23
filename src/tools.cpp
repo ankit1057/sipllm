@@ -285,6 +285,7 @@ ChatTemplateStyle style_from_model(const ModelConfig& cfg) {
         case Arch::Qwen2:   return ChatTemplateStyle::Qwen2;
         case Arch::Gemma2:
         case Arch::Gemma3:  return ChatTemplateStyle::Gemma;
+        case Arch::Gemma4:  return ChatTemplateStyle::Gemma4;
         case Arch::Phi3:    return ChatTemplateStyle::Phi3;
         case Arch::Phi2:
         case Arch::GPT2:    return ChatTemplateStyle::GPT2;
@@ -347,6 +348,29 @@ std::string render_chat(const std::vector<ChatMessage>& messages,
                 o << "<start_of_turn>" << who << "\n" << m.content << "<end_of_turn>\n";
             }
             if (add_gen_prompt) o << "<start_of_turn>model\n";
+            break;
+
+        case ChatTemplateStyle::Gemma4:
+            // Follows the GGUF's jinja template with thinking disabled: user and
+            // system content is trimmed, the model turn is "model", and the
+            // generation prompt opens an empty thought channel so the reply
+            // starts directly. Past model turns are rendered exactly as they
+            // were generated (empty thought channel, untrimmed) rather than
+            // stripped like the jinja does: the history then re-renders as a
+            // verbatim extension of the tokens already in the KV cache, so a
+            // multi-turn chat only ever prefills the new turn.
+            for (const ChatMessage& m : msgs) {
+                if (m.role == ChatMessage::Role::Assistant) {
+                    o << "<|turn>model\n<|channel>thought\n<channel|>" << m.content << "<turn|>\n";
+                    continue;
+                }
+                const char* who = m.role == ChatMessage::Role::System ? "system" : "user";
+                std::string c = m.content;
+                const size_t b0 = c.find_first_not_of(" \t\r\n");
+                c = b0 == std::string::npos ? "" : c.substr(b0, c.find_last_not_of(" \t\r\n") - b0 + 1);
+                o << "<|turn>" << who << "\n" << c << "<turn|>\n";
+            }
+            if (add_gen_prompt) o << "<|turn>model\n<|channel>thought\n<channel|>";
             break;
 
         case ChatTemplateStyle::Mistral:
