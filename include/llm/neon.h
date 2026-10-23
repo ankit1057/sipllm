@@ -17,13 +17,20 @@
 
 namespace llm {
 
-// True if built with SDOT (dot-product) support.
+// True if THIS CPU implements SDOT (asimddp). Detected at runtime (getauxval /
+// sysctl), not at compile time, so a baseline-ISA binary still uses the SDOT
+// kernels on cores that have them. SIPLLM_CPU=generic forces false.
 bool neon_dotprod_available();
 
-// Fast-quant kernel toggle. When enabled, linear() routes Q8_0 projections
-// through the int8 SDOT path (matmul_q8_0_i8) instead of exact fp32 dequant.
-// Off by default so the fp32-dequant path stays the correctness oracle; the
-// SDOT path quantizes the activation (numerically equivalent, like llama.cpp).
+// True if an int8 kernel exists for this CPU: SDOT on ARM (runtime), or a
+// binary built with AVX2 on x86.
+bool int8_kernels_available();
+
+// Fast-quant kernel toggle (--fast). fast_quant_enabled() is true only when it
+// was requested AND int8_kernels_available(); otherwise linear()/linear_batch()
+// take the exact fp32-dequant path for the whole batch. Off by default so the
+// exact path stays the correctness oracle; the int8 paths quantize the
+// activation (like llama.cpp).
 void set_fast_quant(bool on);
 bool fast_quant_enabled();
 
@@ -44,6 +51,31 @@ void matmul_q4_K_i8(float* y, const void* W, const float* x,
 // Same gate, activation quantization and fallback as matmul_q4_K_i8.
 void matmul_q6_K_i8(float* y, const void* W, const float* x,
                     int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+
+// Batched (prefill) forms: Y[bs][n_out] = X[bs][n_in] . W^T. On ARM with SDOT
+// the activations are quantized once for the batch and each weight row is
+// unpacked once per small tile of tokens; per token the result is bit-identical
+// to the single-vector kernel. Elsewhere they call the single-vector kernel per
+// token (today's behavior).
+void matmul_q8_0_i8_batch(float* Y, const void* W, const float* X, int64_t bs,
+                          int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+void matmul_q4_K_i8_batch(float* Y, const void* W, const float* X, int64_t bs,
+                          int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+void matmul_q6_K_i8_batch(float* Y, const void* W, const float* X, int64_t bs,
+                          int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
+
+// ---- Wave 15: Q4_K weights interleaved 4 rows at a time ("IL4") -----------
+// Same bytes as GGUF Q4_K, rearranged for a lane-per-row SDOT kernel: ~2x on
+// prefill, ~1.3-1.7x on decode (measured). Opt-in: SIPLLM_FAST_LAYOUT=il4 with
+// --fast. Results equal the row-major int8 kernels up to float summation order.
+bool q4_K_interleave_supported();   // ARM with SDOT
+// Repack a [n_out, n_in] Q4_K matrix in place (n_out % 4 == 0, n_in % 256 == 0).
+// The buffer must be owned memory (never an mmap of the model file).
+void repack_q4_K_il4_inplace(void* data, int64_t n_out, int64_t n_in);
+// Y[bs][n_out] = X[bs][n_in] . W^T for IL4 weights; any bs >= 1. Requires
+// q4_K_interleave_supported().
+void matmul_q4_K_il4(float* Y, const void* W, const float* X, int64_t bs,
+                     int64_t n_out, int64_t n_in, ThreadPool* pool = nullptr);
 
 // Bulk fp16 -> fp32 using the hardware half-precision converter (asimdhp).
 void fp16_to_fp32_bulk(const uint16_t* src, float* dst, int64_t n);

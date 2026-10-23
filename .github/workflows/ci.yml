@@ -37,6 +37,37 @@ jobs:
           ./build/inspect_gguf /tmp/toy.gguf | head -20
 
   # -------------------------------------------------------------------------
+  # Runtime CPU dispatch (Issue #68): release bundles are built for the baseline
+  # ISA. Exercise both dispatch outcomes on real hardware: the int8 kernels
+  # (SDOT on arm64, picked at runtime; AVX2 needs its own build on x86) and the
+  # exact fallback forced with SIPLLM_CPU=generic.
+  portable:
+    name: portable baseline build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04-arm, arch: aarch64, archflags: "" }
+          - { runner: ubuntu-latest,    arch: x86_64,  archflags: "-march=x86-64" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (baseline ISA)
+        run: make -j"$(nproc)" ARCHFLAGS="${{ matrix.archflags }}" all
+      - name: Tests (dispatch as detected)
+        run: make ARCHFLAGS="${{ matrix.archflags }}" test
+      - name: Tests (SIPLLM_CPU=generic fallback)
+        run: SIPLLM_CPU=generic make ARCHFLAGS="${{ matrix.archflags }}" test
+      - name: Only src/neon_sdot.cpp may contain SDOT (aarch64)
+        if: matrix.arch == 'aarch64'
+        run: |
+          set -e
+          for o in build/*.o; do
+            [ "$o" = build/neon_sdot.o ] && continue
+            if objdump -d "$o" | grep -qwE 'sdot|udot'; then echo "SDOT outside neon_sdot.cpp: $o"; exit 1; fi
+          done
+          objdump -d build/neon_sdot.o | grep -cw sdot
+
   # Correctness gate 1: sanitizers. Built with HARDEN= (no auto-var-init) so
   # the sanitizers retain their ability to DETECT uninitialized reads, races,
   # OOB and UB — the release build hardens with -ftrivial-auto-var-init=zero,
