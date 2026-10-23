@@ -11,6 +11,8 @@
 #include "llm/session.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 #include <algorithm>
 
@@ -68,6 +70,17 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     opt_.stream_lm_head = plan.stream_lm_head;
     opt_.n_buffers = plan.n_buffers;
     opt_.ram_budget_bytes = plan.weight_ceiling;
+
+    // Waves 15-16 experiment: SIPLLM_FAST_LAYOUT=il4 interleaves resident Q4_K
+    // and Q6_K matrices for the lane-per-row SDOT kernels (il4-q4: Q4_K only,
+    // the wave-15 behaviour). Only with --fast on an SDOT core; otherwise
+    // ignored, and every path is unchanged.
+    if (const char* lay = std::getenv("SIPLLM_FAST_LAYOUT")) {
+        const std::string l(lay);
+        const bool ok = opt_.fast_quant && q4_K_interleave_supported();
+        opt_.interleave_q4k = ok && (l == "il4" || l == "il4-q4");
+        opt_.interleave_q6k = ok && l == "il4";
+    }
 
     pool_ = std::make_unique<ThreadPool>(threads);
     opt_.dequant_pool = pool_.get();

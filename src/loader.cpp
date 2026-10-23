@@ -1,5 +1,6 @@
 // loader.cpp — streaming LayerLoader implementation (see loader.h).
 #include "llm/loader.h"
+#include "llm/neon.h"
 #include "llm/common.h"
 #include "llm/quant.h"
 #include "llm/linear.h"
@@ -214,10 +215,36 @@ void LayerLoader::plan_and_pin_layers() {
             pinned_[l].layer = -1;
             break;
         }
+        if (opt_.interleave_q4k || opt_.interleave_q6k) interleave_slot(pinned_[l]);   // waves 15-16, same size
         pinned_[l].state = Slot::State::Ready;
         pinned_mask_[l]  = 1;
         pinned_bytes_   += sb;
         ++n_pinned_;
+    }
+}
+
+// Wave 15: repack the dense Q4_K (wave 16: and Q6_K) matrices of a resident slot into the 4-row
+// interleaved layout, in the slot's own buffers (never an mmap of the file:
+// quantized slots always hold a copy, see load_weight_into). MoE expert tensors
+// are sliced by row offset in the FFN block and stay native.
+void LayerLoader::interleave_slot(Slot& s) {
+    static const Role kDense[] = {Role::AttnQ, Role::AttnK, Role::AttnV, Role::AttnOut, Role::AttnQKV,
+                                  Role::FfnGate, Role::FfnUp, Role::FfnDown};
+    for (Role r : kDense) {
+        WeightRef& w = s.ref[(int)r];
+        if (!w.valid() || w.layout != kLayoutNative) continue;
+        if (w.n_out % 4 != 0 || w.n_in % 256 != 0) continue;
+        if (w.dtype == DType::Q4_K && opt_.interleave_q4k) {
+            repack_q4_K_il4_inplace(s.buf[(int)r].data(), w.n_out, w.n_in);
+            w.layout = kLayoutQ4K_IL4;
+        } else if (w.dtype == DType::Q6_K && opt_.interleave_q6k) {   // wave 16
+            repack_q6_K_il4_inplace(s.buf[(int)r].data(), w.n_out, w.n_in);
+            w.layout = kLayoutQ6K_IL4;
+            ++n_interleaved_q6k_;
+        } else {
+            continue;
+        }
+        ++n_interleaved_;
     }
 }
 

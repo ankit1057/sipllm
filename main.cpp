@@ -5,6 +5,7 @@
 //       [--ctx N] [--threads N] [--seed S] [--greedy]
 //
 // Streams tokens to stdout as they are produced and prints a stats block.
+#include "llm/neon.h"
 #include "llm/runtime.h"
 #include "llm/device_profile.h"
 #include "llm/auto_tuner.h"
@@ -92,7 +93,9 @@ int main(int argc, char** argv) {
     AutoTunerOptions tuner_opt;
     bool schedule_overridden = false;
     bool threads_overridden = false;
-    ThreadPool::SchedulePolicy schedule_policy = ThreadPool::SchedulePolicy::Proportional2;
+    // fixed16: small dynamic chunks; robust on big.LITTLE (wave 16 measurement:
+    // Proportional2 decoded at 40% of fixed16 on a 2+6-core phone at 4-8 threads).
+    ThreadPool::SchedulePolicy schedule_policy = ThreadPool::SchedulePolicy::Fixed16;
     SamplerConfig scfg;
     LayerLoader::Options opt;
     bool use_kosh = false, use_rtk = false;
@@ -377,6 +380,13 @@ int main(int argc, char** argv) {
         size_t rss = current_rss_bytes();
         char budget_note[64] = "";
         if (ram_budget) snprintf(budget_note, sizeof(budget_note), "   (budget %.0f MB)", ram_budget / 1e6);
+        char fast_note[96] = "on";
+        if (!opt.fast_quant) snprintf(fast_note, sizeof(fast_note), "off");
+        else if (!fast_quant_enabled()) snprintf(fast_note, sizeof(fast_note), "off (no int8 kernel for this CPU)");
+        else if (rt.interleaved_matrices() > 0) {
+            const int q6 = rt.interleaved_q6k_matrices(), q4 = rt.interleaved_matrices() - q6;
+            snprintf(fast_note, sizeof(fast_note), "on, interleaved %d Q4_K + %d Q6_K (SIPLLM_FAST_LAYOUT)", q4, q6);
+        }
         fprintf(stderr,
             "\n\xE2\x94\x80\xE2\x94\x80 sipllm \xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\n"
             "peak rss:        %.0f MB\n"
@@ -398,7 +408,7 @@ int main(int argc, char** argv) {
             "sched barrier:   %.2f ms\n",
             rss / 1e6,
             st.pinned_layers, (int)rt.config().n_layers, budget_note,
-            opt.fast_quant ? "on" : "off",
+            fast_note,
             st.decode_tok_s, st.prefill_tok_s, st.ttft_s,
             st.prompt_tokens, st.gen_tokens,
             st.weights_resident_bytes / 1e6, st.kv_bytes / 1e6,

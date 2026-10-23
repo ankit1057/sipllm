@@ -81,6 +81,8 @@ public:
     const ModelConfig& config() const { return cfg_; }
     const Tokenizer&   tokenizer() const { return tok_; }
     size_t weights_resident_bytes() const { return loader_->resident_bytes(); }
+    int interleaved_matrices() const { return loader_->interleaved_matrices(); }   // wave 15
+    int interleaved_q6k_matrices() const { return loader_->interleaved_q6k_matrices(); }   // wave 16
     size_t kv_bytes() const { return kv_->bytes(); }
     ThreadPool* thread_pool() { return pool_.get(); }
 

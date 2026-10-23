@@ -1,0 +1,263 @@
+{
+ "meta": {
+  "benchmark": "issue-68 runtime CPU dispatch A/B",
+  "date": "2026-10-19",
+  "branch": "issue-68-cpu-dispatch",
+  "git_commit": "04e2d73",
+  "model": "tinyllama-1.1b Q4_K_M (668.8 MB)",
+  "mode": "--fast, --greedy, ctx 512, 4 threads, --ram-budget 1200M (M3) / 1G (phone), fully resident",
+  "peak_rss_source": "M3: /usr/bin/time -l; phone: /proc/<pid>/status VmHWM sampled 5x/s",
+  "builds": {
+   "M3 build": "default `make` (Apple clang default target, has dotprod)",
+   "M3 build-generic": "ARCHFLAGS='-march=armv8-a -mcpu=generic' + runtime SDOT dispatch",
+   "phone old": "previous binary, whole engine built -march=armv8.2-a+dotprod+fp16 (no dispatch)",
+   "phone new": "ARCHFLAGS='-march=armv8-a' + runtime SDOT dispatch",
+   "phone v82": "new code built -march=armv8.2-a+dotprod+fp16"
+  },
+  "notes": "M3 load1m 3.6-4.0 (shared machine, noisy). Phone: Dimensity 900, Android 13, adb shell; big-core clock varies 0.74-2.4 GHz per run (recorded) and is the dominant noise source (~\u00b115%)."
+ },
+ "before_change_baseline_cost_m3": {
+  "source": "issue-68 measurement agent, commit 83d2fdd, median of 3, load 3.45-3.98",
+  "default_build": {
+   "fast_decode_tok_s": 56.9,
+   "fast_prefill_tok_s": 69.6
+  },
+  "armv8-a_build": {
+   "fast_decode_tok_s": 20.0,
+   "fast_prefill_tok_s": 22.0
+  },
+  "default_path_dump_logits_identical": true
+ },
+ "m3_ab": [
+  {
+   "rep": 1,
+   "build": "build",
+   "load1m": 3.7,
+   "decode_tok_s": 54.35,
+   "prefill_tok_s": 62.37,
+   "fast_kernel": "on",
+   "peak_rss_mb": 658.0,
+   "output_sha1_12": "6177373eba5f"
+  },
+  {
+   "rep": 1,
+   "build": "build-generic",
+   "load1m": 3.58,
+   "decode_tok_s": 53.69,
+   "prefill_tok_s": 76.41,
+   "fast_kernel": "on",
+   "peak_rss_mb": 667.0,
+   "output_sha1_12": "6177373eba5f"
+  },
+  {
+   "rep": 2,
+   "build": "build",
+   "load1m": 3.58,
+   "decode_tok_s": 54.34,
+   "prefill_tok_s": 68.74,
+   "fast_kernel": "on",
+   "peak_rss_mb": 667.0,
+   "output_sha1_12": "6177373eba5f"
+  },
+  {
+   "rep": 2,
+   "build": "build-generic",
+   "load1m": 3.69,
+   "decode_tok_s": 46.27,
+   "prefill_tok_s": 72.18,
+   "fast_kernel": "on",
+   "peak_rss_mb": 667.0,
+   "output_sha1_12": "6177373eba5f"
+  },
+  {
+   "rep": 3,
+   "build": "build",
+   "load1m": 3.63,
+   "decode_tok_s": 38.24,
+   "prefill_tok_s": 71.9,
+   "fast_kernel": "on",
+   "peak_rss_mb": 667.0,
+   "output_sha1_12": "6177373eba5f"
+  },
+  {
+   "rep": 3,
+   "build": "build-generic",
+   "load1m": 3.98,
+   "decode_tok_s": 43.67,
+   "prefill_tok_s": 58.4,
+   "fast_kernel": "on",
+   "peak_rss_mb": 667.0,
+   "output_sha1_12": "6177373eba5f"
+  }
+ ],
+ "phone_ab_pass1": [
+  {
+   "rep": 1,
+   "binary": "old",
+   "decode_tok_s": 14.29,
+   "prefill_tok_s": 15.17,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1040000.0
+  },
+  {
+   "rep": 1,
+   "binary": "new",
+   "decode_tok_s": 7.92,
+   "prefill_tok_s": 8.6,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 910000.0
+  },
+  {
+   "rep": 2,
+   "binary": "old",
+   "decode_tok_s": 14.04,
+   "prefill_tok_s": 15.02,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1040000.0
+  },
+  {
+   "rep": 2,
+   "binary": "new",
+   "decode_tok_s": 13.72,
+   "prefill_tok_s": 16.18,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1540000.0
+  },
+  {
+   "rep": 3,
+   "binary": "old",
+   "decode_tok_s": 13.18,
+   "prefill_tok_s": 12.15,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1040000.0
+  },
+  {
+   "rep": 3,
+   "binary": "new",
+   "decode_tok_s": 11.63,
+   "prefill_tok_s": 12.74,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1900000.0
+  }
+ ],
+ "phone_ab_pass2": [
+  {
+   "rep": 1,
+   "binary": "old",
+   "decode_tok_s": 12.87,
+   "prefill_tok_s": 13.56,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1040000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 1,
+   "binary": "new",
+   "decode_tok_s": 14.13,
+   "prefill_tok_s": 15.03,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 740000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 1,
+   "binary": "v82",
+   "decode_tok_s": 13.86,
+   "prefill_tok_s": 15.94,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1040000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 2,
+   "binary": "old",
+   "decode_tok_s": 11.57,
+   "prefill_tok_s": 13.2,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1900000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 2,
+   "binary": "new",
+   "decode_tok_s": 14.11,
+   "prefill_tok_s": 15.26,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 2400000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 2,
+   "binary": "v82",
+   "decode_tok_s": 13.08,
+   "prefill_tok_s": 13.67,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1300000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 3,
+   "binary": "old",
+   "decode_tok_s": 13.87,
+   "prefill_tok_s": 16.08,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 910000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 3,
+   "binary": "new",
+   "decode_tok_s": 13.83,
+   "prefill_tok_s": 14.12,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1800000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 3,
+   "binary": "v82",
+   "decode_tok_s": 14.27,
+   "prefill_tok_s": 15.47,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1800000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 4,
+   "binary": "old",
+   "decode_tok_s": 13.98,
+   "prefill_tok_s": 15.76,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 910000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 4,
+   "binary": "new",
+   "decode_tok_s": 11.24,
+   "prefill_tok_s": 12.22,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 1040000.0,
+   "big_khz_post": 1300000.0
+  },
+  {
+   "rep": 4,
+   "binary": "v82",
+   "decode_tok_s": 13.24,
+   "prefill_tok_s": 14.16,
+   "vmhwm_mb": 624.0,
+   "big_khz_pre": 2000000.0,
+   "big_khz_post": 1300000.0
+  }
+ ],
+ "phone_tests_baseline_build": {
+  "test_neon": "7/7 PASS, dotprod=1 (runtime)",
+  "test_neon SIPLLM_CPU=generic": "dotprod=0",
+  "test_spec_equiv": "5/5 PASS"
+ },
+ "flutter_native_build_ndk29": {
+  "arm64-v8a": "builds; only neon_sdot.cpp.o contains sdot (28)",
+  "x86_64": "builds",
+  "armeabi-v7a": "fails at simd.h:51 vaddvq_f32 (AArch64-only) - PRE-EXISTING at 609f167, ABI not in Gradle abiFilters"
+ }
+}

@@ -17,7 +17,8 @@ The header states the contract explicitly:
 
 ```c
 /* ThreadPool schedule policy (octa-core work distribution). Mirrors
- * llm::ThreadPool::SchedulePolicy. Proportional2 is the engine's CLI default. */
+ * llm::ThreadPool::SchedulePolicy. Fixed16 is the engine default (CLI and
+ * sipllm_params_default); a zero-initialized sipllm_params selects STATIC (0). */
 enum {
   SIPLLM_SCHED_STATIC = 0,
   SIPLLM_SCHED_FIXED8 = 1,
@@ -35,7 +36,7 @@ enum {
 };
 ```
 
-The scheduler enum mirrors `llm::ThreadPool::SchedulePolicy` (see the [C++ engine](api-cpp.html#threadpool-thread-pool-h) reference). `SIPLLM_SCHED_PROPORTIONAL2` is the CLI default. Note the [auto-tuner](auto-tuning.html) only benchmarks four of these seven policies.
+The scheduler enum mirrors `llm::ThreadPool::SchedulePolicy` (see the [C++ engine](api-cpp.html#threadpool-thread-pool-h) reference). `SIPLLM_SCHED_FIXED16` is the default (CLI and `sipllm_params_default`). Note the [auto-tuner](auto-tuning.html) only benchmarks four of these seven policies.
 
 ## Opaque handle
 
@@ -146,7 +147,7 @@ All 18 exported functions, grouped as the header groups them.
 ```c
 SIPLLM_API void sipllm_params_default(sipllm_params* out);
 ```
-Fill `out` with recommended edge defaults (streaming, quantized residency, hw threads, Proportional2, async prefetch, repeat_penalty 1.1).
+Fill `out` with recommended edge defaults (streaming, quantized residency, hw threads, Fixed16, async prefetch, repeat_penalty 1.1).
 
 ```c
 SIPLLM_API void sipllm_sampler_default(sipllm_sampler* out);

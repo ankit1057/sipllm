@@ -65,7 +65,7 @@ public:
     };
 
     Stats stats;
-    SchedulePolicy policy = SchedulePolicy::Proportional4;
+    SchedulePolicy policy = SchedulePolicy::Fixed16;   // see main.cpp (wave 16)
 
     void set_policy(SchedulePolicy p) { policy = p; }
 
