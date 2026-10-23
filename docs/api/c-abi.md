@@ -1,6 +1,6 @@
 # C ABI reference
 
-`bindings/flutter/sipllm_flutter/ffi/sipllm_ffi.h` is the stable C ABI over the C++ streaming engine — the *only* surface Dart (or any other language) talks to. The engine's headers use `std::string`, `std::function`, and `std::unique_ptr`, none of which is FFI-safe; this header flattens them into opaque handles, plain-old-data structs, and C function-pointer callbacks. It is intentionally **additive** over the engine: it adds no math and changes no defaults — a zero-initialized `sipllm_params` reproduces the CLI's behavior.
+`bindings/flutter/sipllm_flutter/ffi/sipllm_ffi.h` is the stable C ABI over the C++ streaming engine — the *only* surface Dart (or any other language) talks to. The engine's headers use `std::string`, `std::function`, and `std::unique_ptr`, none of which is FFI-safe; this header flattens them into opaque handles, plain-old-data structs, and C function-pointer callbacks. It is intentionally **additive** over the engine: it adds no math. Start from `sipllm_params_default()`: a zero-initialized `sipllm_params` is **not** the CLI's configuration (it selects the static scheduler, zero stream buffers and no async prefetch).
 
 > [!NOTE] Reference
 > Signatures below are copied verbatim from `sipllm_ffi.h`. Every exported function is annotated `SIPLLM_API` (`__attribute__((visibility("default")))`, or `__declspec(dllexport)` on Windows). The higher-level [Dart wrapper](api-dart.html) mirrors these one-to-one; the underlying math lives in the [C++ engine](api-cpp.html).
@@ -50,7 +50,7 @@ Wraps a `llm::Runtime`. Created by `sipllm_open`, destroyed by `sipllm_close`.
 
 ### `sipllm_params` — open-time knobs
 
-Zero-initialize then override; `sipllm_params_default()` fills the recommended edge defaults. All bool-ish fields are `0`/non-`0`.
+Call `sipllm_params_default()` first, then override fields; it fills the recommended edge defaults (a zero-initialized struct does not). All bool-ish fields are `0`/non-`0`.
 
 ```c
 typedef struct {
