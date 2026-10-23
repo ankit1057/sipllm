@@ -74,7 +74,10 @@ OBJ   := $(patsubst src/%.cpp,$(BUILD)/%.o,$(SRC))
 # binary runs on ARMv8.0 cores (no SDOT) and still uses SDOT where it exists.
 TARGET_TRIPLE := $(shell $(CXX) -dumpmachine 2>/dev/null)
 ifneq (,$(filter aarch64% arm64%,$(TARGET_TRIPLE)))
-  $(BUILD)/neon_sdot.o: CXXFLAGS += -march=armv8.2-a+dotprod
+  # -ffp-contract=on: fuse multiply-adds only within one statement (clang's
+  # default; GCC's default fuses across statements), so the batched and
+  # single-vector kernels stay bit-identical per token on every compiler.
+  $(BUILD)/neon_sdot.o: CXXFLAGS += -march=armv8.2-a+dotprod -ffp-contract=on
 endif
 
 # Header dependency tracking: -MMD emits a .d per object listing the headers it

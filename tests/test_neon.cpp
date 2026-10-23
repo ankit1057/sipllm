@@ -173,6 +173,53 @@ TEST(q6_K_sdot_matmul_threaded_matches_single) {
     for (int o = 0; o < n_out; ++o) APPROX(yN[o], y1[o], 0);
 }
 
+
+// Wave 14: the batched (prefill) kernels must be BIT-IDENTICAL, per token, to
+// calling the single-vector kernel once per token — same arithmetic, fewer
+// weight passes. Ragged batch sizes exercise the partial last tile; a thread
+// pool exercises the row split.
+enum class QK { Q8_0, Q4_K, Q6_K };
+static void check_batch_identity(QK kind, const char* what) {
+    std::mt19937 rng(4242);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    const int64_t n_in = 512, n_out = 96;
+    const DType dt = kind == QK::Q8_0 ? DType::Q8_0 : kind == QK::Q4_K ? DType::Q4_K : DType::Q6_K;
+    const int64_t rb = type_nbytes(dt, n_in);
+    std::vector<uint8_t> Wq((size_t)(rb * n_out));
+    if (kind == QK::Q8_0) {
+        std::vector<float> Wf((size_t)(n_out * n_in));
+        for (auto& v : Wf) v = nd(rng) * 0.05f;
+        for (int64_t o = 0; o < n_out; ++o) quantize_q8_0(Wf.data() + o * n_in, Wq.data() + o * rb, n_in);
+    } else {
+        for (int64_t o = 0; o < n_out; ++o)
+            (kind == QK::Q4_K ? random_q4_K_row : random_q6_K_row)(rng, Wq.data() + o * rb, n_in);
+    }
+    ThreadPool pool(4);
+    for (int64_t bs : {1, 2, 3, 4, 5, 7, 31, 32, 33}) {
+        std::vector<float> X((size_t)(bs * n_in));
+        for (auto& v : X) v = nd(rng) * 3.f;
+        for (ThreadPool* tp : {(ThreadPool*)nullptr, &pool}) {
+            std::vector<float> ref((size_t)(bs * n_out)), got((size_t)(bs * n_out), -1.f);
+            for (int64_t b = 0; b < bs; ++b) {
+                float* y = ref.data() + b * n_out;
+                const float* x = X.data() + b * n_in;
+                if (kind == QK::Q8_0)      matmul_q8_0_i8(y, Wq.data(), x, n_out, n_in, tp);
+                else if (kind == QK::Q4_K) matmul_q4_K_i8(y, Wq.data(), x, n_out, n_in, tp);
+                else                       matmul_q6_K_i8(y, Wq.data(), x, n_out, n_in, tp);
+            }
+            if (kind == QK::Q8_0)      matmul_q8_0_i8_batch(got.data(), Wq.data(), X.data(), bs, n_out, n_in, tp);
+            else if (kind == QK::Q4_K) matmul_q4_K_i8_batch(got.data(), Wq.data(), X.data(), bs, n_out, n_in, tp);
+            else                       matmul_q6_K_i8_batch(got.data(), Wq.data(), X.data(), bs, n_out, n_in, tp);
+            CHECK_MSG(std::memcmp(ref.data(), got.data(), ref.size() * sizeof(float)) == 0,
+                      std::string(what) + ": batched != per-token at bs=" + std::to_string(bs) +
+                      (tp ? " (pool)" : " (single)"));
+        }
+    }
+}
+TEST(q8_0_batch_bit_identical_to_per_token) { check_batch_identity(QK::Q8_0, "q8_0"); }
+TEST(q4_K_batch_bit_identical_to_per_token) { check_batch_identity(QK::Q4_K, "q4_K"); }
+TEST(q6_K_batch_bit_identical_to_per_token) { check_batch_identity(QK::Q6_K, "q6_K"); }
+
 int main() {
     printf("== test_neon == (dotprod=%d)\n", (int)neon_dotprod_available());
     return llmtest::run_all();

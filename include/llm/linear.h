@@ -34,19 +34,13 @@ inline void linear_batch(float* Y, const WeightRef& W, const float* X, int64_t b
     }
     if (W.dtype == DType::F32)
         matmul_batch(Y, X, static_cast<const float*>(W.data), bs, W.n_out, W.n_in, pool);
-    else if (W.dtype == DType::Q8_0 && fast_quant_enabled() && (W.n_in % 32 == 0)) {
-        for (int64_t b = 0; b < bs; ++b) {
-            matmul_q8_0_i8(Y + b * W.n_out, W.data, X + b * W.n_in, W.n_out, W.n_in, pool);
-        }
-    } else if (W.dtype == DType::Q4_K && fast_quant_enabled() && (W.n_in % 256 == 0)) {
-        for (int64_t b = 0; b < bs; ++b) {
-            matmul_q4_K_i8(Y + b * W.n_out, W.data, X + b * W.n_in, W.n_out, W.n_in, pool);
-        }
-    } else if (W.dtype == DType::Q6_K && fast_quant_enabled() && (W.n_in % 256 == 0)) {
-        for (int64_t b = 0; b < bs; ++b) {
-            matmul_q6_K_i8(Y + b * W.n_out, W.data, X + b * W.n_in, W.n_out, W.n_in, pool);
-        }
-    } else {
+    else if (W.dtype == DType::Q8_0 && fast_quant_enabled() && (W.n_in % 32 == 0))
+        matmul_q8_0_i8_batch(Y, W.data, X, bs, W.n_out, W.n_in, pool);   // one weight pass per tile
+    else if (W.dtype == DType::Q4_K && fast_quant_enabled() && (W.n_in % 256 == 0))
+        matmul_q4_K_i8_batch(Y, W.data, X, bs, W.n_out, W.n_in, pool);
+    else if (W.dtype == DType::Q6_K && fast_quant_enabled() && (W.n_in % 256 == 0))
+        matmul_q6_K_i8_batch(Y, W.data, X, bs, W.n_out, W.n_in, pool);
+    else {
         matmul_quant_batch(Y, W.data, W.dtype, X, bs, W.n_out, W.n_in, pool);
     }
 }
