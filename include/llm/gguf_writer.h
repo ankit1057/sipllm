@@ -256,7 +256,8 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
         if (c.qk_norm) { ones(names::blk(i, "attn_q_norm.weight"), head_dim);
                          ones(names::blk(i, "attn_k_norm.weight"), head_dim); }
         if (c.post_norms) ones(names::blk(i, "post_attention_norm.weight"), c.dim);
-        ones(names::ffn_norm(i), c.dim);
+        const bool parallel = c.arch == "phi2";   // one shared norm, no ffn_norm (as real Phi-2)
+        if (!parallel) ones(names::ffn_norm(i), c.dim);
         if (c.n_experts > 0) {
             // Packed 3D expert projections. Filled in the same RNG order and
             // total size as the dense gate/up/down, so a single-expert MoE has
@@ -293,7 +294,7 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
         };
         for (int64_t i = 0; i < c.n_layers; ++i) {
             vecf(names::blk(i, "attn_norm.bias"), c.dim);
-            vecf(names::blk(i, "ffn_norm.bias"), c.dim);
+            if (c.arch != "phi2") vecf(names::blk(i, "ffn_norm.bias"), c.dim);
             vecf(names::blk(i, "attn_qkv.bias"), q_dim + 2 * kv_dim);
             vecf(names::blk(i, "attn_output.bias"), c.dim);
             vecf(names::blk(i, "ffn_up.bias"), c.ffn_dim);

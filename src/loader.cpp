@@ -271,7 +271,10 @@ void LayerLoader::load_weight_into(Slot& s, Role role, int layer) {
     if (ti == nullptr) {
         // Optional roles (e.g. Qwen2 q/k/v biases) are simply absent in most
         // architectures — leave an invalid ref and skip.
-        LLM_CHECK(is_optional(role), "missing tensor: " + name);
+        // The parallel-residual block (Phi-2) feeds attention and FFN from one
+        // shared norm, so its GGUFs carry no ffn_norm.
+        const bool unused_ffn_norm = role == Role::FfnNorm && cfg_.block_spec.parallel_residual;
+        LLM_CHECK(is_optional(role) || unused_ffn_norm, "missing tensor: " + name);
         s.buf[(int)role].clear();
         s.ref[(int)role] = WeightRef{};
         return;
