@@ -76,6 +76,19 @@ public:
         // equivalent (activation is quantized), not bit-identical; off by default.
         bool      fast_quant   = false;
         
+        // Wave 15 (opt-in): repack the Q4_K dense matrices of PINNED layers into
+        // the 4-row interleaved layout in place (same size). Streamed layers
+        // keep the native layout: repacking on every load costs more than it
+        // saves in decode. Only set when --fast and the SDOT kernel are active.
+        bool      interleave_q4k = false;
+        bool      interleave_q6k = false;   // wave 16: same, for Q6_K matrices
+
+        // Issue #70 (LAN pooling): the contiguous layer range this node runs.
+        // Pinning stays inside it and, unless a policy is given, prefetch wraps
+        // inside it. Default [0, n_layers) == today's behavior, exactly.
+        int       layer_begin  = 0;
+        int       layer_end    = -1;     // -1 = n_layers
+
         // Policy seam to select which layer to prefetch next.
         struct PrefetchPolicy {
             virtual ~PrefetchPolicy() = default;
@@ -88,6 +101,22 @@ public:
         int next(int current_layer, int n_layers, const std::vector<uint8_t>& pinned_mask) const override {
             for (int i = 1; i <= n_layers; ++i) {
                 int nxt = (current_layer + i) % n_layers;
+                if (pinned_mask.empty() || !pinned_mask[nxt]) return nxt;
+            }
+            return -1;
+        }
+    };
+
+    // Prefetch the next layer of [begin, end), wrapping inside the range, so a
+    // node never streams layers another node owns (Issue #70).
+    struct RangeWrapPolicy : public Options::PrefetchPolicy {
+        int begin, end;
+        RangeWrapPolicy(int b, int e) : begin(b), end(e) {}
+        int next(int current_layer, int n_layers, const std::vector<uint8_t>& pinned_mask) const override {
+            (void)n_layers;
+            const int span = end - begin;
+            for (int i = 1; i <= span; ++i) {
+                int nxt = begin + ((current_layer - begin + i) % span);
                 if (pinned_mask.empty() || !pinned_mask[nxt]) return nxt;
             }
             return -1;
@@ -142,6 +171,8 @@ public:
     const Stats& stats() const { return stats_; }
     size_t resident_bytes() const;           // approx current RAM for weights
     int    pinned_layers() const { return n_pinned_; } // resident hot layers (#37)
+    int    interleaved_matrices() const { return n_interleaved_; }   // wave 15 (all IL4 types)
+    int    interleaved_q6k_matrices() const { return n_interleaved_q6k_; }   // wave 16
 
     // GGUF tensor-name suffix for a role (e.g. "attn_q.weight"). Public so the
     // Sip IR importer can resolve the per-role tensor schema without duplicating
@@ -185,6 +216,9 @@ private:
     std::vector<Slot>    pinned_;         // indexed by layer; filled iff pinned
     std::vector<uint8_t> pinned_mask_;    // 1 iff layer is pinned resident
     int                  n_pinned_ = 0;
+    int                  n_interleaved_ = 0;   // wave 15: matrices repacked to IL4 (any type)
+    int                  n_interleaved_q6k_ = 0;   // wave 16: of which Q6_K
+    void interleave_slot(Slot& s);
     size_t               pinned_bytes_ = 0;
     const Slot*          active_ = nullptr;
     std::vector<LayerStat> layer_stats_;   // per-layer io/dequant accounting

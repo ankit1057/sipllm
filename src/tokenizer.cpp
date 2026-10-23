@@ -85,10 +85,49 @@ Tokenizer Tokenizer::from_source(const WeightSource& src) {
 
     t.bos_ = src.meta_int("tokenizer.ggml.bos_token_id", -1);
     t.eos_ = src.meta_int("tokenizer.ggml.eos_token_id", -1);
-    if (t.eos_ >= 0) t.eog_ids_.push_back(t.eos_);
-    // Llama-3 also ends turns on <|eot_id|>.
-    if (auto it = t.tok_to_id_.find("<|eot_id|>"); it != t.tok_to_id_.end())
-        t.eog_ids_.push_back(it->second);
+
+    // BOS policy, as llama.cpp: the GGUF flag wins; otherwise SentencePiece adds
+    // it and BPE adds it only for the Llama-3 pre-tokenizer family (SmolLM2 and
+    // Qwen2 do not).
+    if (const int64_t f = src.meta_int("tokenizer.ggml.add_bos_token", -1); f >= 0) {
+        t.add_bos_ = f != 0;
+    } else if (t.kind_ == Kind::BPE) {
+        static const char* bos_pre[] = {"llama3", "llama-v3", "llama-bpe", "falcon3",
+                                        "falcon-h1", "pixtral"};
+        const std::string pre = src.meta_str("tokenizer.ggml.pre", "");
+        t.add_bos_ = std::find(std::begin(bos_pre), std::end(bos_pre), pre) != std::end(bos_pre);
+    }
+    t.add_space_prefix_ = src.meta_int("tokenizer.ggml.add_space_prefix", 1) != 0;
+
+    // End-of-generation: EOS, the declared EOT/EOM ids, and the turn-end tokens
+    // llama.cpp recognizes by text (Llama-3, ChatML/Qwen, Phi-3, Gemma).
+    auto add_eog = [&](int64_t id) {
+        if (id >= 0 && std::find(t.eog_ids_.begin(), t.eog_ids_.end(), id) == t.eog_ids_.end())
+            t.eog_ids_.push_back(id);
+    };
+    add_eog(t.eos_);
+    add_eog(src.meta_int("tokenizer.ggml.eot_token_id", -1));
+    add_eog(src.meta_int("tokenizer.ggml.eom_token_id", -1));
+    static const char* eog_text[] = {"<|eot_id|>", "<|eom_id|>", "<|im_end|>", "<|end|>",
+                                     "<end_of_turn>", "<|endoftext|>", "<|end_of_text|>",
+                                     "<EOT>", "<end_of_utterance>", "</s>", "<eos>"};
+    for (const char* e : eog_text)
+        if (auto it = t.tok_to_id_.find(e); it != t.tok_to_id_.end()) add_eog(it->second);
+
+    // Special tokens are matched as whole strings before BPE/SPM sees the text
+    // (llama.cpp parse_special): token types UNKNOWN=2, CONTROL=3,
+    // USER_DEFINED=4, plus the turn-end tokens above. Longest first, so a token
+    // that contains a shorter one wins.
+    for (int64_t id = 0; id < (int64_t)t.types_.size() && id < (int64_t)t.id_to_tok_.size(); ++id) {
+        const int32_t ty = t.types_[id];
+        if ((ty == 2 || ty == 3 || ty == 4) && !t.id_to_tok_[id].empty()) t.special_ids_.push_back(id);
+    }
+    for (int64_t id : t.eog_ids_)
+        if (std::find(t.special_ids_.begin(), t.special_ids_.end(), id) == t.special_ids_.end())
+            t.special_ids_.push_back(id);
+    std::stable_sort(t.special_ids_.begin(), t.special_ids_.end(), [&](int64_t a, int64_t b) {
+        return t.id_to_tok_[a].size() > t.id_to_tok_[b].size();
+    });
     return t;
 }
 
@@ -100,10 +139,10 @@ bool Tokenizer::is_eog(int64_t id) const {
 // ---- SentencePiece (Llama-1/2) -------------------------------------------
 // Space is encoded as U+2581 '▁'. Start from single-char symbols, then greedily
 // merge the adjacent pair with the highest vocab score until none improve.
-std::vector<int64_t> Tokenizer::encode_spm(const std::string& text) const {
+std::vector<int64_t> Tokenizer::encode_spm(const std::string& text, bool space_prefix) const {
     const std::string SPACE = "\xE2\x96\x81";   // ▁
     std::string s;
-    s += SPACE;                                 // add_dummy_prefix
+    if (space_prefix) s += SPACE;               // add_dummy_prefix
     for (char c : text) s += (c == ' ') ? SPACE : std::string(1, c);
 
     // Split into UTF-8 symbols.
@@ -212,18 +251,57 @@ std::vector<int64_t> Tokenizer::encode_bpe(const std::string& text) const {
     return out;
 }
 
+// One stretch of plain text between special tokens. SPM gives every stretch
+// the dummy prefix: each one starts the text or follows a special token, which
+// is where llama.cpp adds it.
+std::vector<int64_t> Tokenizer::encode_fragment(const std::string& text) const {
+    switch (kind_) {
+        case Kind::Byte: {
+            std::vector<int64_t> body;
+            for (unsigned char c : text) body.push_back(c);
+            return body;
+        }
+        case Kind::SentencePiece: return encode_spm(text, add_space_prefix_);
+        case Kind::BPE:           return encode_bpe(text);
+    }
+    return {};
+}
+
 std::vector<int64_t> Tokenizer::encode(const std::string& text, bool add_bos) const {
     std::vector<int64_t> ids;
-    if (add_bos && bos_ >= 0) ids.push_back(bos_);
-    std::vector<int64_t> body;
-    switch (kind_) {
-        case Kind::Byte:
-            for (unsigned char c : text) body.push_back(c);
-            break;
-        case Kind::SentencePiece: body = encode_spm(text); break;
-        case Kind::BPE:           body = encode_bpe(text); break;
+    const bool bos = add_bos && add_bos_ && bos_ >= 0;
+    if (bos) ids.push_back(bos_);
+
+    // Split the text on special-token strings (longest token first): specials
+    // become their id, the stretches between them are tokenized normally.
+    struct Frag { int64_t id; size_t off, len; };   // id < 0: plain text
+    std::vector<Frag> frags;
+    if (!text.empty()) frags.push_back({-1, 0, text.size()});
+    std::vector<Frag> next;
+    for (int64_t sid : special_ids_) {
+        const std::string& st = id_to_tok_[sid];
+        if (text.find(st) == std::string::npos) continue;
+        next.clear();
+        for (const Frag& f : frags) {
+            if (f.id >= 0) { next.push_back(f); continue; }
+            size_t base = f.off;
+            const size_t end = f.off + f.len;
+            for (size_t m; base < end && (m = text.find(st, base)) != std::string::npos &&
+                           m + st.size() <= end; base = m + st.size()) {
+                if (m > base) next.push_back({-1, base, m - base});
+                next.push_back({sid, m, st.size()});
+            }
+            if (base < end) next.push_back({-1, base, end - base});
+        }
+        frags.swap(next);
     }
-    ids.insert(ids.end(), body.begin(), body.end());
+    for (const Frag& f : frags) {
+        if (f.id >= 0) { ids.push_back(f.id); continue; }
+        const std::vector<int64_t> body = encode_fragment(text.substr(f.off, f.len));
+        ids.insert(ids.end(), body.begin(), body.end());
+    }
+    // A chat template that spells out BOS itself must not get a second one.
+    if (bos && ids.size() >= 2 && ids[1] == bos_) ids.erase(ids.begin() + 1);
     return ids;
 }
 

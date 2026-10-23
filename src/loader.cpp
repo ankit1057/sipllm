@@ -1,5 +1,6 @@
 // loader.cpp — streaming LayerLoader implementation (see loader.h).
 #include "llm/loader.h"
+#include "llm/neon.h"
 #include "llm/common.h"
 #include "llm/quant.h"
 #include "llm/linear.h"
@@ -81,6 +82,13 @@ static bool is_optional(Role r) {
 }
 LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     : src_(src), cfg_(cfg), opt_(opt), n_layers_(cfg.n_layers) {
+    if (opt_.layer_end < 0) opt_.layer_end = (int)n_layers_;
+    LLM_CHECK(opt_.layer_begin >= 0 && opt_.layer_begin < opt_.layer_end &&
+              opt_.layer_end <= (int)n_layers_, "loader: invalid layer range");
+    const bool full_range = opt_.layer_begin == 0 && opt_.layer_end == (int)n_layers_;
+    if (!opt_.prefetch_policy && !full_range) {
+        opt_.prefetch_policy = std::make_shared<RangeWrapPolicy>(opt_.layer_begin, opt_.layer_end);
+    }
     if (!opt_.prefetch_policy) {
         opt_.prefetch_policy = std::make_shared<SequentialWrapPolicy>();
     }
@@ -154,7 +162,7 @@ LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
 
     // Start the prefetch worker only if cold layers remain to stream; with every
     // layer pinned there is nothing left to prefetch.
-    if (opt_.async && opt_.n_buffers > 1 && n_pinned_ < n_layers_)
+    if (opt_.async && opt_.n_buffers > 1 && n_pinned_ < opt_.layer_end - opt_.layer_begin)
         worker_ = std::thread([this] { worker_loop(); });
 }
 
@@ -184,27 +192,28 @@ size_t LayerLoader::estimate_layer_bytes(int layer) const {
 void LayerLoader::plan_and_pin_layers() {
     const size_t budget  = opt_.ram_budget_bytes;
     const size_t globals = out_norm_.size() + out_weight_.size() + embd_resident_.size();
-    const size_t per_layer = estimate_layer_bytes(0);
+    const int    lb = opt_.layer_begin;                      // #70: pin inside this
+    const size_t n_local = (size_t)(opt_.layer_end - lb);    // node's layer range
+    const size_t per_layer = estimate_layer_bytes(lb);
     if (per_layer == 0) return;
 
-    const size_t all_weights = globals + (size_t)n_layers_ * per_layer;
+    const size_t all_weights = globals + n_local * per_layer;
     size_t target;
     if (budget >= all_weights) {
-        target = (size_t)n_layers_;                    // pin everything
+        target = n_local;                              // pin everything
     } else {
         const size_t ring = (size_t)opt_.n_buffers * per_layer;  // cold-stream headroom
         const size_t base = globals + ring;
-        target = budget > base ? std::min<size_t>((budget - base) / per_layer,
-                                                  (size_t)n_layers_) : 0;
+        target = budget > base ? std::min<size_t>((budget - base) / per_layer, n_local) : 0;
     }
     if (target == 0) return;
 
     pinned_.resize(n_layers_);
     // Reserve ring headroom while pinning unless we pin every layer (then nothing
     // streams and the ring stays empty).
-    const size_t ring_reserve = (target < (size_t)n_layers_)
+    const size_t ring_reserve = (target < n_local)
                               ? (size_t)opt_.n_buffers * per_layer : 0;
-    for (size_t l = 0; l < target; ++l) {
+    for (size_t l = (size_t)lb; l < (size_t)lb + target; ++l) {
         fill_slot(pinned_[l], (int)l);
         pinned_[l].layer = (int)l;
         size_t sb = 0;
@@ -214,10 +223,36 @@ void LayerLoader::plan_and_pin_layers() {
             pinned_[l].layer = -1;
             break;
         }
+        if (opt_.interleave_q4k || opt_.interleave_q6k) interleave_slot(pinned_[l]);   // waves 15-16, same size
         pinned_[l].state = Slot::State::Ready;
         pinned_mask_[l]  = 1;
         pinned_bytes_   += sb;
         ++n_pinned_;
+    }
+}
+
+// Wave 15: repack the dense Q4_K (wave 16: and Q6_K) matrices of a resident slot into the 4-row
+// interleaved layout, in the slot's own buffers (never an mmap of the file:
+// quantized slots always hold a copy, see load_weight_into). MoE expert tensors
+// are sliced by row offset in the FFN block and stay native.
+void LayerLoader::interleave_slot(Slot& s) {
+    static const Role kDense[] = {Role::AttnQ, Role::AttnK, Role::AttnV, Role::AttnOut, Role::AttnQKV,
+                                  Role::FfnGate, Role::FfnUp, Role::FfnDown};
+    for (Role r : kDense) {
+        WeightRef& w = s.ref[(int)r];
+        if (!w.valid() || w.layout != kLayoutNative) continue;
+        if (w.n_out % 4 != 0 || w.n_in % 256 != 0) continue;
+        if (w.dtype == DType::Q4_K && opt_.interleave_q4k) {
+            repack_q4_K_il4_inplace(s.buf[(int)r].data(), w.n_out, w.n_in);
+            w.layout = kLayoutQ4K_IL4;
+        } else if (w.dtype == DType::Q6_K && opt_.interleave_q6k) {   // wave 16
+            repack_q6_K_il4_inplace(s.buf[(int)r].data(), w.n_out, w.n_in);
+            w.layout = kLayoutQ6K_IL4;
+            ++n_interleaved_q6k_;
+        } else {
+            continue;
+        }
+        ++n_interleaved_;
     }
 }
 
@@ -236,7 +271,10 @@ void LayerLoader::load_weight_into(Slot& s, Role role, int layer) {
     if (ti == nullptr) {
         // Optional roles (e.g. Qwen2 q/k/v biases) are simply absent in most
         // architectures — leave an invalid ref and skip.
-        LLM_CHECK(is_optional(role), "missing tensor: " + name);
+        // The parallel-residual block (Phi-2) feeds attention and FFN from one
+        // shared norm, so its GGUFs carry no ffn_norm.
+        const bool unused_ffn_norm = role == Role::FfnNorm && cfg_.block_spec.parallel_residual;
+        LLM_CHECK(is_optional(role) || unused_ffn_norm, "missing tensor: " + name);
         s.buf[(int)role].clear();
         s.ref[(int)role] = WeightRef{};
         return;

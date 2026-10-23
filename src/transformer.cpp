@@ -113,6 +113,33 @@ static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
     }
 }
 
+// The q/k and post-sublayer RMS norms follow the block's norm kind: (1+w) for
+// raw HF Gemma weights, plain w for GGUF (the converter bakes in the +1).
+static inline void rms_norm_kind(NormKind k, float* out, const float* x, const float* w,
+                                 int64_t n, float eps) {
+    if (k == NormKind::RMSNormGemma) rmsnorm_gemma(out, x, w, n, eps);
+    else rmsnorm(out, x, w, n, eps);
+}
+
+// Rotate-half RoPE (ggml "rope_neox"): pairs (i, i + rot_dim/2) over the first
+// `rot_dim` dims of each head; the rest pass through. For archs whose GGUF q/k
+// are not permuted at conversion (Qwen2, Gemma, Phi).
+void Transformer::apply_rope_neox(float* vec, int64_t n_heads, int64_t head_dim,
+                                  int64_t rot_dim, int64_t pos, float theta) {
+    const int64_t half = rot_dim / 2;
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* p = vec + h * head_dim;
+        for (int64_t i = 0; i < half; ++i) {
+            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+            float angle = (float)pos * freq;
+            float c = std::cos(angle), s = std::sin(angle);
+            float x0 = p[i], x1 = p[i + half];
+            p[i]        = x0 * c - x1 * s;
+            p[i + half] = x0 * s + x1 * c;
+        }
+    }
+}
+
 // Single data-driven transformer block pipeline (Issue #44).
 // Conditionally applies all per-architecture features based on cfg_.block_spec.
 void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
@@ -139,10 +166,9 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         hb_.resize(bs * cfg_.ffn_dim);
         hb2_.resize(bs * cfg_.ffn_dim);
         fused_.resize(bs * std::max(q_dim + 2 * kv_dim, 2 * cfg_.ffn_dim));
-        if (b.n_experts > 0) {
-            router_.resize(bs * b.n_experts);
-            moe_.resize(bs * dim);
-        }
+        if (b.n_experts > 0) router_.resize(bs * b.n_experts);
+        // moe_ is also the parallel-residual FFN output (Phi-2), bs rows of dim.
+        if (b.n_experts > 0 || b.parallel_residual) moe_.resize(bs * dim);
     }
 
     // --- 1. Pre-Attention Norm ---
@@ -193,12 +219,12 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             if (qn.valid())
                 for (int64_t h = 0; h < n_heads; ++h) {
                     float* qh = q_.data() + i * q_dim + h * hd;
-                    rmsnorm_gemma(qh, qh, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
+                    rms_norm_kind(b.norm, qh, qh, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
                 }
             if (kn.valid())
                 for (int64_t h = 0; h < n_kv; ++h) {
                     float* kh = k_.data() + i * kv_dim + h * hd;
-                    rmsnorm_gemma(kh, kh, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
+                    rms_norm_kind(b.norm, kh, kh, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
                 }
         }
     }
@@ -215,10 +241,17 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             int64_t pos_i = pos + i;
             switch (b.rope) {
                 case RopeKind::None: break;
-                case RopeKind::Partial:
-                    rope_rot(qi, n_heads, hd, b.rope_dim > 0 ? b.rope_dim : hd, pos_i, theta_base);
-                    rope_rot(ki, n_kv,    hd, b.rope_dim > 0 ? b.rope_dim : hd, pos_i, theta_base);
+                case RopeKind::Partial: {
+                    const int64_t rd = b.rope_dim > 0 ? b.rope_dim : hd;
+                    if (b.rope_neox) {
+                        apply_rope_neox(qi, n_heads, hd, rd, pos_i, theta_base);
+                        apply_rope_neox(ki, n_kv,    hd, rd, pos_i, theta_base);
+                    } else {
+                        rope_rot(qi, n_heads, hd, rd, pos_i, theta_base);
+                        rope_rot(ki, n_kv,    hd, rd, pos_i, theta_base);
+                    }
                     break;
+                }
                 case RopeKind::Llama3Scaled: {
                     RopeScaling rs;
                     rs.llama3 = true;
@@ -231,8 +264,13 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
                     break;
                 }
                 case RopeKind::Full:
-                    apply_rope(qi, n_heads, hd, pos_i, theta_base);
-                    apply_rope(ki, n_kv,    hd, pos_i, theta_base);
+                    if (b.rope_neox) {
+                        apply_rope_neox(qi, n_heads, hd, hd, pos_i, theta_base);
+                        apply_rope_neox(ki, n_kv,    hd, hd, pos_i, theta_base);
+                    } else {
+                        apply_rope(qi, n_heads, hd, pos_i, theta_base);
+                        apply_rope(ki, n_kv,    hd, pos_i, theta_base);
+                    }
                     break;
             }
         }
@@ -266,7 +304,11 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         float* qi = q_.data() + i * q_dim;
         float* attn_out_i = attn_out_.data() + i * q_dim;
         
-        const int64_t start_t = cfg_.sliding_window > 0 ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
+        // The window applies to every layer, unless a local/global pattern says
+        // this one is global (Gemma 2/3: every Nth layer sees the full context).
+        const bool windowed = cfg_.sliding_window > 0 &&
+            (cfg_.sliding_window_pattern <= 0 || ((layer + 1) % cfg_.sliding_window_pattern) != 0);
+        const int64_t start_t = windowed ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
         const int64_t window_len = pos_i - start_t + 1;
         
         for (int64_t h = 0; h < n_heads; ++h) {
@@ -305,7 +347,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         add_bias(proj_i, loader_->getWeight(Role::AttnOutBias), dim);
         if (b.post_attn_norm) {
             WeightRef apn = loader_->getWeight(Role::AttnPostNorm);
-            if (apn.valid()) rmsnorm_gemma(proj_i, proj_i, static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
+            if (apn.valid()) rms_norm_kind(b.norm, proj_i, proj_i, static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
         }
         vec_add_inplace(x_i, proj_i, dim);
     }
@@ -436,7 +478,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
         for (int64_t i = 0; i < bs; ++i) {
             float* ffn_out_i = ffn_out + i * dim;
-            if (fpn.valid()) rmsnorm_gemma(ffn_out_i, ffn_out_i, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
+            if (fpn.valid()) rms_norm_kind(b.norm, ffn_out_i, ffn_out_i, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
         }
     }
 
@@ -462,6 +504,13 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
     if (profiling_) { timings_.assign(cfg_.n_layers, LayerTiming{}); }
 
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        if (!remote_.empty()) {                    // #70: layers on another node
+            if (const RemoteSegment* r = remote_at(l)) {
+                r->exec->run(r->begin, r->end, x_.data(), 1, pos);
+                l = r->end - 1;
+                continue;
+            }
+        }
         if (profiling_) {
             double t0 = now_sec();
             loader_->loadLayer((int)l);        // may block awaiting prefetch
@@ -541,6 +590,13 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
     // causal history each position needs is already in the KV cache).
     const int64_t C = 32; // batched GEMM size
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        if (!remote_.empty()) {                    // #70: layers on another node
+            if (const RemoteSegment* r = remote_at(l)) {
+                r->exec->run(r->begin, r->end, resid_.data(), n, start_pos);
+                l = r->end - 1;
+                continue;
+            }
+        }
         loader_->loadLayer((int)l);
         for (int64_t i = 0; i < n; i += C) {
             int64_t bs = std::min(C, n - i);
@@ -577,6 +633,7 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
 
 
 const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t start_pos) {
+    LLM_CHECK(remote_.empty(), "speculative decoding is not supported with remote layers (--nodes)");
     if (n <= 0) return logits_.data();
     LLM_CHECK(start_pos + n - 1 < kv_->max_ctx(),
               "spec_forward: position exceeds context window");
@@ -634,4 +691,31 @@ const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t
     
     return spec_logits_.data();
 }
+void Transformer::set_remote_segments(std::vector<RemoteSegment> segs) {
+    int64_t prev_end = 0;
+    for (const RemoteSegment& r : segs) {
+        LLM_CHECK(r.exec != nullptr, "remote segment without an executor");
+        LLM_CHECK(r.begin >= prev_end && r.begin < r.end && r.end <= cfg_.n_layers,
+                  "remote segments must be sorted, non-overlapping and inside the model");
+        prev_end = r.end;
+    }
+    remote_ = std::move(segs);
+}
+
+void Transformer::run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos) {
+    LLM_CHECK(begin >= 0 && begin < end && end <= cfg_.n_layers, "run_layers: bad layer range");
+    LLM_CHECK(n > 0 && start_pos + n - 1 < kv_->max_ctx(), "run_layers: positions exceed context window");
+    const int64_t dim = cfg_.dim;
+    const int64_t C = 32;   // same chunking as prefill(): identical arithmetic
+    for (int64_t l = begin; l < end; ++l) {
+        loader_->loadLayer((int)l);
+        for (int64_t i = 0; i < n; i += C) {
+            const int64_t bs = std::min(C, n - i);
+            block(l, start_pos + i, bs, resid + (size_t)i * dim);
+        }
+        loader_->unloadLayer();
+    }
+    kv_->set_seq_len(start_pos + n);
+}
+
 } // namespace llm

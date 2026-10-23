@@ -100,6 +100,7 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     // architecture without a per-arch reader. Toy .llmw files omit the meta and
     // default to "llama", so their behavior is unchanged.
     c.arch = src.meta_str("general.architecture", "llama");
+    c.chat_template = src.meta_str("tokenizer.chat_template", "");
     c.arch_kind = arch_from_name(c.arch);
     const std::string& a = c.arch;                       // e.g. "llama", "qwen2"
     auto K = [&](const char* suffix) { return a + "." + suffix; };
@@ -116,9 +117,10 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
                           "llama.attention.layer_norm_rms_epsilon", "rms_eps"}, f))
         c.rms_eps = (float)f;
 
-    // head_dim: explicit key, else dim / n_heads.
-    if (first_int(src, {K("attention.key_length"), K("rope.dimension_count"),
-                        "llama.attention.key_length", "llama.rope.dimension_count", "head_dim"}, v))
+    // head_dim: explicit key, else dim / n_heads. Not rope.dimension_count:
+    // that is the rotary width, smaller than head_dim under partial rotary
+    // (Phi-2: 32 of 80), and is read as rope_dim below.
+    if (first_int(src, {K("attention.key_length"), "llama.attention.key_length", "head_dim"}, v))
         c.head_dim = v;
     else if (c.n_heads > 0)
         c.head_dim = c.dim / c.n_heads;
@@ -154,16 +156,40 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     if (first_float(src, {K("attn_logit_softcapping")}, f))  c.attn_logit_softcap = (float)f;
     if (first_float(src, {K("final_logit_softcapping")}, f))  c.final_logit_softcap = (float)f;
     if (first_float(src, {K("attention.query_pre_attn_scalar")}, f)) c.query_pre_attn_scalar = (float)f;
-    if (c.arch_kind == Arch::Gemma2 || c.arch_kind == Arch::Gemma3 || c.arch_kind == Arch::Gemma4) {
-        c.block_spec.norm = NormKind::RMSNormGemma;
+    const bool gemma = c.arch_kind == Arch::Gemma2 || c.arch_kind == Arch::Gemma3 ||
+                       c.arch_kind == Arch::Gemma4;
+    if (gemma) {
+        // Gemma normalizes with x/rms * (1 + w). llama.cpp's converter adds the 1
+        // to every *norm.weight, so a GGUF stores (1 + w) and needs the plain
+        // norm; only raw HF weights (safetensors source) need the (1 + w) form.
+        c.block_spec.norm = src.meta_int("sipllm.raw_hf_norm_weights", 0) ? NormKind::RMSNormGemma
+                                                                        : NormKind::RMSNorm;
         if (c.dim > 0) c.embedding_scale = std::sqrt((float)c.dim);
         if (c.rms_eps == 1e-5f) c.rms_eps = 1e-6f;   // Gemma default eps
     }
     // Gemma 3/4 local/global RoPE: separate base for sliding-window layers, and
     // the pattern that says which layers are global.
-    if (first_float(src, {K("rope.local_freq_base")}, f)) c.rope_theta_local = (float)f;
-    if (first_int(src, {K("attention.sliding_window_pattern")}, v)) c.sliding_window_pattern = v;
+    if (first_float(src, {K("rope.freq_base_swa"), K("rope.local_freq_base")}, f)) c.rope_theta_local = (float)f;
+    if (const MetaValue* m = src.meta(K("attention.sliding_window_pattern"))) {
+        if (m->kind == MetaValue::Kind::IntArr) {
+            // Per-layer flags (1 = sliding). The period is one past the first global layer.
+            for (size_t i = 0; i < m->ia.size(); ++i)
+                if (m->ia[i] == 0) { c.sliding_window_pattern = (int64_t)i + 1; break; }
+        } else {
+            c.sliding_window_pattern = src.meta_int(K("attention.sliding_window_pattern"));
+        }
+    }
     if (first_int(src, {K("attention.sliding_window")}, v)) c.sliding_window = v;
+    // Gemma 2/3 alternate sliding-window (local) and global layers. Like
+    // llama.cpp, fall back to the architecture's period when the GGUF does not
+    // carry one (Gemma 2: 2, Gemma 3: 6) and give Gemma 3's local layers RoPE
+    // base 10000.
+    if (c.sliding_window > 0 && c.sliding_window_pattern == 0) {
+        if (c.arch_kind == Arch::Gemma2) c.sliding_window_pattern = 2;
+        if (c.arch_kind == Arch::Gemma3) c.sliding_window_pattern = 6;
+    }
+    if (c.arch_kind == Arch::Gemma3 && c.sliding_window > 0 && c.rope_theta_local <= 0.f)
+        c.rope_theta_local = 10000.f;
 
     // Phi-3 / Phi-4: fused q/k/v and fused gate+up projections, plus partial-rotary RoPE
     // (rope.dimension_count rotary dims per head; the rest pass through).
@@ -212,11 +238,18 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
         c.block_spec.rope = RopeKind::Full;
     }
     c.block_spec.rope_dual_base = (c.rope_theta_local > 0.f && c.sliding_window_pattern > 0);
+    // Pair layout. GGUF converters permute q/k for the Llama family only, so that
+    // adjacent-pair rotation reproduces HF rotate_half. These architectures ship
+    // unpermuted and rotate pairs (i, i + n_rot/2), llama.cpp's ROPE_TYPE_NEOX.
+    switch (c.arch_kind) {
+        case Arch::Qwen2: case Arch::Gemma2: case Arch::Gemma3: case Arch::Gemma4:
+        case Arch::Phi2:  case Arch::Phi3:   case Arch::Phi4:
+            c.block_spec.rope_neox = true; break;
+        default: break;
+    }
 
     // FFN kind logic (if not already set by GPT2/Phi2).
-    if (c.block_spec.ffn == FfnKind::SwiGLU) {
-        if (c.block_spec.norm == NormKind::RMSNormGemma) c.block_spec.ffn = FfnKind::GeGLU;
-    }
+    if (c.block_spec.ffn == FfnKind::SwiGLU && gemma) c.block_spec.ffn = FfnKind::GeGLU;
     
     // Softcapping.
     c.block_spec.attn_softcap = (c.attn_logit_softcap > 0.f);

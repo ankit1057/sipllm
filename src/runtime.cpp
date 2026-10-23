@@ -11,6 +11,8 @@
 #include "llm/session.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 #include <algorithm>
 
@@ -43,6 +45,17 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     set_fast_quant(opt_.fast_quant);   // #demo: opt-in int8 SDOT for Q8_0 (--fast)
     LLM_CHECK(cfg_.n_layers > 0 && cfg_.dim > 0, "runtime: invalid model config");
 
+    // Issue #70: the contiguous layer range this node runs (default: all). The
+    // memory plan and the KV cache cover only those layers; a worker (range not
+    // starting at 0) also keeps the LM head on disk, since it never uses it.
+    layer_begin_ = opt_.layer_begin;
+    layer_end_   = opt_.layer_end < 0 ? (int)cfg_.n_layers : opt_.layer_end;
+    LLM_CHECK(layer_begin_ >= 0 && layer_begin_ < layer_end_ && layer_end_ <= (int)cfg_.n_layers,
+              "runtime: invalid layer range");
+    ModelConfig plan_cfg = cfg_;
+    plan_cfg.n_layers = layer_end_ - layer_begin_;
+    if (layer_begin_ > 0) opt_.stream_lm_head = true;
+
     BudgetRequest req;
     req.budget_bytes = ram_budget_total;
     req.ctx_req = max_ctx;
@@ -55,7 +68,7 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     req.default_ctx_cap = 4096;
     req.kv_precision = kv_precision;
 
-    MemoryPlan plan = plan_memory(*src_, cfg_, req);
+    MemoryPlan plan = plan_memory(*src_, plan_cfg, req);
 
     if (ram_budget_total > 0) {
         fprintf(stderr, "\n%s\n", plan.report.c_str());
@@ -69,15 +82,33 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     opt_.n_buffers = plan.n_buffers;
     opt_.ram_budget_bytes = plan.weight_ceiling;
 
+    // Waves 15-16 experiment: SIPLLM_FAST_LAYOUT=il4 interleaves resident Q4_K
+    // and Q6_K matrices for the lane-per-row SDOT kernels (il4-q4: Q4_K only,
+    // the wave-15 behaviour). Only with --fast on an SDOT core; otherwise
+    // ignored, and every path is unchanged.
+    if (const char* lay = std::getenv("SIPLLM_FAST_LAYOUT")) {
+        const std::string l(lay);
+        const bool ok = opt_.fast_quant && q4_K_interleave_supported();
+        opt_.interleave_q4k = ok && (l == "il4" || l == "il4-q4");
+        opt_.interleave_q6k = ok && l == "il4";
+    }
+
     pool_ = std::make_unique<ThreadPool>(threads);
     opt_.dequant_pool = pool_.get();
     loader_ = std::make_unique<LayerLoader>(src_.get(), cfg_, opt_);
-    kv_ = std::make_unique<KVCache>(cfg_.n_layers, cfg_.kv_dim(), ctx, kv_precision);
+    kv_ = std::make_unique<KVCache>(layer_end_ - layer_begin_, cfg_.kv_dim(), ctx, kv_precision,
+                                    layer_begin_);
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
     tok_ = Tokenizer::from_source(*src_);
 }
 
 void Runtime::enable_semantic_cache(size_t max_bytes) {
+    // The cache stores and re-injects FP32 rows for every layer; a Q8_0 KV row is
+    // smaller than kv_dim floats, so reading it as float would run off the row.
+    LLM_CHECK(kv_->precision() == KVPrecision::FP32,
+              "--semantic-cache-budget needs the FP32 KV cache (drop --kv-q8)");
+    LLM_CHECK(layer_begin_ == 0 && layer_end_ == (int)cfg_.n_layers,
+              "--semantic-cache-budget is not supported on a LAN worker");
     if (!semantic_cache_) {
         semantic_cache_ = std::make_unique<SemanticCache>(max_bytes, cfg_.n_layers, cfg_.kv_dim());
     }
@@ -96,6 +127,9 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     Sampler sampler(scfg);
     GenStats st;
     st.ctx_max = (int)kv_->max_ctx();
+    if (tf_->has_remote_segments())
+        LLM_CHECK(!spec_decoder_ && !semantic_cache_ && host_ == nullptr,
+                  "--nodes: --spec, the semantic cache and plugins are not supported with remote layers");
 
 
     // ---- plugin seam setup (Kosh #52 context, RTK #53 runtime/KV) ----------
@@ -178,10 +212,13 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
     // ---- semantic cache (Radix Tree prefix match) ----
     if (semantic_cache_) {
         std::vector<float> cached_k, cached_v;
-        int64_t hit_len = semantic_cache_->find_longest_prefix(prompt_ids, cached_k, cached_v);
-        if (hit_len >= (int64_t)prompt_ids.size()) hit_len = (int64_t)prompt_ids.size() - 1;
+        const int64_t matched = semantic_cache_->find_longest_prefix(prompt_ids, cached_k, cached_v);
+        // Keep the last prompt token for prefill (it produces the logits). The
+        // staged buffers are laid out [layer][matched][kv_dim], so the per-layer
+        // stride is `matched` even when fewer rows are injected.
+        int64_t hit_len = std::min(matched, (int64_t)prompt_ids.size() - 1);
         if (hit_len > reuse_r) {
-            int64_t stride = hit_len * cfg_.kv_dim();
+            const int64_t stride = matched * cfg_.kv_dim();
             for (int64_t l = 0; l < cfg_.n_layers; ++l) {
                 kv_->inject(l, cached_k.data() + l * stride, cached_v.data() + l * stride, hit_len);
             }
@@ -326,7 +363,7 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
 // FNV-1a over the model's identity (arch + shape). Guards session load against
 // a mismatched model; it does NOT detect same-config-but-different-weights
 // (that is the caller's responsibility — a session pairs with its model).
-static uint64_t session_model_id(const ModelConfig& c) {
+static uint64_t session_model_id(const ModelConfig& c, KVPrecision kv_precision) {
     uint64_t h = 1469598103934665603ULL;
     auto mix = [&](uint64_t x) { h ^= x; h *= 1099511628211ULL; };
     for (unsigned char ch : c.arch) mix(ch);
@@ -337,18 +374,51 @@ static uint64_t session_model_id(const ModelConfig& c) {
     mix((uint64_t)c.head_dim);
     mix((uint64_t)c.ffn_dim);
     mix((uint64_t)c.vocab_size);
+    // Rows differ in size per precision. FP32 mixes nothing, so FP32 sessions
+    // saved by earlier builds still load.
+    if (kv_precision == KVPrecision::Q8_0) mix(0x51385f30ULL);   // "Q8_0"
     return h;
 }
 
+void Runtime::set_remote_segments(std::vector<RemoteSegment> segs) {
+    // Features whose state spans every layer cannot work with a split model.
+    LLM_CHECK(!spec_decoder_, "--nodes: speculative decoding (--spec) is not supported with remote layers");
+    LLM_CHECK(!semantic_cache_, "--nodes: the semantic cache is not supported with remote layers");
+    LLM_CHECK(host_ == nullptr, "--nodes: plugins (--kosh/--rtk) are not supported with remote layers");
+    LLM_CHECK(layer_begin_ == 0, "--nodes: the coordinator must own layers [0, a)");
+    int64_t expect = layer_end_;
+    for (const RemoteSegment& r : segs) {
+        LLM_CHECK(r.begin == expect, "--nodes: worker ranges must start where the previous one ends "
+                                     "(coordinator owns [0, a), workers cover [a, n_layers) in order)");
+        expect = r.end;
+    }
+    LLM_CHECK(expect == cfg_.n_layers, "--nodes: worker ranges must end at the model's last layer ("
+                                       + std::to_string(cfg_.n_layers) + ")");
+    tf_->set_remote_segments(std::move(segs));
+}
+
+void Runtime::run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos) {
+    LLM_CHECK(begin == layer_begin_ && end == layer_end_, "run_layers: range is not this node's");
+    tf_->run_layers(begin, end, resid, n, start_pos);
+}
+
 bool Runtime::save_session(const std::string& path) const {
+    if (tf_->has_remote_segments()) {   // the KV is split across machines
+        fprintf(stderr, "sessions are not supported with remote layers (--nodes)\n");
+        return false;
+    }
     return session_write(path, committed_, *kv_, (int64_t)committed_.size(),
-                         session_model_id(cfg_));
+                         session_model_id(cfg_, kv_->precision()));
 }
 
 bool Runtime::load_session(const std::string& path) {
+    if (tf_->has_remote_segments()) {
+        fprintf(stderr, "sessions are not supported with remote layers (--nodes)\n");
+        return false;
+    }
     std::vector<int64_t> toks;
     int64_t sl = 0;
-    if (!session_read(path, toks, *kv_, &sl, session_model_id(cfg_))) {
+    if (!session_read(path, toks, *kv_, &sl, session_model_id(cfg_, kv_->precision()))) {
         reset();   // leave the runtime clean and usable
         return false;
     }

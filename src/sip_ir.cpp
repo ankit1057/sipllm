@@ -25,6 +25,7 @@ static SipBlockPlan derive_block_plan(const ModelConfig& c, const WeightSource& 
     p.rope              = b.rope;
     p.rope_dim          = (b.rope == RopeKind::Partial) ? b.rope_dim : 0;
     p.rope_dual_base    = b.rope_dual_base;
+    p.rope_neox         = b.rope_neox;
     p.attn_softcap      = b.attn_softcap;
     p.post_attn_norm    = b.post_attn_norm;
     p.ffn               = b.ffn;
@@ -168,6 +169,7 @@ std::string SipModel::to_json(int indent) const {
     o << I2 << "\"rope\": " << jstr(rope_kind_name(block.rope)) << ",\n";
     o << I2 << "\"rope_dim\": " << block.rope_dim << ",\n";
     o << I2 << "\"rope_dual_base\": " << b(block.rope_dual_base) << ",\n";
+    o << I2 << "\"rope_neox\": " << b(block.rope_neox) << ",\n";
     o << I2 << "\"attn_softcap\": " << b(block.attn_softcap) << ",\n";
     o << I2 << "\"post_attn_norm\": " << b(block.post_attn_norm) << ",\n";
     o << I2 << "\"ffn\": " << jstr(ffn_kind_name(block.ffn)) << ",\n";

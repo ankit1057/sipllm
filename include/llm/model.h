@@ -76,6 +76,7 @@ struct BlockSpec {
     RopeKind rope = RopeKind::Full;
     int64_t  rope_dim = 0;               // rotary dims/head when rope == Partial
     bool     rope_dual_base = false;     // separate local/global RoPE base (Gemma3)
+    bool     rope_neox = false;          // rotate-half pairs (i, i + n_rot/2): Qwen2, Gemma, Phi
     bool     attn_softcap = false;       // cap attention logits before softmax (Gemma2)
     bool     post_attn_norm = false;     // norm the attn output before the residual (Gemma2)
     FfnKind  ffn = FfnKind::SwiGLU;
@@ -96,6 +97,7 @@ struct ModelConfig {
     // "qwen2"); `arch_kind` is the resolved dispatch enum. Defaults keep every
     // existing Llama/toy model on the unchanged reference path.
     std::string arch = "llama";
+    std::string chat_template;           // tokenizer.chat_template (Jinja), "" if absent
     Arch        arch_kind = Arch::Llama;
 
     int64_t n_layers   = 0;
@@ -174,11 +176,17 @@ constexpr const char* output = "output.weight";
 
 // A resident weight: pointer to bytes (fp32 or quantized), its type, and the
 // logical [n_out, n_in] shape. For 1-D norm weights n_out==1 and data is fp32.
+// Byte layout of a quantized weight (wave 15). Native = GGUF row-major.
+constexpr uint8_t kLayoutNative  = 0;
+constexpr uint8_t kLayoutQ4K_IL4 = 1;   // Q4_K, 4 rows interleaved (neon.h)
+constexpr uint8_t kLayoutQ6K_IL4 = 2;   // Q6_K, 4 rows interleaved (neon.h, wave 16)
+
 struct WeightRef {
     const void* data   = nullptr;
     DType       dtype  = DType::F32;
     int64_t     n_out  = 0;
     int64_t     n_in   = 0;
+    uint8_t     layout = kLayoutNative;
     bool valid() const { return data != nullptr; }
 };
 

@@ -2,8 +2,9 @@
 // the isolate boundary as plain values, so they hold no pointers.
 import '../ffi/sipllm_bindings.dart';
 
-/// How octa-core matmul work is distributed. `proportional2` is the engine
-/// default and a good balance on big.LITTLE phones.
+/// How octa-core matmul work is distributed. `fixed16` (small dynamic chunks)
+/// is the engine default; on big.LITTLE phones it keeps the slow cores from
+/// holding up every matmul.
 enum SchedulePolicy {
   static$(kSchedStatic),
   fixed8(kSchedFixed8),
@@ -43,7 +44,7 @@ class SipllmParams {
     this.streamLmHead = false,
     this.residencyFp32 = false,
     this.forceBudget = false,
-    this.schedulePolicy = SchedulePolicy.proportional2,
+    this.schedulePolicy = SchedulePolicy.fixed16,
     this.specDraft = 0,
   });
 

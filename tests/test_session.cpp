@@ -12,6 +12,7 @@
 #include "llm/toy_model.h"
 #include "tests/test_util.h"
 
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -125,6 +126,82 @@ TEST(session_restore_reuses_all_but_one_on_identical) {
   const int L = tok_len(path, p1);
   CHECK(st.reused_prefix_tokens == L - 1);
   CHECK(st.processed_tokens == 1);
+}
+
+// Q8_0 KV rows are kv_dim/32*34 bytes, not kv_dim floats; the cache quantizes
+// per head, so head_dim must be a multiple of 32 (dim 128 / 4 heads).
+static std::string make_toy_q8() {
+  ToyConfig tc;
+  tc.n_layers = 3;
+  tc.dim = 128;
+  tc.n_heads = 4;
+  tc.n_kv_heads = 2;
+  tc.ffn_dim = 256;
+  tc.vocab_size = 256;
+  tc.ctx_len = 256;
+  tc.seed = 12;
+  std::string path = llmtest::scratch_path("toy_session_q8.llmw");
+  write_toy_model(path, tc);
+  return path;
+}
+
+TEST(session_restore_matches_in_process_kv_q8) {
+  // Session I/O must move whole Q8_0 rows: it used to copy kv_dim floats per
+  // row, writing past the cache on load (heap overflow) and saving garbage.
+  const std::string path = make_toy_q8();
+  const std::string sess = llmtest::scratch_path("sess_q8.bin");
+  const std::string p1 = "The capital of France";
+  const std::string pfull = "The capital of France is Paris";
+  auto make = [&]() {
+    return std::make_unique<Runtime>(open_model(path), test_opts(), /*max_ctx=*/0,
+                                     /*threads=*/1, /*ram_budget_total=*/0,
+                                     /*force_budget=*/false, KVPrecision::Q8_0);
+  };
+  std::vector<float> ref;
+  {
+    auto rt = make();
+    rt->generate(pfull, 0, SamplerConfig{}, nullptr, nullptr);
+    ref = rt->first_logits();
+  }
+  {
+    auto rtA = make();
+    rtA->generate(p1, 0, SamplerConfig{}, nullptr, nullptr);
+    CHECK(rtA->save_session(sess));
+  }
+  {
+    // Header (40 B) + tokens + K and V for 3 layers, Q8_0 rows of 64 dims (68 B).
+    const long L = tok_len(path, p1);
+    FILE* f = std::fopen(sess.c_str(), "rb");
+    CHECK(f != nullptr);
+    if (f) {
+      std::fseek(f, 0, SEEK_END);
+      CHECK(std::ftell(f) == 40 + 8 * L + 2 * 3 * L * 68);
+      std::fclose(f);
+    }
+  }
+  auto rtB = make();
+  CHECK(rtB->load_session(sess));
+  rtB->set_context_reuse(true);
+  GenStats st;
+  rtB->generate(pfull, 0, SamplerConfig{}, nullptr, &st);
+  const std::vector<float>& b = rtB->first_logits();
+  CHECK(!ref.empty() && ref.size() == b.size());
+  for (size_t i = 0; i < ref.size() && i < b.size(); ++i)
+    APPROX(b[i], ref[i], 1e-4);
+  CHECK(st.reused_prefix_tokens == tok_len(path, p1));
+}
+
+TEST(session_kv_precision_mismatch_refused) {
+  // A session saved from an FP32 cache must not load into a Q8_0 one.
+  const std::string path = make_toy_q8();
+  const std::string sess = llmtest::scratch_path("sess_fp32_for_q8.bin");
+  {
+    Runtime rtA(open_model(path), test_opts(), 0, 1);
+    rtA.generate("Hello", 0, SamplerConfig{}, nullptr, nullptr);
+    CHECK(rtA.save_session(sess));
+  }
+  Runtime rtB(open_model(path), test_opts(), 0, 1, 0, false, KVPrecision::Q8_0);
+  CHECK(!rtB.load_session(sess));
 }
 
 TEST(session_load_missing_file_fails) {

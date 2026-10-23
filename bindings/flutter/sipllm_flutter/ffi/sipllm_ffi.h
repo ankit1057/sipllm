@@ -29,7 +29,8 @@ extern "C" {
 #endif
 
 /* ThreadPool schedule policy (octa-core work distribution). Mirrors
- * llm::ThreadPool::SchedulePolicy. Proportional2 is the engine's CLI default. */
+ * llm::ThreadPool::SchedulePolicy. Fixed16 is the engine default (CLI and
+ * sipllm_params_default); a zero-initialized sipllm_params selects STATIC (0). */
 enum {
   SIPLLM_SCHED_STATIC = 0,
   SIPLLM_SCHED_FIXED8 = 1,
@@ -121,7 +122,7 @@ typedef int32_t (*sipllm_token_cb)(const char* piece, int64_t token_id, void* us
 /* ---- lifecycle ---------------------------------------------------------- */
 
 /* Fill `out` with recommended edge defaults (streaming, quantized residency,
- * hw threads, Proportional2, async prefetch, repeat_penalty 1.1). */
+ * hw threads, Fixed16, async prefetch, repeat_penalty 1.1). */
 SIPLLM_API void sipllm_params_default(sipllm_params* out);
 SIPLLM_API void sipllm_sampler_default(sipllm_sampler* out);
 

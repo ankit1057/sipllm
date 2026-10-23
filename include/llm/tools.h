@@ -128,7 +128,8 @@ enum class ChatTemplateStyle {
     Phi3,
     GPT2,
     ChatML,
-    Raw
+    Raw,
+    Zephyr,   // <|user|>\n...</s> (TinyLlama-Chat)
 };
 
 struct ChatMessage {

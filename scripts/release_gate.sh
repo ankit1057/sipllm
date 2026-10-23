@@ -106,7 +106,7 @@ cat > release.json <<EOF
   "version": "$VERSION",
   "timestamp": "$TIMESTAMP",
   "git_sha": "$SHA",
-  "engine_version": "0.4.0",
+  "engine_version": "0.6.0",
   "gates": {
     "passed": $PASS,
     "failed": $FAIL,

@@ -59,17 +59,25 @@ static std::string read_file(const std::string& path) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <model> [--port N] [--residency fp32|quant] "
-                        "[--mmap] [--threads N] [--ctx N]\n", argv[0]);
+        fprintf(stderr, "usage: %s <model> [--port N] [--host IP] [--allow-agent] "
+                        "[--residency fp32|quant] [--mmap] [--threads N] [--ctx N]\n"
+                        "  --host IP      address to bind (default 127.0.0.1, this machine only)\n"
+                        "  --allow-agent  let requests with \"agent\": true run the system\n"
+                        "                 tools (shell, file write) in the working directory\n",
+                argv[0]);
         return 2;
     }
     std::string model = argv[1];
     int port = 8080, threads = 0, ctx = 0;
+    std::string host = "127.0.0.1";
+    bool allow_agent = false;
     LayerLoader::Options opt; opt.residency = Residency::Quantized;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto nx = [&]{ return (i + 1 < argc) ? argv[++i] : "0"; };
         if (a == "--port") port = std::stoi(nx());
+        else if (a == "--host") host = nx();
+        else if (a == "--allow-agent") allow_agent = true;
         else if (a == "--residency") opt.residency = std::string(nx()) == "fp32" ? Residency::FP32 : Residency::Quantized;
         else if (a == "--mmap") opt.use_mmap = true;
         else if (a == "--threads") threads = std::stoi(nx());
@@ -94,7 +102,7 @@ int main(int argc, char** argv) {
                              "<p>This server provides an OpenAI-compatible API at <code>/v1/chat/completions</code>.</p>"
                              "<p><i>(Place an <code>index.html</code> in this directory to serve a custom Web UI here).</i></p>";
 
-    http::Server srv(port);
+    http::Server srv(port, host);
 
     srv.get("/", [&](http::Request&, http::Response& res) {
         res.send(200, "text/html; charset=utf-8", html);
@@ -212,6 +220,14 @@ int main(int argc, char** argv) {
             res.send(400, "application/json",
                      "{\"error\":{\"message\":\"" + json_escape(err) +
                      "\",\"type\":\"invalid_request_error\"}}");
+            return;
+        }
+        // Agent mode runs shell and file-write tools on this host; it is off
+        // unless the operator started the server with --allow-agent.
+        if (cr.agent && !allow_agent) {
+            res.send(403, "application/json",
+                     "{\"error\":{\"message\":\"agent mode is disabled; start the server "
+                     "with --allow-agent to enable it\",\"type\":\"permission_error\"}}");
             return;
         }
 

@@ -20,7 +20,7 @@ The header pins a **threading contract**:
 - A `sipllm_ctx` is **NOT thread-safe** for concurrent `generate()` calls — drive one context from one worker at a time.
 - `sipllm_cancel()` **IS thread-safe**: it flips a `std::atomic<bool>` the decode loop checks at every token boundary, so it can be called from another thread while `generate()` runs.
 
-`sipllm_params` zero-initialized reproduces the CLI's behavior; `sipllm_params_default()` fills the recommended edge defaults (streaming, quantized residency, hardware threads, `Proportional2`, async prefetch).
+`sipllm_params` zero-initialized reproduces the CLI's behavior; `sipllm_params_default()` fills the recommended edge defaults (streaming, quantized residency, hardware threads, `Fixed16`, async prefetch).
 
 <div class="card-grid"><div class="card"><h3>Lifecycle</h3><p><code>sipllm_params_default</code>, <code>sipllm_sampler_default</code>, <code>sipllm_open</code>, <code>sipllm_close</code>.</p></div><div class="card"><h3>Generation</h3><p><code>sipllm_generate</code> (blocking, streams via <code>sipllm_token_cb</code>), <code>sipllm_cancel</code>, <code>sipllm_reset</code>.</p></div><div class="card"><h3>Introspection</h3><p><code>sipllm_get_model_info</code>, <code>sipllm_get_threads</code>, <code>sipllm_embed_dim</code>, <code>sipllm_embed</code>.</p></div><div class="card"><h3>Device / build</h3><p><code>sipllm_version</code>, <code>sipllm_vulkan_compiled</code>, <code>sipllm_vulkan_available</code>, <code>sipllm_vulkan_info</code>, <code>sipllm_hardware_concurrency</code>, <code>sipllm_optimal_threads</code>, <code>sipllm_set_log_level</code>.</p></div></div>
 
@@ -91,7 +91,7 @@ Because **the engine applies no chat/prompt template** — inference is over raw
 
 ## Build
 
-`src/CMakeLists.txt` globs the engine's `src/*.cpp` plus `sipllm_ffi.cpp` into one shared `libsipllm_ffi` (C++17, `-O3`, hidden visibility, no deps beyond pthreads). The Android Gradle build runs it **once per ABI via the NDK**: `arm64-v8a` compiles with **`-march=armv8.2-a+dotprod`** — universal on the target SoCs (Dimensity 8300, Snapdragon W5) and what lights up the engine's int8 SDOT kernels — while `armeabi-v7a` gets `-mfpu=neon-vfpv4` and keeps the scalar fallback. `-DSIPLLM_VULKAN=ON` compiles the experimental backend, but with no SPIR-V shader it stays device-enumeration-only and matmul remains on CPU.
+`src/CMakeLists.txt` globs the engine's `src/*.cpp` plus `sipllm_ffi.cpp` into one shared `libsipllm_ffi` (C++17, `-O3`, hidden visibility, no deps beyond pthreads). The Android Gradle build runs it **once per ABI via the NDK**: `arm64-v8a` compiles the engine for the **baseline ARMv8.0 ISA**, so the library loads on every arm64 device including Cortex-A53 parts without SDOT (e.g. Snapdragon W5); only `src/neon_sdot.cpp` (the int8 SDOT kernels) is built with `-march=armv8.2-a+dotprod`, and the engine checks the CPU at runtime (`getauxval`) before calling it (Issue #68). `armeabi-v7a` gets `-mfpu=neon-vfpv4` and keeps the scalar fallback. `-DSIPLLM_VULKAN=ON` compiles the experimental backend, but with no SPIR-V shader it stays device-enumeration-only and matmul remains on CPU.
 
 ## Future work
 
