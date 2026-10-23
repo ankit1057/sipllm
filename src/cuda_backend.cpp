@@ -38,6 +38,7 @@ constexpr int CU_JIT_INFO_LOG_BUFFER = 3;
 constexpr int CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES = 4;
 constexpr int CU_JIT_ERROR_LOG_BUFFER = 5;
 constexpr int CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6;
+constexpr unsigned CU_CTX_SCHED_BLOCKING_SYNC = 0x04;
 
 struct Api {
     CUresult (*cuInit)(unsigned);
@@ -46,6 +47,7 @@ struct Api {
     CUresult (*cuDeviceGetName)(char*, int, CUdevice);
     CUresult (*cuDeviceGetAttribute)(int*, int, CUdevice);
     CUresult (*cuDevicePrimaryCtxRetain)(CUcontext*, CUdevice);
+    CUresult (*cuDevicePrimaryCtxSetFlags)(CUdevice, unsigned);   // optional
     CUresult (*cuCtxSetCurrent)(CUcontext);
     CUresult (*cuModuleLoadDataEx)(CUmodule*, const void*, unsigned, int*, void**);
     CUresult (*cuModuleGetFunction)(CUfunction*, CUmodule, const char*);
@@ -66,6 +68,9 @@ struct Api {
 enum KType { K_F32 = 0, K_F16, K_Q4K, K_Q5K, K_Q6K, K_COUNT };
 const char* const kMvNames[K_COUNT] = {"mv_f32", "mv_f16", "mv_q4k", "mv_q5k", "mv_q6k"};
 const char* const kMmNames[K_COUNT] = {"mm_f32", "mm_f16", "mm_q4k", "mm_q5k", "mm_q6k"};
+// Matmul token tiles: mm_* stages 16 tokens per CTA, mmN_* N (results identical).
+constexpr int kTiles[4] = {4, 8, 12, 16};
+const char* const kMmPrefix[4] = {"mm4_", "mm8_", "mm12_", "mm_"};
 
 struct State {
     std::once_flag once;
@@ -76,7 +81,7 @@ struct State {
     Api api{};
     CUcontext ctx = nullptr;
     CUmodule mod = nullptr;
-    CUfunction mv[K_COUNT]{}, mm[K_COUNT]{};
+    CUfunction mv[K_COUNT]{}, mm[4][K_COUNT]{};   // mm[i]: token tile kTiles[i]
     // Activation / output scratch: device + pinned host staging, grown on demand.
     std::mutex mu;
     CUdeviceptr dx = 0, dy = 0;
@@ -187,6 +192,13 @@ void init() {
     s.name = std::string(nm) + " (sm_" + std::to_string(maj) + std::to_string(mnr) + ")";
     if (maj * 10 + mnr < 61) { s.why = s.name + ": compute capability < 6.1 unsupported"; return; }
 
+    // SIPLLM_CUDA_BLOCKING=1: sleep in cuStreamSynchronize instead of the
+    // default spin-wait (less heat, but measured ~0.1-0.2 ms more per call).
+    const char* blk = std::getenv("SIPLLM_CUDA_BLOCKING");
+    if (blk && *blk && std::strcmp(blk, "0") != 0 &&
+        (sym(s.lib, a.cuDevicePrimaryCtxSetFlags, "cuDevicePrimaryCtxSetFlags_v2") ||
+         sym(s.lib, a.cuDevicePrimaryCtxSetFlags, "cuDevicePrimaryCtxSetFlags")))
+        a.cuDevicePrimaryCtxSetFlags(dev, CU_CTX_SCHED_BLOCKING_SYNC);   // best effort
     // The primary context is shareable by every thread (cuCtxSetCurrent per
     // thread in make_current()), unlike a cuCtxCreate'd one.
     if ((r = a.cuDevicePrimaryCtxRetain(&s.ctx, dev)) != CUDA_SUCCESS) {
@@ -208,9 +220,14 @@ void init() {
         return;
     }
     for (int k = 0; k < K_COUNT; ++k) {
-        if (a.cuModuleGetFunction(&s.mv[k], s.mod, kMvNames[k]) != CUDA_SUCCESS ||
-            a.cuModuleGetFunction(&s.mm[k], s.mod, kMmNames[k]) != CUDA_SUCCESS) {
+        if (a.cuModuleGetFunction(&s.mv[k], s.mod, kMvNames[k]) != CUDA_SUCCESS) {
             s.why = std::string("missing kernel ") + kMvNames[k]; return;
+        }
+        for (int i = 0; i < 4; ++i) {
+            const std::string nm = std::string(kMmPrefix[i]) + (kMmNames[k] + 3);   // "mm4_" + "q4k"
+            if (a.cuModuleGetFunction(&s.mm[i][k], s.mod, nm.c_str()) != CUDA_SUCCESS) {
+                s.why = "missing kernel " + nm; return;
+            }
         }
     }
     s.ok = true;
@@ -342,11 +359,15 @@ void linear(float* Y, const WeightRef& W, const float* X, int64_t m) {
         } else {
             int mi = (int)mm;
             void* args[] = {&dw, &s.dx, &s.dy, &n_out, &nb, &mi};
-            // 8 warps x RPW rows per CTA (RPW = 4, Q6_K 2); 16 tokens per CTA
-            // — must mirror RPWOf / TB in kernels/cuda_kernels.cu.
+            // 8 warps x RPW rows per CTA (RPW = 4, Q6_K 2); the smallest token
+            // tile that holds mi (16 beyond that) — must mirror RPWOf and the
+            // mm*_ instantiations in kernels/cuda_kernels.cu.
             const int rows_per_cta = 8 * (k == K_Q6K ? 2 : 4);
-            check(a.cuLaunchKernel(s.mm[k], (unsigned)((n_out + rows_per_cta - 1) / rows_per_cta),
-                                   (unsigned)((mi + 15) / 16), 1, 256, 1, 1,
+            int ti = 0;
+            while (ti < 3 && kTiles[ti] < mi) ++ti;
+            const int tile = kTiles[ti];
+            check(a.cuLaunchKernel(s.mm[ti][k], (unsigned)((n_out + rows_per_cta - 1) / rows_per_cta),
+                                   (unsigned)((mi + tile - 1) / tile), 1, 256, 1, 1,
                                    0, nullptr, args, nullptr), "cuLaunchKernel(mm)");
         }
         check(a.cuMemcpyDtoHAsync(s.hy, s.dy, yb, nullptr), "cuMemcpyDtoHAsync");

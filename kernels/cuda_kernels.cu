@@ -186,12 +186,14 @@ DEV void matvec(const u8* __restrict__ W, const float* __restrict__ x,
 // CTA = 8 warps; each warp owns RPW rows (8*RPW rows per CTA); CTA covers TB tokens. Per super-block
 // the CTA stages X[TB][256] in shared memory once, then every warp dequantizes
 // each of its rows' blocks ONCE and dots it against all TB staged tokens.
-#define TB  16
+// TB is 16 (mm_*) or 4 / 8 / 12 (mm4_* / mm8_* / mm12_*) so a small decode
+// batch is not padded to 16 tokens. A token's accumulation never depends on
+// TB or on its slot in the tile, so every variant gives identical results.
 // Rows per warp: 4 (x reuse across rows), except Q6_K whose heavier decode
 // would push 4 rows past 128 registers and halve occupancy. Host mirrors this.
 template <int T> struct RPWOf { enum { v = 4 }; };
 template <> struct RPWOf<T_Q6K> { enum { v = 2 }; };
-template <int T>
+template <int T, int TB>
 DEV void matmul(const u8* __restrict__ W, const float* __restrict__ X,
                 float* __restrict__ Y, int n_out, int nb, int m) {
     constexpr int RPW = RPWOf<T>::v;
@@ -253,7 +255,16 @@ DEV void matmul(const u8* __restrict__ W, const float* __restrict__ X,
         matvec<T>(W, x, y, n_out, nb);                                         \
     }                                                                          \
     KERN void mm_##NAME(const u8* W, const float* X, float* Y, int n_out, int nb, int m) { \
-        matmul<T>(W, X, Y, n_out, nb, m);                                      \
+        matmul<T, 16>(W, X, Y, n_out, nb, m);                                  \
+    }                                                                          \
+    KERN void mm4_##NAME(const u8* W, const float* X, float* Y, int n_out, int nb, int m) { \
+        matmul<T, 4>(W, X, Y, n_out, nb, m);                                   \
+    }                                                                          \
+    KERN void mm8_##NAME(const u8* W, const float* X, float* Y, int n_out, int nb, int m) { \
+        matmul<T, 8>(W, X, Y, n_out, nb, m);                                   \
+    }                                                                          \
+    KERN void mm12_##NAME(const u8* W, const float* X, float* Y, int n_out, int nb, int m) { \
+        matmul<T, 12>(W, X, Y, n_out, nb, m);                                  \
     }
 
 INSTANTIATE(f32, T_F32)

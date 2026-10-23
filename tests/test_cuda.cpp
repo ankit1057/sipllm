@@ -258,4 +258,31 @@ TEST(cuda_loader_gpu_layers_toy_model) {
     }
 }
 
+TEST(cuda_matmul_token_tiles_bit_identical) {
+    // The 4 / 8 / 12-token tiles (picked for m <= 4 / 8 / 12) must give exactly
+    // the bytes the 16-token tile gives for the same tokens: a 17-token call
+    // runs its first 16 tokens through mm_ (tile 16).
+    if (!gpu_or_skip("cuda_matmul_token_tiles_bit_identical")) return;
+    const int64_t rows = 53, n = 1024;
+    uint32_t seed = 300;
+    for (DType t : kTypes) {
+        auto W = make_weights(t, rows, n, seed++);
+        DevWeight dw(W, t, rows, n);
+        CHECK_MSG(dw.ref.dev != 0, "upload failed");
+        auto X = rand_vec(17 * n, seed++), Xp = rand_vec(17 * n, seed++);
+        std::vector<float> Y16((size_t)(17 * rows)), Yp((size_t)(17 * rows));
+        cuda::linear(Y16.data(), dw.ref, X.data(), 17);
+        for (int64_t m : {2, 3, 4, 5, 8, 9, 11, 12, 13, 16}) {
+            // Fill the device output scratch with other tokens' results first,
+            // so a token the kernel skipped cannot come back right by accident.
+            cuda::linear(Yp.data(), dw.ref, Xp.data(), 17);
+            std::vector<float> Y((size_t)(m * rows), -999.f);
+            cuda::linear(Y.data(), dw.ref, X.data(), m);
+            char msg[120];
+            snprintf(msg, sizeof(msg), "%s m=%lld differs from the 16-token tile", dtype_name(t), (long long)m);
+            CHECK_MSG(std::memcmp(Y.data(), Y16.data(), Y.size() * sizeof(float)) == 0, msg);
+        }
+    }
+}
+
 int main() { return llmtest::run_all(); }
