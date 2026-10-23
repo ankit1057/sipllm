@@ -101,6 +101,8 @@ private:
     std::vector<float> k_;       // kv_dim
     std::vector<float> v_;       // kv_dim
     std::vector<float> att_;     // max_ctx (attention scores per head)
+    std::vector<std::vector<float>> attn_scratch_;  // per-thread [group][span] scores + dequant row
+    std::vector<float> attn_part_;                  // flash-decoding partials [item][group][m,l,out[hd]]
     std::vector<float> attn_out_;// q_dim
     std::vector<float> proj_;    // dim
     std::vector<float> hb_;      // ffn_dim

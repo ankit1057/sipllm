@@ -166,6 +166,63 @@ TEST(prefill_single_token) {
                          run_prefill(path, opt, tokens), "single");
 }
 
+// ---- spans longer than one attention chunk (512 positions) ----------------
+// Attention splits such a span into fixed chunks merged by log-sum-exp. The
+// split must depend on the span alone, so a long prompt still prefills to the
+// exact bytes of per-token decoding (spec verify relies on the same property)
+// and no result depends on the thread count.
+
+static std::vector<int64_t> long_prompt(int64_t n, int64_t vocab) {
+    std::vector<int64_t> t((size_t)n);
+    uint32_t s = 2463534242u;
+    for (auto& v : t) { s ^= s << 13; s ^= s >> 17; s ^= s << 5; v = s % vocab; }
+    return t;
+}
+
+static Snapshot run_threads(const std::string& path, const std::vector<int64_t>& prompt,
+                            const std::vector<int64_t>& decode, int threads) {
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false; opt.n_buffers = 1;
+    ModelFile f(path, false);
+    ModelConfig cfg = ModelConfig::from_source(f);
+    LayerLoader loader(&f, cfg, opt);
+    KVCache kv(cfg.n_layers, cfg.kv_dim(), cfg.ctx_len);
+    ThreadPool pool(threads);
+    Transformer tf(&loader, &kv, threads > 1 ? &pool : nullptr);
+    const float* logits = tf.prefill(prompt.data(), (int64_t)prompt.size(), 0);
+    int64_t pos = (int64_t)prompt.size();
+    for (int64_t t : decode) logits = tf.forward(t, pos++);
+    Snapshot s;
+    s.logits.assign(logits, logits + cfg.vocab_size);
+    snapshot_kv(kv, pos, s);
+    return s;
+}
+
+static std::string write_long_mqa(const char* name) {
+    ToyConfig tc; tc.n_layers = 3; tc.dim = 32; tc.n_heads = 4; tc.n_kv_heads = 1;
+    tc.ffn_dim = 64; tc.vocab_size = 40; tc.ctx_len = 1400; tc.seed = 77;
+    std::string path = scratch(name);
+    write_toy_model(path, tc);
+    return path;
+}
+
+TEST(prefill_matches_per_token_long_span) {
+    const std::string path = write_long_mqa("toy_prefill_long.llmw");
+    const auto tokens = long_prompt(1200, 40);
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false; opt.n_buffers = 1;
+    expect_bit_identical(run_per_token(path, opt, tokens),
+                         run_prefill(path, opt, tokens), "long span");
+}
+
+TEST(attention_bytes_independent_of_thread_count) {
+    const std::string path = write_long_mqa("toy_prefill_threads.llmw");
+    const auto prompt = long_prompt(1100, 40);
+    const std::vector<int64_t> decode = {3, 17, 29, 4};
+    const Snapshot ref = run_threads(path, prompt, decode, 1);
+    for (int threads : {2, 3, 8, 12})
+        expect_bit_identical(ref, run_threads(path, prompt, decode, threads),
+                             "threads=" + std::to_string(threads));
+}
+
 int main() {
     printf("== test_prefill ==\n");
     return llmtest::run_all();
