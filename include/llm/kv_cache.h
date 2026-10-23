@@ -92,15 +92,19 @@ public:
         return (const void*)(v_.data() + offset_bytes(layer, pos));
     }
 
-    float* k(int64_t layer, int64_t pos) { return (float*)k_ptr(layer, pos); }
-    float* v(int64_t layer, int64_t pos) { return (float*)v_ptr(layer, pos); }
-    const float* k(int64_t layer, int64_t pos) const { return (const float*)k_ptr(layer, pos); }
-    const float* v(int64_t layer, int64_t pos) const { return (const float*)v_ptr(layer, pos); }
+    // Float views are valid only for an FP32 cache: a Q8_0 row is shorter
+    // than kv_dim floats. Byte-level users go through k_ptr()/row_bytes().
+    float* k(int64_t layer, int64_t pos) { check_fp32(); return (float*)k_ptr(layer, pos); }
+    float* v(int64_t layer, int64_t pos) { check_fp32(); return (float*)v_ptr(layer, pos); }
+    const float* k(int64_t layer, int64_t pos) const { check_fp32(); return (const float*)k_ptr(layer, pos); }
+    const float* v(int64_t layer, int64_t pos) const { check_fp32(); return (const float*)v_ptr(layer, pos); }
 
     size_t bytes() const { return k_.size() + v_.size(); }
+    size_t row_bytes() const { return bytes_per_row_; }   // one position of one layer
 
     // Inject contiguous float KV data into layer from pos=0 to num_positions
     void inject(int64_t layer, const float* k_src, const float* v_src, int64_t num_positions) {
+        check_fp32();
         if (num_positions > cap_) grow_to(num_positions);
         std::memcpy(k_ptr(layer, 0), k_src, num_positions * kv_dim_ * sizeof(float));
         std::memcpy(v_ptr(layer, 0), v_src, num_positions * kv_dim_ * sizeof(float));
@@ -109,6 +113,10 @@ public:
 
 private:
     static constexpr int64_t kInitialCap = 64;
+
+    void check_fp32() const {
+        LLM_CHECK(precision_ == KVPrecision::FP32, "KVCache: float access to a Q8_0 cache");
+    }
 
     size_t offset_bytes(int64_t layer, int64_t pos) const {
         return (((size_t)(layer - layer_base_) * cap_) + pos) * bytes_per_row_;

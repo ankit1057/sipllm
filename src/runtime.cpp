@@ -363,7 +363,7 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
 // FNV-1a over the model's identity (arch + shape). Guards session load against
 // a mismatched model; it does NOT detect same-config-but-different-weights
 // (that is the caller's responsibility — a session pairs with its model).
-static uint64_t session_model_id(const ModelConfig& c) {
+static uint64_t session_model_id(const ModelConfig& c, KVPrecision kv_precision) {
     uint64_t h = 1469598103934665603ULL;
     auto mix = [&](uint64_t x) { h ^= x; h *= 1099511628211ULL; };
     for (unsigned char ch : c.arch) mix(ch);
@@ -374,6 +374,9 @@ static uint64_t session_model_id(const ModelConfig& c) {
     mix((uint64_t)c.head_dim);
     mix((uint64_t)c.ffn_dim);
     mix((uint64_t)c.vocab_size);
+    // Rows differ in size per precision. FP32 mixes nothing, so FP32 sessions
+    // saved by earlier builds still load.
+    if (kv_precision == KVPrecision::Q8_0) mix(0x51385f30ULL);   // "Q8_0"
     return h;
 }
 
@@ -405,7 +408,7 @@ bool Runtime::save_session(const std::string& path) const {
         return false;
     }
     return session_write(path, committed_, *kv_, (int64_t)committed_.size(),
-                         session_model_id(cfg_));
+                         session_model_id(cfg_, kv_->precision()));
 }
 
 bool Runtime::load_session(const std::string& path) {
@@ -415,7 +418,7 @@ bool Runtime::load_session(const std::string& path) {
     }
     std::vector<int64_t> toks;
     int64_t sl = 0;
-    if (!session_read(path, toks, *kv_, &sl, session_model_id(cfg_))) {
+    if (!session_read(path, toks, *kv_, &sl, session_model_id(cfg_, kv_->precision()))) {
         reset();   // leave the runtime clean and usable
         return false;
     }
