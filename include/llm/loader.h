@@ -77,6 +77,16 @@ public:
         // Opt-in int8 SDOT kernel for Q8_0 projections (--fast). Numerically
         // equivalent (activation is quantized), not bit-identical; off by default.
         bool      fast_quant   = false;
+        // CUDA offload (--gpu-layers): place the linear projections of layers
+        // [0, gpu_layers) in VRAM once at load (-1 = as many as fit). Clamped to
+        // the free device memory minus gpu_headroom_bytes. Those weights are NOT
+        // kept in host RAM. 0 (default) never touches the CUDA backend.
+        int       gpu_layers   = 0;
+        size_t    gpu_headroom_bytes = (size_t)300 << 20;
+        // After the layers, also place the LM head on the GPU if it still fits
+        // (a tied head then streams embedding rows from disk instead of keeping
+        // the table resident).
+        bool      gpu_output   = true;
         
         // Policy seam to select which layer to prefetch next.
         struct PrefetchPolicy {
@@ -144,6 +154,10 @@ public:
     const Stats& stats() const { return stats_; }
     size_t resident_bytes() const;           // approx current RAM for weights
     int    pinned_layers() const { return n_pinned_; } // resident hot layers (#37)
+    // CUDA offload: layers [0, gpu_layers()) run their projections on the GPU.
+    int    gpu_layers() const { return n_gpu_; }
+    size_t gpu_bytes() const { return gpu_bytes_; }    // device bytes of weights
+    bool   gpu_output() const { return out_gpu_.on_gpu(); }
 
     // GGUF tensor-name suffix for a role (e.g. "attn_q.weight"). Public so the
     // Sip IR importer can resolve the per-role tensor schema without duplicating
@@ -161,6 +175,7 @@ private:
     struct Job { int slot = -1; int layer = -1; };
 
     void   plan_and_pin_layers();            // #37: pin hot layers under budget
+    void   place_gpu_layers();               // --gpu-layers: upload projections
     size_t estimate_layer_bytes(int layer) const; // predicted resident bytes
     void   fill_slot(Slot& s, int layer);    // no lock held; does I/O + dequant
     void   load_weight_into(Slot& s, Role role, int layer);
@@ -190,6 +205,14 @@ private:
     size_t               pinned_bytes_ = 0;
     const Slot*          active_ = nullptr;
     std::vector<LayerStat> layer_stats_;   // per-layer io/dequant accounting
+
+    // ---- CUDA offload (--gpu-layers) -------------------------------------
+    // Layers [0, n_gpu_) are pinned slots whose projection refs point at VRAM
+    // (gpu_ref_[layer*COUNT+role].dev); their norms/biases stay in host RAM.
+    int                    n_gpu_ = 0;
+    size_t                 gpu_bytes_ = 0;
+    std::vector<WeightRef> gpu_ref_;       // n_layers * Role::COUNT (dev != 0 iff on GPU)
+    WeightRef              out_gpu_;       // LM head on GPU (dev != 0 iff placed)
 
     // global weights
     const TensorInfo* embd_info_ = nullptr;   // token_embd (streamed per-row)

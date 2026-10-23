@@ -10,6 +10,7 @@
 #include "llm/quant.h"
 #include "llm/neon.h"
 #include "llm/kquant.h"
+#include "llm/cuda_backend.h"
 
 namespace llm {
 
@@ -22,6 +23,7 @@ inline bool use_kquant_fast(const WeightRef& W) {
 
 inline void linear(float* y, const WeightRef& W, const float* x,
                    ThreadPool* pool = nullptr) {
+    if (W.on_gpu()) { cuda::linear(y, W, x, 1); return; }   // --gpu-layers
     if (W.dtype == DType::F32)
         matmul(y, static_cast<const float*>(W.data), x, W.n_out, W.n_in, pool);
     else if (W.dtype == DType::Q8_0 && fast_quant_enabled() && (W.n_in % 32 == 0))
@@ -38,6 +40,7 @@ inline void linear(float* y, const WeightRef& W, const float* x,
 
 inline void linear_batch(float* Y, const WeightRef& W, const float* X, int64_t bs,
                          ThreadPool* pool = nullptr) {
+    if (W.on_gpu()) { cuda::linear(Y, W, X, bs); return; }  // --gpu-layers
     if (bs == 1) {
         linear(Y, W, X, pool);
         return;

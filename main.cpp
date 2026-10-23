@@ -6,6 +6,7 @@
 //
 // Streams tokens to stdout as they are produced and prints a stats block.
 #include "llm/runtime.h"
+#include "llm/cuda_backend.h"
 #include "llm/device_profile.h"
 #include "llm/auto_tuner.h"
 #include "llm/plugin.h"
@@ -37,7 +38,7 @@ static void print_usage(const char* prog) {
         "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
         "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
         "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy] [--schedule P]\n"
-        "          [--ram-budget BYTES|N{K,M,G}] [--fast] [--spec N]\n"
+        "          [--ram-budget BYTES|N{K,M,G}] [--fast] [--spec N] [--gpu-layers N|max]\n"
         "          [--kosh] [--kosh-max-run N] [--rtk] [--reuse]\n"
         "          [--save-session F] [--load-session F]\n"
         "          [--chat | -i]\n",
@@ -130,6 +131,7 @@ int main(int argc, char** argv) {
         else if (a == "--ram-budget-force") force_budget = true;
         else if (a == "--kv-q8") kv_q8 = true;
         else if (a == "--fast") opt.fast_quant = true;
+        else if (a == "--gpu-layers") opt.gpu_layers = cuda::parse_gpu_layers(next("max"));
         else if (a == "--ctx") ctx = std::stoi(next("0"));
         else if (a == "--schedule") {
             std::string s = next("proportional2");
@@ -410,6 +412,7 @@ int main(int argc, char** argv) {
             "\n\xE2\x94\x80\xE2\x94\x80 sipllm \xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\n"
             "peak rss:        %.0f MB\n"
             "pinned layers:   %d / %d%s\n"
+            "gpu layers:      %d / %d%s (%.0f MB VRAM weights)\n"
             "fast kernel:     %s\n"
             "decode:          %.2f tok/s\n"
             "prefill:         %.2f tok/s\n"
@@ -427,6 +430,8 @@ int main(int argc, char** argv) {
             "sched barrier:   %.2f ms\n",
             rss / 1e6,
             st.pinned_layers, (int)rt.config().n_layers, budget_note,
+            st.gpu_layers, (int)rt.config().n_layers, st.gpu_output ? " + output head" : "",
+            st.gpu_bytes / 1048576.0,
             opt.fast_quant ? "on" : "off",
             st.decode_tok_s, st.prefill_tok_s, st.ttft_s,
             st.prompt_tokens, st.gen_tokens,

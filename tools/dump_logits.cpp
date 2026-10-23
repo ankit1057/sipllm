@@ -11,6 +11,7 @@
 //
 //   dump_logits <model> [-p prompt] [-k topk] [--no-layers]
 #include "llm/runtime.h"
+#include "llm/cuda_backend.h"
 #include "llm/transformer.h"
 
 #include <algorithm>
@@ -54,9 +55,9 @@ static void write_dump(const std::string& path,
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { fprintf(stderr, "usage: dump_logits <model> [-p prompt] [-k K] [--no-layers] [--fast] [--ctx N] [--threads N] [--raw out.dump]\n"); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: dump_logits <model> [-p prompt] [-k K] [--no-layers] [--fast] [--gpu-layers N|max] [--ctx N] [--threads N] [--raw out.dump]\n"); return 2; }
     std::string model = argv[1], prompt = "The capital of France is", raw_out;
-    int topk = 8, ctx = 0, threads = 0; bool layers = true, fast = false;
+    int topk = 8, ctx = 0, threads = 0, gpu_layers = 0; bool layers = true, fast = false;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-p" && i + 1 < argc) prompt = argv[++i];
@@ -65,12 +66,14 @@ int main(int argc, char** argv) {
         else if (a == "--raw" && i + 1 < argc) raw_out = argv[++i];
         else if (a == "--fast") fast = true;   // int8-activation kernels (as in llm --fast)
         else if (a == "--ctx" && i + 1 < argc) ctx = std::stoi(argv[++i]);
+        else if (a == "--gpu-layers" && i + 1 < argc) gpu_layers = cuda::parse_gpu_layers(argv[++i]);
         else if (a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
     }
     try {
         auto src = open_model(model);
         LayerLoader::Options opt; opt.residency = Residency::Quantized;
         opt.fast_quant = fast;
+        opt.gpu_layers = gpu_layers;
         Runtime rt(std::move(src), opt, ctx, threads);
         printf("# model:  %s\n# config: %s\n# prompt: \"%s\"\n",
                model.c_str(), rt.config().summary().c_str(), prompt.c_str());

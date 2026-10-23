@@ -3,6 +3,9 @@
 #include "llm/common.h"
 #include "llm/quant.h"
 #include "llm/linear.h"
+#include "llm/cuda_backend.h"
+
+#include <cstdio>
 
 #include <cstring>
 #include <algorithm>
@@ -72,6 +75,13 @@ static bool is_split_proj(Role r) {
 static bool is_moe_role(Role r) {
     return r == Role::FfnGateInp || r == Role::FfnGateExps ||
            r == Role::FfnUpExps || r == Role::FfnDownExps;
+}
+// 2-D projections the CUDA backend may hold (dense attention/FFN matrices; MoE
+// expert tensors are excluded — the MoE block slices them on the host).
+static bool is_gpu_role(Role r) {
+    return r == Role::AttnQ || r == Role::AttnK || r == Role::AttnV ||
+           r == Role::AttnOut || r == Role::AttnQKV ||
+           r == Role::FfnGate || r == Role::FfnUp || r == Role::FfnDown;
 }
 // 1-D fp32 weights (norms, biases): tiny, always dequantized on load.
 static bool is_1d_fp32(Role r) { return is_norm(r) || is_bias(r) || r == Role::LayerOutScale; }
@@ -150,12 +160,16 @@ LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
 
     // ---- #37: pin as many hot layers as fit under the RAM budget ---------
     pinned_mask_.assign(n_layers_ > 0 ? (size_t)n_layers_ : 0, 0);
-    if (opt_.ram_budget_bytes > 0 && n_layers_ > 0)
+    // --gpu-layers: leading layers go to VRAM first (as pinned slots holding
+    // device refs); the RAM-budget pinning then continues after them.
+    if (opt_.gpu_layers != 0 && n_layers_ > 0)
+        place_gpu_layers();
+    if (opt_.ram_budget_bytes > 0 && n_layers_ > n_gpu_)
         plan_and_pin_layers();
 
     // Start the prefetch worker only if cold layers remain to stream; with every
     // layer pinned there is nothing left to prefetch.
-    if (opt_.async && opt_.n_buffers > 1 && n_pinned_ < n_layers_)
+    if (opt_.async && opt_.n_buffers > 1 && n_gpu_ + n_pinned_ < n_layers_)
         worker_ = std::thread([this] { worker_loop(); });
 }
 
@@ -169,6 +183,7 @@ size_t LayerLoader::estimate_layer_bytes(int layer) const {
     for (int r = 0; r < (int)Role::COUNT; ++r) {
         const TensorInfo* ti = src_->find(role_name(layer, (Role)r));
         if (!ti) continue;
+        if (!gpu_ref_.empty() && gpu_ref_[(size_t)layer * (int)Role::COUNT + r].on_gpu()) continue;
         const bool one_d    = is_1d_fp32((Role)r);
         const bool want_fp32 = one_d || opt_.residency == Residency::FP32;
         total += want_fp32 ? (size_t)ti->numel() * sizeof(float) : (size_t)ti->nbytes;
@@ -187,28 +202,30 @@ void LayerLoader::plan_and_pin_layers() {
     const size_t globals = out_norm_.size() + out_weight_.size() + embd_resident_.size();
     // Size by the largest layer: heterogeneous stacks (Gemma 4's wider global
     // layers) must not under-reserve. Identical to layer 0 for uniform stacks.
+    // Layers [0, n_gpu_) are already placed on the GPU; pin from there on.
+    const size_t first = (size_t)n_gpu_;
+    const size_t avail = (size_t)n_layers_ - first;
     size_t per_layer = 0;
-    for (int l = 0; l < n_layers_; ++l) per_layer = std::max(per_layer, estimate_layer_bytes(l));
+    for (int l = (int)first; l < n_layers_; ++l) per_layer = std::max(per_layer, estimate_layer_bytes(l));
     if (per_layer == 0) return;
 
-    const size_t all_weights = globals + (size_t)n_layers_ * per_layer;
+    const size_t all_weights = globals + pinned_bytes_ + avail * per_layer;
     size_t target;
     if (budget >= all_weights) {
-        target = (size_t)n_layers_;                    // pin everything
+        target = avail;                                // pin everything
     } else {
         const size_t ring = (size_t)opt_.n_buffers * per_layer;  // cold-stream headroom
-        const size_t base = globals + ring;
-        target = budget > base ? std::min<size_t>((budget - base) / per_layer,
-                                                  (size_t)n_layers_) : 0;
+        const size_t base = globals + pinned_bytes_ + ring;
+        target = budget > base ? std::min<size_t>((budget - base) / per_layer, avail) : 0;
     }
     if (target == 0) return;
 
     pinned_.resize(n_layers_);
     // Reserve ring headroom while pinning unless we pin every layer (then nothing
     // streams and the ring stays empty).
-    const size_t ring_reserve = (target < (size_t)n_layers_)
+    const size_t ring_reserve = (target < avail)
                               ? (size_t)opt_.n_buffers * per_layer : 0;
-    for (size_t l = 0; l < target; ++l) {
+    for (size_t l = first; l < first + target; ++l) {
         fill_slot(pinned_[l], (int)l);
         pinned_[l].layer = (int)l;
         size_t sb = 0;
@@ -225,16 +242,134 @@ void LayerLoader::plan_and_pin_layers() {
     }
 }
 
+// ---- --gpu-layers: CUDA placement -----------------------------------------
+// Upload the dense projections of the leading layers to VRAM, one layer at a
+// time, until the request is met or free device memory would fall below the
+// headroom. Each placed layer becomes a pinned slot: its projection refs carry
+// device pointers (no host copy), its norms/biases are small host buffers.
+void LayerLoader::place_gpu_layers() {
+    if (!cuda::available()) {
+        fprintf(stderr, "[gpu] CUDA unavailable (%s) -- running all layers on CPU\n",
+                cuda::unavailable_reason().c_str());
+        return;
+    }
+    const int want = opt_.gpu_layers < 0 ? (int)n_layers_
+                                         : std::min<int>(opt_.gpu_layers, (int)n_layers_);
+    const size_t headroom = opt_.gpu_headroom_bytes;
+    gpu_ref_.assign((size_t)n_layers_ * (int)Role::COUNT, WeightRef{});
+    pinned_.resize(n_layers_);
+
+    std::vector<uint8_t> raw;
+    for (int l = 0; l < want; ++l) {
+        // Device bytes this layer needs (supported 2-D projections only).
+        size_t need = 0;
+        for (int r = 0; r < (int)Role::COUNT; ++r) {
+            if (!is_gpu_role((Role)r)) continue;
+            const TensorInfo* ti = src_->find(role_name(l, (Role)r));
+            if (!ti || ti->shape.size() != 2) continue;
+            if (!cuda::supports(ti->dtype, ti->shape[1])) continue;
+            need += cuda::weight_bytes(ti->dtype, ti->shape[0], ti->shape[1]);
+        }
+        if (need == 0) break;                         // nothing offloadable
+        size_t fr = 0, tot = 0;
+        if (!cuda::mem_info(&fr, &tot) || fr < need + headroom) break;
+
+        bool ok = true;
+        size_t placed = 0;
+        for (int r = 0; r < (int)Role::COUNT && ok; ++r) {
+            if (!is_gpu_role((Role)r)) continue;
+            const TensorInfo* ti = src_->find(role_name(l, (Role)r));
+            if (!ti || ti->shape.size() != 2) continue;
+            if (!cuda::supports(ti->dtype, ti->shape[1])) continue;
+            raw.resize(ti->nbytes);
+            double t0 = now_sec();
+            src_->read_raw(*ti, raw.data());
+            stats_.io_us += (uint64_t)((now_sec() - t0) * 1e6);
+            stats_.bytes_read += ti->nbytes;
+            const uint64_t d = cuda::upload_weight(raw.data(), ti->dtype, ti->shape[0], ti->shape[1]);
+            if (!d) { ok = false; break; }
+            WeightRef w;
+            w.dtype = ti->dtype; w.n_out = ti->shape[0]; w.n_in = ti->shape[1]; w.dev = d;
+            gpu_ref_[(size_t)l * (int)Role::COUNT + r] = w;
+            placed += cuda::weight_bytes(ti->dtype, ti->shape[0], ti->shape[1]);
+        }
+        if (!ok) {                                    // roll back this layer
+            for (int r = 0; r < (int)Role::COUNT; ++r) {
+                WeightRef& w = gpu_ref_[(size_t)l * (int)Role::COUNT + r];
+                if (w.on_gpu()) cuda::free_weight(w.dev);
+                w = WeightRef{};
+            }
+            break;
+        }
+        // Materialize the rest of the layer (norms, biases, any CPU-only
+        // projection) into a pinned host slot; GPU roles take their device ref.
+        fill_slot(pinned_[l], l);
+        pinned_[l].layer = l;
+        pinned_[l].state = Slot::State::Ready;
+        pinned_mask_[l]  = 1;
+        size_t sb = 0;
+        for (int r = 0; r < (int)Role::COUNT; ++r) sb += pinned_[l].buf[r].size();
+        pinned_bytes_ += sb;
+        gpu_bytes_ += placed;
+        ++n_gpu_;
+    }
+    std::vector<uint8_t>().swap(raw);
+
+    // LM head: used every token; place it too if it still fits.
+    if (opt_.gpu_output && n_gpu_ > 0 && out_weight_ref_.valid() &&
+        cuda::supports(out_weight_ref_.dtype, out_weight_ref_.n_in)) {
+        const size_t need = cuda::weight_bytes(out_weight_ref_.dtype, out_weight_ref_.n_out,
+                                               out_weight_ref_.n_in);
+        size_t fr = 0, tot = 0;
+        if (cuda::mem_info(&fr, &tot) && fr >= need + headroom) {
+            const uint64_t d = cuda::upload_weight(out_weight_ref_.data, out_weight_ref_.dtype,
+                                                   out_weight_ref_.n_out, out_weight_ref_.n_in);
+            if (d) {
+                out_gpu_ = out_weight_ref_;
+                out_gpu_.data = nullptr;
+                out_gpu_.dev = d;
+                gpu_bytes_ += need;
+                // Tied head: embedding rows now stream from disk (one row per
+                // token) so the vocab x dim table need not stay in host RAM.
+                if (embd_is_resident_) {
+                    std::vector<uint8_t>().swap(embd_resident_);
+                    embd_is_resident_ = false;
+                } else {
+                    std::vector<uint8_t>().swap(out_weight_);
+                }
+                out_weight_ref_ = out_gpu_;
+            }
+        }
+    }
+
+    size_t fr = 0, tot = 0;
+    cuda::mem_info(&fr, &tot);
+    fprintf(stderr, "[gpu] %s: placed %d/%d layers%s on GPU (%.0f MB weights, %.0f MB VRAM free)\n",
+            cuda::device_name().c_str(), n_gpu_, (int)n_layers_,
+            out_gpu_.on_gpu() ? " + output head" : "",
+            gpu_bytes_ / 1048576.0, fr / 1048576.0);
+}
+
 LayerLoader::~LayerLoader() {
     if (worker_.joinable()) {
         { std::lock_guard<std::mutex> lk(mutex_); stop_ = true; }
         cv_job_.notify_all();
         worker_.join();
     }
+    for (const WeightRef& w : gpu_ref_) if (w.on_gpu()) cuda::free_weight(w.dev);
+    if (out_gpu_.on_gpu()) cuda::free_weight(out_gpu_.dev);
 }
 
 // ---- per-weight materialization ------------------------------------------
 void LayerLoader::load_weight_into(Slot& s, Role role, int layer) {
+    if (!gpu_ref_.empty() && layer >= 0 && layer < n_layers_) {
+        const WeightRef& g = gpu_ref_[(size_t)layer * (int)Role::COUNT + (int)role];
+        if (g.on_gpu()) {                 // lives in VRAM only (--gpu-layers)
+            s.buf[(int)role].clear();
+            s.ref[(int)role] = g;
+            return;
+        }
+    }
     const std::string name = role_name(layer, role);
     const TensorInfo* ti = src_->find(name);
     if (ti == nullptr) {

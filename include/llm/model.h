@@ -224,7 +224,12 @@ struct WeightRef {
     DType       dtype  = DType::F32;
     int64_t     n_out  = 0;
     int64_t     n_in   = 0;
-    bool valid() const { return data != nullptr; }
+    // Device-resident copy (CUDA backend, --gpu-layers). When set, the weight
+    // lives ONLY in VRAM (data == nullptr) and linear()/linear_batch() route to
+    // cuda::linear. 0 for every CPU weight, so the default path is unchanged.
+    uint64_t    dev    = 0;
+    bool valid() const { return data != nullptr || dev != 0; }
+    bool on_gpu() const { return dev != 0; }
 };
 
 } // namespace llm

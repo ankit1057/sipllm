@@ -319,6 +319,9 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
 
     st.weights_resident_bytes = loader_->resident_bytes();
     st.pinned_layers = loader_->pinned_layers();
+    st.gpu_layers = loader_->gpu_layers();
+    st.gpu_output = loader_->gpu_output();
+    st.gpu_bytes = loader_->gpu_bytes();
     st.kv_bytes = kv_->bytes();
     st.bytes_read = loader_->stats().bytes_read.load();
     st.prefetch_hits = loader_->stats().prefetch_hits.load();

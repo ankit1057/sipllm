@@ -195,6 +195,21 @@ byte-identical greedy output for 24 tokens).
 
 ## [Unreleased]
 
+### NVIDIA GPU offload: `--gpu-layers N|max` (2026-10-06)
+
+Optional, dependency-free CUDA path: `libcuda.so.1` is `dlopen`ed at runtime and
+kernels ship as embedded PTX (`src/cuda_ptx.inc`, regenerate with `make ptx` from
+`kernels/cuda_kernels.cu` using clang's CUDA mode). No toolkit needed to build;
+CPU-only machines are unaffected (`SIPLLM_NO_CUDA=1` forces it off).
+- Q4_K / Q5_K / Q6_K / F16 / F32 matvec (decode) and 16-token tiled matmul (prefill).
+- Loader places whole layers' projections in VRAM until 300 MB headroom remains;
+  optional LM head. GPU weights are not duplicated in host RAM.
+- Gemma 4 12B Q4_K_M on an RTX 3050 Ti 4 GB: 23/48 layers on GPU, decode ~1.45x
+  (3.5-4.1 -> 5.0-6.0 tok/s), prefill 13-15 -> 16-19 tok/s, RSS -3 GB.
+  GPU-vs-CPU logits cosine 1.0000000 (fp32 path); 32-token greedy output identical.
+- `tests/test_cuda.cpp` (5): per-type matvec, batched matmul, dispatch, toy-model
+  offload equivalence; skips cleanly without a GPU.
+
 ### x86: real Gemma 4 12B, sliding-window ring KV, AVX2 `--fast` K-quants, parallel attention (2026-10-24)
 
 Measured on an i7-12700H (6 P-cores pinned, `--threads 6`, warm cache, median of 3;

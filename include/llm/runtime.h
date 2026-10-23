@@ -40,6 +40,9 @@ struct GenStats {
     double decode_tok_s = 0;    // gen tokens / decode_s
     size_t weights_resident_bytes = 0;
     int    pinned_layers = 0;   // #37: layers pinned resident under --ram-budget
+    int    gpu_layers = 0;      // --gpu-layers: layers whose projections ran on CUDA
+    bool   gpu_output = false;  // LM head on CUDA
+    size_t gpu_bytes = 0;       // device bytes of placed weights
     size_t kv_bytes = 0;
     uint64_t bytes_read = 0;    // total streamed from disk
     uint64_t prefetch_hits = 0;
