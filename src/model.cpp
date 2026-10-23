@@ -100,6 +100,7 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
     // architecture without a per-arch reader. Toy .llmw files omit the meta and
     // default to "llama", so their behavior is unchanged.
     c.arch = src.meta_str("general.architecture", "llama");
+    c.chat_template = src.meta_str("tokenizer.chat_template", "");
     c.arch_kind = arch_from_name(c.arch);
     const std::string& a = c.arch;                       // e.g. "llama", "qwen2"
     auto K = [&](const char* suffix) { return a + "." + suffix; };

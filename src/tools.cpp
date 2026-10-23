@@ -279,12 +279,26 @@ bool ToolParser::feed(const std::string& text_chunk) {
 // Chat templates
 // ============================================================================
 ChatTemplateStyle style_from_model(const ModelConfig& cfg) {
+    // The model's own template says which turn markers it was trained on; the
+    // architecture does not (TinyLlama, SmolLM2 and Llama-2 are all "llama").
+    // Marker checks follow llama.cpp's llm_chat_detect_template order.
+    const std::string& t = cfg.chat_template;
+    auto has = [&](const char* s) { return t.find(s) != std::string::npos; };
+    if (!t.empty()) {
+        if (has("<|im_start|>"))                       return ChatTemplateStyle::ChatML;
+        if (has("[INST]"))                             return ChatTemplateStyle::Mistral;
+        if (has("<|assistant|>") && has("<|end|>"))    return ChatTemplateStyle::Phi3;
+        if (has("<|user|>"))                           return ChatTemplateStyle::Zephyr;
+        if (has("<start_of_turn>"))                    return ChatTemplateStyle::Gemma;
+        if (has("<|start_header_id|>"))                return ChatTemplateStyle::Llama3;
+    }
     switch (cfg.arch_kind) {
         case Arch::Llama:   return ChatTemplateStyle::Llama3;
         case Arch::Mistral: return ChatTemplateStyle::Mistral;
         case Arch::Qwen2:   return ChatTemplateStyle::Qwen2;
         case Arch::Gemma2:
-        case Arch::Gemma3:  return ChatTemplateStyle::Gemma;
+        case Arch::Gemma3:
+        case Arch::Gemma4:  return ChatTemplateStyle::Gemma;
         case Arch::Phi3:    return ChatTemplateStyle::Phi3;
         case Arch::Phi2:
         case Arch::GPT2:    return ChatTemplateStyle::GPT2;
@@ -359,6 +373,12 @@ std::string render_chat(const std::vector<ChatMessage>& messages,
         case ChatTemplateStyle::Phi3:
             for (const ChatMessage& m : msgs)
                 o << "<|" << role_word(m.role) << "|>\n" << m.content << "<|end|>\n";
+            if (add_gen_prompt) o << "<|assistant|>\n";
+            break;
+
+        case ChatTemplateStyle::Zephyr:
+            for (const ChatMessage& m : msgs)
+                o << "<|" << role_word(m.role) << "|>\n" << m.content << "</s>\n";
             if (add_gen_prompt) o << "<|assistant|>\n";
             break;
 

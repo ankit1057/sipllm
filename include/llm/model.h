@@ -97,6 +97,7 @@ struct ModelConfig {
     // "qwen2"); `arch_kind` is the resolved dispatch enum. Defaults keep every
     // existing Llama/toy model on the unchanged reference path.
     std::string arch = "llama";
+    std::string chat_template;           // tokenizer.chat_template (Jinja), "" if absent
     Arch        arch_kind = Arch::Llama;
 
     int64_t n_layers   = 0;

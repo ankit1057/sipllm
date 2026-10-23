@@ -147,6 +147,35 @@ TEST(style_from_model_maps_arch) {
     c.arch_kind = Arch::Mistral; CHECK(style_from_model(c) == ChatTemplateStyle::Mistral);
     c.arch_kind = Arch::Phi3;    CHECK(style_from_model(c) == ChatTemplateStyle::Phi3);
     c.arch_kind = Arch::Llama;   CHECK(style_from_model(c) == ChatTemplateStyle::Llama3);
+    c.arch_kind = Arch::Gemma4;  CHECK(style_from_model(c) == ChatTemplateStyle::Gemma);
+}
+
+TEST(style_from_model_prefers_gguf_template) {
+    // Arch "llama" covers TinyLlama (Zephyr), SmolLM2 (ChatML), Llama-2 ([INST])
+    // and Llama-3: the GGUF's own template decides.
+    ModelConfig c;
+    c.arch_kind = Arch::Llama;
+    c.chat_template = "{{ '<|user|>\\n' + message['content'] + eos_token }}{{ '<|assistant|>' }}";
+    CHECK(style_from_model(c) == ChatTemplateStyle::Zephyr);
+    c.chat_template = "{{'<|im_start|>' + message['role'] + '\\n'}}";
+    CHECK(style_from_model(c) == ChatTemplateStyle::ChatML);
+    c.chat_template = "{{ bos_token + '[INST] ' + message['content'] + ' [/INST]' }}";
+    CHECK(style_from_model(c) == ChatTemplateStyle::Mistral);
+    c.chat_template = "{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>' }}";
+    CHECK(style_from_model(c) == ChatTemplateStyle::Llama3);
+    c.arch_kind = Arch::Phi3;
+    c.chat_template = "{{'<|' + message['role'] + '|>\\n' + message['content'] + '<|end|>'}}{{'<|assistant|>'}}";
+    CHECK(style_from_model(c) == ChatTemplateStyle::Phi3);
+}
+
+TEST(chat_template_zephyr) {
+    ToolRegistry empty;
+    std::vector<ChatMessage> msgs = {
+        {ChatMessage::Role::System, "Be brief.", ""},
+        {ChatMessage::Role::User, "Hello", ""},
+    };
+    CHECK(render_chat(msgs, empty, ChatTemplateStyle::Zephyr, true) ==
+          "<|system|>\nBe brief.</s>\n<|user|>\nHello</s>\n<|assistant|>\n");
 }
 
 int main() {
