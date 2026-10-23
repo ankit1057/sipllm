@@ -5,6 +5,13 @@ the end of every optimization wave from measured data (see [CLAUDE.md](CLAUDE.md
 Rule 1). Peak RSS is the authoritative cross-runtime number from `/usr/bin/time -l`.
 
 ```
+v0.6.0 (2026-10-23): the numbers below are wave 16's and were not re-measured for the
+release. The Llama-family hot path is unchanged (greedy output byte-identical to the
+pre-release tree for TinyLlama, Llama-3.2-1B and SmolLM2, with and without --fast). The
+default thread schedule is now fixed16, which closes the default-schedule gap described
+under "Current Largest Bottleneck" (measured in wave 16; the final build was not re-run on
+the phone).
+
 ============================
 SipLLM North Star   (measured 2026-10-19, wave 16 · Apple M3 + Dimensity 900 phone (2x A78 + 6x A55) · ctx 512 · warm)
 ============================
@@ -46,6 +53,103 @@ Confidence:            High: phone numbers are medians of 3 interleaved reps wit
                        accuracy sign-tested over 10 docs. llama.cpp = build 585080d CPU
                        (repack on), not the ggml 0.27.0 of earlier scorecards.
 ```
+
+## [0.6.0] — Correct output beyond Llama, merged waves 12–16, LAN pooling (2026-10-23)
+
+Ships everything merged to `main` since v0.5.0 (wave 12 below, waves 13–16, LAN
+pooling, the semantic cache flag) plus a correctness and safety pass driven by a
+line-by-line audit. Before this release, Qwen2, Gemma and Phi models produced wrong
+output, every chat prompt was mis-tokenized, and two heap overflows were reachable
+from the CLI.
+
+**What a user on a phone or an x86 laptop still cannot do:** match llama.cpp's speed
+(resident decode about 0.7–0.8× and prefill 0.66–0.71× of llama.cpp, wave 16), run the
+AVX2 kernels with any measured guarantee (never run on x86 hardware), or rely on Gemma 2/4,
+Phi-3/4, Mixtral or GPT-2 (implemented on synthetic weights only). StarCoder 2 and
+DeepSeek V2/V3 (multi-head latent attention) are not supported. No head-to-head against
+LiteRT or MediaPipe has been measured.
+
+### Fixed: wrong output
+- **RoPE pair layout.** Qwen2, Gemma 2/3/4 and Phi-2/3/4 GGUFs are not q/k-permuted at
+  conversion and need rotate-half pairs (llama.cpp `ROPE_TYPE_NEOX`); they ran with the
+  Llama layout. Qwen2.5-0.5B answered "The capital of France is" with a string of digits.
+- **Gemma norms and layers.** GGUF Gemma norm weights already include the +1 of
+  `(1 + w)`, which was applied a second time. Gemma 3 local layers now use RoPE base
+  10000 and period 6 when the GGUF does not say (llama.cpp's defaults), and the sliding
+  window applies to local layers only.
+- **Phi-2.** `head_dim` came from `rope.dimension_count` (32 instead of 80), and the
+  loader required an `ffn_norm` tensor that Phi-2 GGUFs do not have.
+- **Tokenizer.** Special tokens (`<|eot_id|>`, `<|im_start|>`, ...) were split into
+  ordinary text tokens; BOS was always added (SmolLM2 and Qwen2 are not trained with
+  it). Now matches llama.cpp: special tokens parsed whole, `add_bos_token` honored,
+  generation stops on turn-end tokens (`<|im_end|>`, `<end_of_turn>`, ...).
+- **Chat templates.** Picked from the GGUF's `tokenizer.chat_template` instead of the
+  architecture name, so TinyLlama (new Zephyr style), SmolLM2 and Llama-2 get their own.
+- **Semantic cache.** A prompt fully present in the cache was re-injected at the wrong
+  per-layer stride and produced garbage.
+
+### Fixed: memory safety and exposure
+- **`--kv-q8` sessions** read and wrote past the KV cache (ASan heap-buffer-overflow).
+  Session files now hold whole cache rows; the KV precision is part of the session id
+  (FP32 session files from earlier builds still load).
+- **Phi-2 batched prefill** wrote past a one-row buffer (ASan heap-buffer-overflow).
+- **`llm_server`** exposed agent tool execution to the network without an opt-in. It now
+  binds 127.0.0.1 unless `--host` is given, and agent requests need `--allow-agent`.
+- **`sipllm` wrapper** declared `/bin/sh` but needed bash; it failed on systems where
+  `/bin/sh` is dash.
+
+### Merged
+- #71 (wave 13): runtime SDOT dispatch; one baseline-ISA binary keeps `--fast`.
+- #72 (wave 14): batched int8 prefill kernels, bit-identical per token.
+- #74 (wave 15): opt-in 4-row interleaved Q4_K layout (`SIPLLM_FAST_LAYOUT=il4`).
+- #75 (wave 16): exact IL4 kernel rewrite, interleaved Q6_K, `--no-autotune` and macOS
+  page-size fixes; plus the default thread schedule `fixed16` (CLI, C ABI, Dart,
+  ThreadPool) and the IL4 batched-tile change.
+- #73: LAN pooled inference v1 (`--worker`/`--nodes`; split one model's layers across
+  machines, pre-shared token).
+- #63: semantic cache, `--semantic-cache-budget` (contributed by @GorangSinghal; the
+  cache itself reached `main` earlier, hardened, in 7d18643).
+
+### Behaviour changes
+- `llm_server`: binds 127.0.0.1 by default (`--host IP` to change); `"agent": true`
+  returns 403 unless started with `--allow-agent`.
+- Default thread schedule is `fixed16` (was `proportional2`).
+- SmolLM2 and Qwen2 prompts no longer start with BOS; chat prompts use the model's
+  template and real special tokens, so chat output changes (for the better).
+- `--semantic-cache-budget` is refused with `--kv-q8` and on a LAN worker.
+- `sipllm_version()` and the wrapper report 0.6.0.
+
+### Known issues
+- BPE pre-tokenizer: runs of whitespace, code and some punctuation-plus-letter
+  sequences tokenize differently from llama.cpp on Llama-3, Qwen2 and SmolLM2
+  (TinyLlama's SentencePiece path matches).
+- The default `--ram-budget 0` streams every layer on every token: TinyLlama Q4_K_M with
+  `--fast` at 4 threads decodes at about 12 tok/s on the M3 against about 64 tok/s with
+  all layers pinned (`--ram-budget 1200M`). Set a budget to trade RAM for speed.
+- `llm_server` ignores `--ram-budget`, `--fast` and unknown flags, and does not stream.
+- The raw-HF safetensors path has not been checked end to end.
+- Flutter plugin and app issues found by the audit (malformed UTF-8 in a streamed token
+  stops generation; a Playground state that leaves Chat unable to send; switching
+  models mid-generation) are not fixed in this release.
+- LAN pooling authenticates with a pre-shared token but does not encrypt; use it only on
+  a trusted network.
+- `llm_server` robustness: a malformed request or the profiling endpoint can still crash
+  or corrupt the server process. Keep it on localhost.
+- Model files are trusted input: a malformed GGUF, LLMW or SIPR file can cause an
+  out-of-bounds access or a crash, and an I/O error in the prefetch thread ends the
+  process. Load only files from sources you trust.
+- The `remote_server` weight-streaming tool and the `nishachar` agent CLI have no
+  authentication or opt-in for what they expose; run them only on a machine and network
+  you control. The Wear OS model receiver trusts the sender's metadata.
+
+### Verification (Apple M3)
+- `make test`: all test binaries pass; the same suite under ASan/UBSan passes with no
+  sanitizer reports. The two overflow reproductions from the audit now exit 0 under ASan.
+- Token-for-token greedy comparisons against llama.cpp on the same GGUF files:
+  Qwen2.5-0.5B-Instruct, Gemma-3-270M-it, Phi-2, plus tokenizer id parity on each model's
+  own chat template (TinyLlama, SmolLM2, Qwen2.5, Llama-3.2).
+- Not verified for this release: anything on a phone (the plugin, fixed16 on the final
+  build), anything on x86 hardware.
 
 ## Waves 13–16 — any-CPU binaries, batched and interleaved int8 prefill (2026-10-19)
 
@@ -257,7 +361,7 @@ byte-identical greedy output for 24 tokens).
 **Verified** — full suite green on a clean build; `--fast` is opt-in so all
 `1e-3`/bit-identical correctness tests are unchanged (no regressions).
 
-## [Unreleased]
+## Wave 12 and earlier notes (wave 12 ships in 0.6.0)
 
 ### Wave 12 — edge truth: K-quant integer kernels, `--spec`, planner fix, honest claims (2026-10-19)
 

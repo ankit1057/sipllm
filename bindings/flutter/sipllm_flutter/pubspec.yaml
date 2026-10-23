@@ -4,7 +4,7 @@ description: >-
   runs models larger than RAM. Bounded --ram-budget, octa-core CPU inference,
   optional Vulkan, a resumable multi-connection Hugging Face download manager,
   on-device embeddings + a SQLite vector store, and phone -> Wear OS model transfer.
-version: 0.4.0
+version: 0.6.0
 repository: https://github.com/ankit1057/sipllm
 publish_to: none
 

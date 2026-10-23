@@ -299,7 +299,7 @@ int32_t sipllm_embed(sipllm_ctx* ctx, const char* text, int32_t pooling,
   }
 }
 
-const char* sipllm_version(void) { return "0.4.0"; }
+const char* sipllm_version(void) { return "0.6.0"; }
 
 int32_t sipllm_vulkan_compiled(void) { return vulkan_compiled() ? 1 : 0; }
 int32_t sipllm_vulkan_available(void) { return vulkan_available() ? 1 : 0; }
