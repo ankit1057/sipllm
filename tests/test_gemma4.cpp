@@ -18,6 +18,7 @@
 #include "llm/session.h"
 #include "llm/tokenizer.h"
 #include "llm/transformer.h"
+#include "llm/threadpool.h"
 #include "tests/test_util.h"
 
 #include <cmath>
@@ -280,4 +281,101 @@ TEST(gemma4_spm_bpe_tokenizer) {
 int main() {
     printf("== test_gemma4 ==\n");
     return llmtest::run_all();
+}
+
+// ---- query-tiled prefill attention on ring (sliding-window) layers ---------
+static std::vector<float> run_prefill_opts(WeightSource& src, const ModelConfig& cfg, KVCache& kv,
+                                           const std::vector<int64_t>& toks, int threads,
+                                           int64_t batch, bool tiled) {
+    LayerLoader::Options opt;
+    opt.residency = Residency::FP32;
+    opt.async = false;
+    LayerLoader loader(&src, cfg, opt);
+    ThreadPool pool(threads);
+    Transformer tf(&loader, &kv, threads > 1 ? &pool : nullptr);
+    tf.set_prefill_batch(batch);
+    tf.set_tiled_attention(tiled);
+    const float* lg = tf.prefill(toks.data(), (int64_t)toks.size(), 0);
+    return std::vector<float>(lg, lg + cfg.vocab_size);
+}
+
+// Window 700, 900 tokens: ring layers attend before the batch is written and
+// their spans are long enough (> 512) for attend() to chunk them per token.
+TEST(gemma4_tiled_ring_equals_untiled_long_window) {
+    auto src = open_model(write_toy_gemma4("g4_tiled_w700.gguf", 700));
+    ModelConfig cfg = ModelConfig::from_source(*src);
+    const auto toks = seq(900);
+    for (int threads : {1, 12})
+        for (int64_t batch : {4, 32, 64}) {
+            KVCache a = ring_cache(cfg, 1024), b = ring_cache(cfg, 1024);
+            auto x = run_prefill_opts(*src, cfg, a, toks, threads, batch, false);
+            auto y = run_prefill_opts(*src, cfg, b, toks, threads, batch, true);
+            check(std::memcmp(x.data(), y.data(), x.size() * 4) == 0,
+                  "tiled != untiled (w700, t=" + std::to_string(threads) + ", b=" + std::to_string(batch) + ")");
+        }
+}
+
+// Window 4 wrapped many times; batches up to the window run tiled, larger
+// ones fall back to token-at-a-time — both must equal the untiled result.
+TEST(gemma4_tiled_ring_equals_untiled_small_window) {
+    auto src = open_model(write_toy_gemma4("g4_tiled_w4.gguf"));
+    ModelConfig cfg = ModelConfig::from_source(*src);
+    const auto toks = seq(41);
+    for (int64_t batch : {2, 3, 4, 8}) {
+        KVCache a = ring_cache(cfg, 64), b = ring_cache(cfg, 64);
+        auto x = run_prefill_opts(*src, cfg, a, toks, 4, batch, false);
+        auto y = run_prefill_opts(*src, cfg, b, toks, 4, batch, true);
+        check(std::memcmp(x.data(), y.data(), x.size() * 4) == 0,
+              "tiled != untiled (w4, b=" + std::to_string(batch) + ")");
+    }
+}
+
+// ---- batched multi-sequence decode on ring (sliding-window) layers ---------
+// Two sequences of different lengths, both past the window-4 ring, decoded
+// together with forward_multi must match decoding each alone, bit for bit.
+TEST(gemma4_forward_multi_equals_alone_with_rings) {
+    auto src = open_model(write_toy_gemma4("g4_multi.gguf"));
+    ModelConfig cfg = ModelConfig::from_source(*src);
+    LayerLoader::Options opt;
+    opt.residency = Residency::FP32;
+    opt.async = false;
+    LayerLoader loader(src.get(), cfg, opt);
+    ThreadPool pool(4);
+    const std::vector<int64_t> pa = seq(9), pb = seq(17);
+    const std::vector<int64_t> ca = {5, 9, 1, 7, 3, 3, 8}, cb = {2, 6, 4, 11, 13};
+    // alone
+    std::vector<std::vector<float>> ra, rb;
+    {
+        KVCache k = ring_cache(cfg, 64);
+        Transformer tf(&loader, &k, &pool);
+        tf.prefill(pa.data(), (int64_t)pa.size(), 0);
+        int64_t p = (int64_t)pa.size();
+        for (int64_t t : ca) { const float* lg = tf.forward(t, p++); ra.emplace_back(lg, lg + cfg.vocab_size); }
+    }
+    {
+        KVCache k = ring_cache(cfg, 64);
+        Transformer tf(&loader, &k, &pool);
+        tf.prefill(pb.data(), (int64_t)pb.size(), 0);
+        int64_t p = (int64_t)pb.size();
+        for (int64_t t : cb) { const float* lg = tf.forward(t, p++); rb.emplace_back(lg, lg + cfg.vocab_size); }
+    }
+    // batched
+    KVCache ka = ring_cache(cfg, 64), kb = ring_cache(cfg, 64), scratch_kv = ring_cache(cfg, 64);
+    Transformer tf(&loader, &scratch_kv, &pool);
+    tf.set_kv(&ka); tf.prefill(pa.data(), (int64_t)pa.size(), 0);
+    tf.set_kv(&kb); tf.prefill(pb.data(), (int64_t)pb.size(), 0);
+    int64_t pos[2] = {(int64_t)pa.size(), (int64_t)pb.size()};
+    for (size_t step = 0; step < ca.size(); ++step) {
+        const bool both = step < cb.size();
+        int64_t toks[2] = {ca[step], both ? cb[step] : 0};
+        KVCache* ks[2] = {&ka, &kb};
+        const float* lg = tf.forward_multi(toks, pos, ks, both ? 2 : 1);
+        check(std::memcmp(lg, ra[step].data(), cfg.vocab_size * 4) == 0,
+              "row 0 differs at step " + std::to_string(step));
+        if (both)
+            check(std::memcmp(lg + cfg.vocab_size, rb[step].data(), cfg.vocab_size * 4) == 0,
+                  "row 1 differs at step " + std::to_string(step));
+        ++pos[0];
+        if (both) ++pos[1];
+    }
 }

@@ -1,5 +1,7 @@
 // transformer.cpp — decoder forward pass (see transformer.h).
 #include "llm/transformer.h"
+
+#include <cstdlib>
 #include "llm/linear.h"
 #include "llm/ops.h"
 #include "llm/simd.h"
@@ -13,6 +15,8 @@ namespace llm {
 
 Transformer::Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool)
     : loader_(loader), kv_(kv), pool_(pool), cfg_(loader->config()) {
+    if (const char* e = std::getenv("SIPLLM_PREFILL_BATCH")) set_prefill_batch(std::atoll(e));
+    if (const char* e = std::getenv("SIPLLM_TILED_ATTN")) prefill_tiled_attn_ = std::atoi(e) != 0;
     x_.assign(cfg_.dim, 0.f);
     xb_.assign(cfg_.dim, 0.f);
     q_.assign(cfg_.q_dim(), 0.f);
@@ -145,9 +149,14 @@ static void rmsnorm_noweight(float* x, int64_t n, float eps) {
 
 // Single data-driven transformer block pipeline (Issue #44).
 // Conditionally applies all per-architecture features based on cfg_.block_spec.
-void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
+void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
+                        const int64_t* row_pos, KVCache* const* row_kv) {
     if (bs == 0) return;
     if (x_in == nullptr) { x_in = x_.data(); bs = 1; }
+    // Row i's absolute position and KV cache: consecutive positions of kv_ for
+    // a prompt (prefill) or a single token, or one independent sequence per row.
+    auto pos_of = [&](int64_t i) -> int64_t { return row_pos ? row_pos[i] : pos + i; };
+    auto kv_of = [&](int64_t i) -> KVCache* { return row_kv ? row_kv[i] : kv_; };
 
     const int64_t dim = cfg_.dim;
     // Per-layer attention geometry (uniform for every arch but Gemma 4).
@@ -266,7 +275,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         for (int64_t i = 0; i < bs; ++i) {
             float* qi = q_.data() + i * q_dim;
             float* ki = k_.data() + i * kv_dim;
-            int64_t pos_i = pos + i;
+            int64_t pos_i = pos_of(i);
             if (b.rope_pairing == RopePairing::NeoX) {
                 rope_neox(qi, n_heads, hd, hd, pos_i, theta_base, ff);
                 rope_neox(ki, n_kv,    hd, hd, pos_i, theta_base, ff);
@@ -305,17 +314,18 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
     const int64_t q8_bytes = type_nbytes(DType::Q8_0, hd);
 
     auto write_kv = [&](int64_t i) {
-        const int64_t pos_i = pos + i;
+        const int64_t pos_i = pos_of(i);
+        KVCache* kv = kv_of(i);
         float* ki = k_.data() + i * kv_dim;
         float* vi = v_.data() + i * kv_dim;
         if (q8kv) {
             for (int64_t h = 0; h < n_kv; ++h) {
-                quantize_q8_0(ki + h * hd, (uint8_t*)kv_->k_ptr(layer, pos_i) + h * q8_bytes, hd);
-                quantize_q8_0(vi + h * hd, (uint8_t*)kv_->v_ptr(layer, pos_i) + h * q8_bytes, hd);
+                quantize_q8_0(ki + h * hd, (uint8_t*)kv->k_ptr(layer, pos_i) + h * q8_bytes, hd);
+                quantize_q8_0(vi + h * hd, (uint8_t*)kv->v_ptr(layer, pos_i) + h * q8_bytes, hd);
             }
         } else {
-            std::memcpy(kv_->k_ptr(layer, pos_i), ki, kv_dim * sizeof(float));
-            std::memcpy(kv_->v_ptr(layer, pos_i), vi, kv_dim * sizeof(float));
+            std::memcpy(kv->k_ptr(layer, pos_i), ki, kv_dim * sizeof(float));
+            std::memcpy(kv->v_ptr(layer, pos_i), vi, kv_dim * sizeof(float));
         }
     };
 
@@ -336,7 +346,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
     constexpr int64_t kAttnChunk = 512;
     const int64_t win = cfg_.sliding_window > 0 && cfg_.is_swa_layer(layer) ? cfg_.sliding_window : 0;
     auto span_of = [&](int64_t i, int64_t& t0, int64_t& len) {
-        const int64_t pos_i = pos + i;
+        const int64_t pos_i = pos_of(i);
         t0 = win > 0 ? std::max<int64_t>(0, pos_i - win + 1) : 0;
         len = pos_i - t0 + 1;
     };
@@ -369,10 +379,11 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
                 float* sc = scr.data();                        // [group][n] scores
                 float* row = scr.data() + group * n;           // dequant row
                 const float* qg = q_.data() + i * q_dim + kvh * group * hd;
+                const KVCache* kvi = kv_of(i);
                 for (int64_t t = a0; t < a1; ++t) {
                     const float* kr;
-                    if (q8kv) { dequantize_row(DType::Q8_0, (const uint8_t*)kv_->k_ptr(layer, t) + kvh * q8_bytes, row, hd); kr = row; }
-                    else kr = (const float*)kv_->k_ptr(layer, t) + kvh * hd;
+                    if (q8kv) { dequantize_row(DType::Q8_0, (const uint8_t*)kvi->k_ptr(layer, t) + kvh * q8_bytes, row, hd); kr = row; }
+                    else kr = (const float*)kvi->k_ptr(layer, t) + kvh * hd;
                     for (int64_t g = 0; g < group; ++g) sc[g * n + (t - a0)] = dot_f32(qg + g * hd, kr, hd) * scale;
                 }
                 float m[64], l[64];                            // group <= 64 for every supported arch
@@ -396,8 +407,8 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
                 }
                 for (int64_t t = a0; t < a1; ++t) {
                     const float* vr;
-                    if (q8kv) { dequantize_row(DType::Q8_0, (const uint8_t*)kv_->v_ptr(layer, t) + kvh * q8_bytes, row, hd); vr = row; }
-                    else vr = (const float*)kv_->v_ptr(layer, t) + kvh * hd;
+                    if (q8kv) { dequantize_row(DType::Q8_0, (const uint8_t*)kvi->v_ptr(layer, t) + kvh * q8_bytes, row, hd); vr = row; }
+                    else vr = (const float*)kvi->v_ptr(layer, t) + kvh * hd;
                     for (int64_t g = 0; g < group; ++g) axpy_f32(outs[g], vr, sc[g * n + (t - a0)], hd);
                 }
                 if (nc > 1)
@@ -407,7 +418,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
                     }
             }
         };
-        if (pool_ && n_thr > 1 && n_items > 1) pool_->parallel_for(n_items, work);
+        if (pool_ && n_thr > 1 && n_items > 1) pool_->parallel_for(n_items, work, 1);
         else work(0, 0, n_items);
 
         if (n_chunks > 1) {
@@ -440,10 +451,142 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             }
         }
     };
-    // A ring (sliding-window) layer holds exactly W rows, so writing token
-    // i+1 can evict a row token i still needs: write and attend one token at a
-    // time there. Full-cache layers write the whole batch, then attend at once.
-    if (kv_->window(layer) > 0) {
+    // Query-tiled prefill attention (bs > 1, fp32 KV). attend() re-reads every
+    // K/V row once per query token; here one work item covers a tile of query
+    // tokens for one KV head, so each row is loaded once per tile and reused
+    // from cache by all of the tile's queries. Per query the arithmetic is
+    // attend()'s, operation for operation — the same span-only chunk split,
+    // the same dot / softmax / axpy order over t, the same normalise-first
+    // single-chunk path and log-sum-exp merge — so results are bit-identical. Rows at
+    // positions >= pos are read from this batch's own k_/v_ (the floats
+    // write_kv copies into the cache), so a ring layer can attend before the
+    // batch is written: its W rows still hold every earlier position the batch
+    // needs while bs <= W. The batch is written afterwards.
+    auto attend_tiled = [&]() {
+        auto k_row = [&](int64_t t, int64_t kvh) -> const float* {
+            return t >= pos ? k_.data() + (t - pos) * kv_dim + kvh * hd
+                            : (const float*)kv_->k_ptr(layer, t) + kvh * hd;
+        };
+        auto v_row = [&](int64_t t, int64_t kvh) -> const float* {
+            return t >= pos ? v_.data() + (t - pos) * kv_dim + kvh * hd
+                            : (const float*)kv_->v_ptr(layer, t) + kvh * hd;
+        };
+        const int64_t want = std::max<int64_t>(1, std::min<int64_t>(bs, (2 * n_thr + n_kv - 1) / n_kv));
+        const int64_t qt = (bs + want - 1) / want;      // queries per tile
+        const int64_t n_items = n_kv * ((bs + qt - 1) / qt);
+        if ((int)attn_scratch_.size() < n_thr) attn_scratch_.resize(n_thr);
+
+        auto work = [&](int tid, int64_t begin, int64_t end) {
+            std::vector<float>& scr = attn_scratch_[tid];
+            int64_t t0v[1024], lenv[1024], ncv[1024], clv[1024], soff[1024], moff[1024], poff[1024];
+            for (int64_t it = begin; it < end; ++it) {
+                const int64_t kvh = it % n_kv;
+                const int64_t qa = (it / n_kv) * qt;
+                const int64_t nq = std::min(bs, qa + qt) - qa;
+                // Scratch: [group][len] scores per query, then {m, l} per
+                // (query, head, chunk), then [hd] partials for chunked queries.
+                int64_t s_need = 0, m_need = 0, p_need = 0;
+                for (int64_t j = 0; j < nq; ++j) {
+                    span_of(qa + j, t0v[j], lenv[j]);
+                    ncv[j] = chunks_of(lenv[j]);
+                    clv[j] = kAttnChunk;
+                    soff[j] = s_need; s_need += group * lenv[j];
+                    moff[j] = m_need; m_need += group * ncv[j] * 2;
+                    poff[j] = p_need; if (ncv[j] > 1) p_need += group * ncv[j] * hd;
+                }
+                if ((int64_t)scr.size() < s_need + m_need + p_need) scr.resize(s_need + m_need + p_need);
+                float* S = scr.data();
+                float* ML = S + s_need;
+                float* PO = ML + m_need;
+                auto out_of = [&](int64_t j, int64_t g, int64_t c) -> float* {
+                    return ncv[j] > 1 ? PO + poff[j] + (g * ncv[j] + c) * hd
+                                      : attn_out_.data() + (qa + j) * q_dim + (kvh * group + g) * hd;
+                };
+                const int64_t ta = t0v[0], tb = pos + qa + nq;   // rows the tile reads
+
+                // Pass 1: scores — each K row once, for every query of the tile.
+                for (int64_t t = ta; t < tb; ++t) {
+                    const float* kr = k_row(t, kvh);
+                    for (int64_t j = 0; j < nq; ++j) {
+                        if (t < t0v[j] || t > pos + qa + j) continue;
+                        const float* qg = q_.data() + (qa + j) * q_dim + kvh * group * hd;
+                        float* s = S + soff[j] + (t - t0v[j]);
+                        for (int64_t g = 0; g < group; ++g) s[g * lenv[j]] = dot_f32(qg + g * hd, kr, hd) * scale;
+                    }
+                }
+                // Softmax per (query, head, chunk), exactly as attend() does it.
+                for (int64_t j = 0; j < nq; ++j)
+                    for (int64_t g = 0; g < group; ++g)
+                        for (int64_t c = 0; c < ncv[j]; ++c) {
+                            const int64_t a0 = c * clv[j];
+                            const int64_t n = std::max<int64_t>(0, std::min(lenv[j], a0 + clv[j]) - a0);
+                            float mx = -INFINITY, sum = 0.f;
+                            if (n > 0) {
+                                float* sg = S + soff[j] + g * lenv[j] + a0;
+                                if (b.attn_softcap) softcap_inplace(sg, n, cfg_.attn_logit_softcap);
+                                for (int64_t t = 0; t < n; ++t) mx = sg[t] > mx ? sg[t] : mx;
+                                for (int64_t t = 0; t < n; ++t) { sg[t] = std::exp(sg[t] - mx); sum += sg[t]; }
+                                if (ncv[j] == 1) {               // plain softmax: normalise first
+                                    const float inv = sum > 0.f ? 1.0f / sum : 0.f;
+                                    for (int64_t t = 0; t < n; ++t) sg[t] *= inv;
+                                }
+                            }
+                            float* ml = ML + moff[j] + (g * ncv[j] + c) * 2;
+                            ml[0] = mx; ml[1] = sum;
+                            float* o = out_of(j, g, c);
+                            std::fill(o, o + hd, 0.f);
+                        }
+                // Pass 2: weighted V — each V row once, for every query of the tile.
+                for (int64_t t = ta; t < tb; ++t) {
+                    const float* vr = v_row(t, kvh);
+                    for (int64_t j = 0; j < nq; ++j) {
+                        if (t < t0v[j] || t > pos + qa + j) continue;
+                        const int64_t c = (t - t0v[j]) / clv[j];
+                        const float* e = S + soff[j] + (t - t0v[j]);
+                        for (int64_t g = 0; g < group; ++g) axpy_f32(out_of(j, g, c), vr, e[g * lenv[j]], hd);
+                    }
+                }
+                // Merge the chunks of long spans (attend()'s log-sum-exp merge);
+                // a single-chunk span was accumulated with normalised weights.
+                for (int64_t j = 0; j < nq; ++j)
+                    for (int64_t g = 0; g < group; ++g) {
+                        if (ncv[j] == 1) continue;
+                        const float* ml = ML + moff[j] + g * ncv[j] * 2;
+                        float* out = attn_out_.data() + (qa + j) * q_dim + (kvh * group + g) * hd;
+                        float M = -INFINITY;
+                        for (int64_t c = 0; c < ncv[j]; ++c)
+                            if (ml[2 * c + 1] > 0.f && ml[2 * c] > M) M = ml[2 * c];
+                        std::fill(out, out + hd, 0.f);
+                        float L = 0.f;
+                        for (int64_t c = 0; c < ncv[j]; ++c) {
+                            if (!(ml[2 * c + 1] > 0.f)) continue;
+                            const float w = std::exp(ml[2 * c] - M);
+                            L += w * ml[2 * c + 1];
+                            axpy_f32(out, out_of(j, g, c), w, hd);
+                        }
+                        const float inv = L > 0.f ? 1.f / L : 0.f;
+                        for (int64_t d = 0; d < hd; ++d) out[d] *= inv;
+                    }
+            }
+        };
+        if (pool_ && n_thr > 1 && n_items > 1) pool_->parallel_for(n_items, work, 1);
+        else work(0, 0, n_items);
+    };
+    const int64_t ring_w = kv_->window(layer);
+    const bool tiled = !row_kv && prefill_tiled_attn_ && bs > 1 && bs <= 1024 && !q8kv &&
+                       (ring_w == 0 || (bs <= ring_w && win > 0 && win <= ring_w));
+    if (row_kv) {
+        // Independent sequences: each row writes its own cache, then attends it
+        // exactly as a single-token forward() would (same flash-decoding split).
+        for (int64_t i = 0; i < bs; ++i) write_kv(i);
+        for (int64_t i = 0; i < bs; ++i) attend(i, i + 1);
+    } else if (tiled) {
+        attend_tiled();
+        for (int64_t i = 0; i < bs; ++i) write_kv(i);
+    } else if (ring_w > 0) {
+        // A ring (sliding-window) layer holds exactly W rows, so writing token
+        // i+1 can evict a row token i still needs: write and attend one token
+        // at a time there. Full-cache layers write the whole batch, then attend.
         for (int64_t i = 0; i < bs; ++i) { write_kv(i); attend(i, i + 1); }
     } else {
         for (int64_t i = 0; i < bs; ++i) write_kv(i);
@@ -662,6 +805,59 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
     return logits_.data();
 }
 
+const float* Transformer::forward_multi(const int64_t* tokens, const int64_t* pos,
+                                        KVCache* const* kvs, int64_t n) {
+    const int64_t dim = cfg_.dim, vocab = cfg_.vocab_size;
+    LLM_CHECK(n > 0, "forward_multi: no rows");
+    for (int64_t i = 0; i < n; ++i) {
+        LLM_CHECK(kvs[i] != nullptr && pos[i] < kvs[i]->max_ctx(),
+                  "forward_multi: position exceeds context window");
+        for (int64_t j = 0; j < i; ++j)
+            LLM_CHECK(kvs[j] != kvs[i], "forward_multi: rows must use distinct caches");
+    }
+    // Seed the n residual streams exactly as forward() seeds x_.
+    multi_x_.assign((size_t)(n * dim), 0.f);
+    for (int64_t i = 0; i < n; ++i) {
+        float* xi = multi_x_.data() + i * dim;
+        loader_->embed_token(tokens[i], xi);
+        if (cfg_.embedding_scale != 1.0f) scale_f32(xi, cfg_.embedding_scale, dim);
+        if (cfg_.learned_pos_emb) loader_->add_pos_embd(pos[i], xi);
+    }
+    for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        loader_->loadLayer((int)l);
+        block(l, 0, n, multi_x_.data(), pos, kvs);
+        loader_->unloadLayer();
+    }
+    for (int64_t i = 0; i < n; ++i) kvs[i]->set_seq_len(pos[i] + 1);
+
+    // Final norm per row, then one batched output projection for all rows.
+    multi_xb_.resize((size_t)(n * dim));
+    WeightRef on = loader_->output_norm_weight();
+    for (int64_t i = 0; i < n; ++i) {
+        const float* xi = multi_x_.data() + i * dim;
+        float* xbi = multi_xb_.data() + i * dim;
+        switch (cfg_.block_spec.norm) {
+            case NormKind::LayerNorm:
+                layernorm(xbi, xi, static_cast<const float*>(on.data),
+                          static_cast<const float*>(loader_->output_norm_bias_weight().data),
+                          dim, cfg_.layernorm_eps);
+                break;
+            case NormKind::RMSNormGemma:
+                rmsnorm_gemma(xbi, xi, static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+                break;
+            case NormKind::RMSNorm:
+            default:
+                rmsnorm(xbi, xi, static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+                break;
+        }
+    }
+    multi_logits_.resize((size_t)(n * vocab));
+    loader_->project_output_batch(multi_xb_.data(), multi_logits_.data(), n, pool_);
+    for (int64_t i = 0; i < n; ++i)
+        softcap_inplace(multi_logits_.data() + i * vocab, vocab, cfg_.final_logit_softcap);
+    return multi_logits_.data();
+}
+
 // Single-pass batched prefill (see transformer.h / RFC-007).
 //
 // `forward` streams the whole model once PER token, so a P-token prompt reads
@@ -694,7 +890,7 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
 
     // Stream every layer once; run all positions through it (ascending => the
     // causal history each position needs is already in the KV cache).
-    const int64_t C = 32; // batched GEMM size
+    const int64_t C = prefill_batch_; // batched GEMM size
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
         loader_->loadLayer((int)l);
         for (int64_t i = 0; i < n; i += C) {

@@ -86,6 +86,11 @@ public:
     size_t weights_resident_bytes() const { return loader_->resident_bytes(); }
     size_t kv_bytes() const { return kv_->bytes(); }
     ThreadPool* thread_pool() { return pool_.get(); }
+    // Low-level access for multi-sequence drivers (tools/sip_batch.cpp): the
+    // transformer and the runtime's own KV cache, whose layout new per-sequence
+    // caches copy.
+    Transformer* transformer() { return tf_.get(); }
+    KVCache* kv_cache() { return kv_.get(); }
 
     // Streaming callback: called with each newly produced piece of text and the
     // token id. Return false to stop early. `on_token` may be null.

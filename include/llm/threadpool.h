@@ -69,8 +69,13 @@ public:
 
     void set_policy(SchedulePolicy p) { policy = p; }
 
+    // chunk > 0 overrides the policy's chunk size for this call (always the
+    // dynamic split). For a few heavy items, e.g. attention's (row, KV head,
+    // time chunk) items: Adaptive's 16-item minimum would otherwise hand all
+    // of them to the calling thread as one chunk and leave the workers idle.
     void parallel_for(int64_t total,
-                      const std::function<void(int, int64_t, int64_t)>& fn) {
+                      const std::function<void(int, int64_t, int64_t)>& fn,
+                      int64_t chunk = 0) {
         if (total <= 0) return;
         if (n_ == 1) { fn(0, 0, total); return; }
 
@@ -81,7 +86,9 @@ public:
             next_row_.store(0, std::memory_order_relaxed);
             
             // Calculate chunk size based on policy
-            if (policy == SchedulePolicy::Static) chunk_ = (total + n_ - 1) / n_;
+            static_ = chunk <= 0 && policy == SchedulePolicy::Static;
+            if (chunk > 0) chunk_ = chunk;
+            else if (policy == SchedulePolicy::Static) chunk_ = (total + n_ - 1) / n_;
             else if (policy == SchedulePolicy::Fixed8) chunk_ = 8;
             else if (policy == SchedulePolicy::Fixed16) chunk_ = 16;
             else if (policy == SchedulePolicy::Fixed32) chunk_ = 32;
@@ -106,7 +113,7 @@ public:
 
 private:
     void run_chunk(int tid) {
-        if (policy == SchedulePolicy::Static) {
+        if (static_) {
             int64_t begin = static_cast<int64_t>(tid) * chunk_;
             if (begin >= total_) return;
             int64_t end = std::min(begin + chunk_, total_);
@@ -159,6 +166,7 @@ private:
 
     const std::function<void(int, int64_t, int64_t)>* fn_ = nullptr;
     int64_t total_ = 0, chunk_ = 0;
+    bool static_ = false;   // this call uses the one-chunk-per-thread split
     std::atomic<int64_t> next_row_{0};
 };
 

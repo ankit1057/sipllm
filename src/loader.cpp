@@ -583,6 +583,16 @@ void LayerLoader::project_output(const float* x, float* y, ThreadPool* pool) con
     }
 }
 
+void LayerLoader::project_output_batch(const float* X, float* Y, int64_t bs,
+                                       ThreadPool* pool) const {
+    if (bs == 1 || !out_weight_ref_.valid()) {
+        for (int64_t i = 0; i < bs; ++i)
+            project_output(X + i * cfg_.dim, Y + i * cfg_.vocab_size, pool);
+        return;
+    }
+    linear_batch(Y, out_weight_ref_, X, bs, pool);
+}
+
 WeightRef LayerLoader::output_norm_bias_weight() const {
     if (!out_norm_bias_present_) return WeightRef{};
     return {out_norm_bias_.data(), DType::F32, 1, cfg_.dim};

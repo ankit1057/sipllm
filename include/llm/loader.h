@@ -145,6 +145,10 @@ public:
     // y = lm_head @ x -> logits. Streams the LM head off disk (row-blocked) when
     // non-tied so the full vocab*dim head is never resident; tied path is resident.
     void project_output(const float* x, float* y, ThreadPool* pool) const;
+    // project_output for bs rows at once (X: bs x dim, Y: bs x vocab). A
+    // resident (tied / fp32 / GPU) LM head is read once for all rows; a
+    // streamed one falls back to one project_output call per row.
+    void project_output_batch(const float* X, float* Y, int64_t bs, ThreadPool* pool) const;
     // Optional globals (GPT-2). output_norm_bias: fp32 [dim] or invalid.
     WeightRef output_norm_bias_weight() const;
     bool has_pos_embd() const { return pos_embd_is_resident_; }

@@ -227,3 +227,80 @@ int main() {
     printf("== test_prefill ==\n");
     return llmtest::run_all();
 }
+
+// ---- query-tiled prefill attention -----------------------------------------
+// prefill() with an explicit batch size, tiled attention on/off, and a pool of
+// `threads` workers. Spans longer than 512 positions are split into
+// flash-decoding chunks; the tiled path must reproduce that split and its
+// log-sum-exp merge bit for bit.
+static Snapshot run_prefill_cfg(const std::string& path, LayerLoader::Options opt,
+                                const std::vector<int64_t>& tokens, int64_t batch,
+                                bool tiled, int threads) {
+    ModelFile f(path, opt.use_mmap);
+    ModelConfig cfg = ModelConfig::from_source(f);
+    LayerLoader loader(&f, cfg, opt);
+    KVCache kv(cfg.n_layers, cfg.kv_dim(), cfg.ctx_len);
+    ThreadPool pool(threads);
+    Transformer tf(&loader, &kv, &pool);
+    tf.set_prefill_batch(batch);
+    tf.set_tiled_attention(tiled);
+    const float* logits = tf.prefill(tokens.data(), (int64_t)tokens.size(), 0);
+    Snapshot s;
+    s.logits.assign(logits, logits + cfg.vocab_size);
+    snapshot_kv(kv, (int64_t)tokens.size(), s);
+    return s;
+}
+
+static std::vector<int64_t> toy_tokens(int n, int64_t vocab) {
+    std::vector<int64_t> t;
+    for (int i = 0; i < n; ++i) t.push_back((i * 13 + 5) % vocab);
+    return t;
+}
+
+// Long sequence (spans > 512 positions, so attend() chunks), GQA, every batch
+// size and thread count: tiled == untiled, logits and KV, bit for bit.
+TEST(prefill_tiled_equals_untiled_gqa) {
+    ToyConfig tc; tc.n_layers = 3; tc.dim = 32; tc.n_heads = 4; tc.n_kv_heads = 2;
+    tc.ffn_dim = 64; tc.vocab_size = 48; tc.ctx_len = 1200; tc.seed = 77;
+    std::string path = scratch("toy_tiled_gqa.llmw");
+    write_toy_model(path, tc);
+    const auto tokens = toy_tokens(1100, tc.vocab_size);
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false; opt.n_buffers = 1;
+    for (int threads : {1, 4, 12})
+        for (int64_t batch : {2, 3, 32, 64}) {
+            const std::string what = "gqa t=" + std::to_string(threads) + " b=" + std::to_string(batch);
+            expect_bit_identical(run_prefill_cfg(path, opt, tokens, batch, false, threads),
+                                 run_prefill_cfg(path, opt, tokens, batch, true, threads), what);
+        }
+}
+
+// MQA (one KV head, group 8) with quantized residency.
+TEST(prefill_tiled_equals_untiled_mqa_quant) {
+    ToyConfig tc; tc.n_layers = 2; tc.dim = 32; tc.n_heads = 8; tc.n_kv_heads = 1;
+    tc.ffn_dim = 64; tc.vocab_size = 40; tc.ctx_len = 800; tc.seed = 91;
+    std::string path = scratch("toy_tiled_mqa.llmw");
+    write_toy_model(path, tc);
+    const auto tokens = toy_tokens(700, tc.vocab_size);
+    LayerLoader::Options opt; opt.residency = Residency::Quantized; opt.async = false; opt.n_buffers = 1;
+    for (int threads : {1, 6})
+        for (int64_t batch : {2, 17, 32})
+            expect_bit_identical(run_prefill_cfg(path, opt, tokens, batch, false, threads),
+                                 run_prefill_cfg(path, opt, tokens, batch, true, threads),
+                                 "mqa t=" + std::to_string(threads) + " b=" + std::to_string(batch));
+}
+
+// Short prompt split over several tiled batches (later batches read earlier
+// positions from the cache, their own from k_/v_): still identical to
+// running forward() token by token.
+TEST(prefill_tiled_multi_batch_matches_per_token) {
+    ToyConfig tc; tc.n_layers = 3; tc.dim = 32; tc.n_heads = 4; tc.n_kv_heads = 2;
+    tc.ffn_dim = 64; tc.vocab_size = 48; tc.seed = 7;
+    std::string path = scratch("toy_tiled_short.llmw");
+    write_toy_model(path, tc);
+    std::vector<int64_t> tokens = {7, 3, 11, 42, 5, 5, 1, 0, 23, 6, 6, 9};
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = true; opt.n_buffers = 2;
+    const Snapshot ref = run_per_token(path, opt, tokens);
+    for (int64_t batch : {2, 3, 5, 12})
+        expect_bit_identical(ref, run_prefill_cfg(path, opt, tokens, batch, true, 4),
+                             "per-token vs tiled b=" + std::to_string(batch));
+}
