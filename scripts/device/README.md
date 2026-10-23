@@ -8,7 +8,9 @@ stats. Nothing is installed and the UI is never touched; every run is `nice 10`.
 ```sh
 # 1. cross-build (NDK; libc++ linked statically so the binaries run from /data/local/tmp)
 make -j4 BUILD=build-android CXX=$NDK/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android29-clang++ \
-     ARCHFLAGS="-march=armv8.2-a+dotprod+fp16" build-android/llm build-android/test_neon build-android/test_spec_equiv
+     ARCHFLAGS="-march=armv8-a" build-android/llm build-android/test_neon build-android/test_spec_equiv
+#    (baseline ISA: runs on any arm64 phone; the SDOT kernels in src/neon_sdot.cpp are built with
+#     dotprod automatically and chosen at runtime — check `test_neon` prints dotprod=1 on SDOT phones)
 # 2. push
 adb shell mkdir -p /data/local/tmp/sipllm/out
 adb push build-android/llm build-android/test_neon build-android/test_spec_equiv scripts/device/device_run.sh scripts/device/device_cmd.sh /data/local/tmp/sipllm/
