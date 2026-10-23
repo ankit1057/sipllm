@@ -170,6 +170,54 @@ private:
 // Per-step sampler seed: a different, reproducible stream for every step.
 uint64_t native_step_seed(uint64_t base, int step);
 
+// Gemma 4 control tokens the native loop constrains (ids; -1 = not in vocab).
+struct ControlTokenIds {
+    int64_t channel_open = -1;     // "<|channel>"  (opens a thought block)
+    int64_t channel_close = -1;    // "<channel|>"
+    int64_t turn_open = -1;        // "<|turn>"     (the model must never open a turn)
+    int64_t tool_response = -1;    // "<|tool_response>" (only the harness writes these)
+};
+
+// Per-step sampling rules for the native loop (feed filter() to
+// Runtime::set_logit_filter, on_token() from the token callback):
+//  - "<|turn>" and "<|tool_response>" can never be sampled;
+//  - "<|channel>" only as the first token of a step, and only if the thought
+//    block was not prefilled (v6-r1 L3: 4096 empty markers in a row);
+//  - "<channel|>" only while a thought block is open;
+//  - with think_budget > 0, on_token() returns false once a thought block has
+//    run past the budget, so the caller can close it.
+class StepTokenGuard {
+public:
+    StepTokenGuard(ControlTokenIds ids, bool thought_prefilled, int think_budget)
+        : ids_(ids), thought_open_(thought_prefilled), prefilled_(thought_prefilled), budget_(think_budget) {}
+    void filter(float* logits, int64_t vocab) const;
+    bool on_token(int64_t id);
+    void force_close() { thought_open_ = false; }
+    bool thought_open() const { return thought_open_; }
+    int generated() const { return generated_; }
+private:
+    ControlTokenIds ids_;
+    bool thought_open_;
+    bool prefilled_;
+    int budget_;
+    int generated_ = 0;
+    int thought_tokens_ = 0;
+};
+
+// Removes thought blocks ("<|channel>...<channel|>", any content, and an
+// unclosed trailing one) from model output.
+std::string strip_thoughts(const std::string& out);
+
+// Tracks diagnostics across a run's checks and summarises what changed:
+// fixed / still failing / new, identity = file + code + message (lines move).
+class CheckDigest {
+public:
+    std::string update(const std::vector<Diagnostic>& diags);
+private:
+    std::vector<Diagnostic> prev_;
+    bool has_prev_ = false;
+};
+
 // Structured run report (a slice of the #58 "structured run report" deliverable).
 struct AgentResult {
     std::string            goal;

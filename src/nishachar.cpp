@@ -7,6 +7,7 @@
 #include "llm/nishachar.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -57,7 +58,6 @@ std::string degenerate_tail_unit(const std::string& text) {
     return "";
 }
 
-static const char* kEmptyThought = "<|channel>thought\n<channel|>";
 
 NativeStep classify_native_step(const std::string& out, bool call_closed, const std::string& rut, bool hit_cap) {
     NativeStep r;
@@ -65,9 +65,7 @@ NativeStep classify_native_step(const std::string& out, bool call_closed, const 
     if (!rut.empty()) { r.kind = NativeStepKind::Rut; return r; }
     if (r.in_call) { r.kind = call_closed ? NativeStepKind::ToolCall : NativeStepKind::CutInCall; return r; }
     if (hit_cap) { r.kind = NativeStepKind::CutNoCall; return r; }
-    std::string fin = out;
-    const std::string ch = kEmptyThought;
-    for (size_t k; (k = fin.find(ch)) != std::string::npos;) fin.erase(k, ch.size());
+    std::string fin = strip_thoughts(out);
     const size_t a = fin.find_first_not_of(" \t\r\n");
     if (a == std::string::npos) { r.kind = NativeStepKind::JunkFinal; return r; }
     const size_t b = fin.find_last_not_of(" \t\r\n");
@@ -159,6 +157,79 @@ uint64_t native_step_seed(uint64_t base, int step) {
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     z ^= z >> 31;
     return z ? z : 1;
+}
+
+std::string strip_thoughts(const std::string& out) {
+    std::string s = out;
+    for (size_t a; (a = s.find("<|channel>")) != std::string::npos;) {
+        const size_t b = s.find("<channel|>", a);
+        s.erase(a, b == std::string::npos ? std::string::npos : b + 10 - a);
+    }
+    return s;
+}
+
+void StepTokenGuard::filter(float* logits, int64_t vocab) const {
+    auto ban = [&](int64_t id) { if (id >= 0 && id < vocab) logits[id] = -INFINITY; };
+    ban(ids_.turn_open);
+    ban(ids_.tool_response);
+    if (generated_ > 0 || prefilled_) ban(ids_.channel_open);
+    if (!thought_open_) ban(ids_.channel_close);
+}
+
+bool StepTokenGuard::on_token(int64_t id) {
+    ++generated_;
+    if (id == ids_.channel_open) { thought_open_ = true; thought_tokens_ = 0; return true; }
+    if (id == ids_.channel_close) { thought_open_ = false; return true; }
+    if (thought_open_ && ++thought_tokens_ > budget_ && budget_ > 0) return false;
+    return true;
+}
+
+std::string CheckDigest::update(const std::vector<Diagnostic>& diags) {
+    std::vector<Diagnostic> cur;
+    for (const auto& d : diags)
+        if (d.severity != "info") cur.push_back(d);
+    auto same = [](const Diagnostic& x, const Diagnostic& y) {
+        auto base = [](const std::string& f) { const size_t s = f.find_last_of('/'); return s == std::string::npos ? f : f.substr(s + 1); };
+        return base(x.file) == base(y.file) && x.code == y.code && x.message == y.message;
+    };
+    auto contains = [&](const std::vector<Diagnostic>& v, const Diagnostic& d) {
+        for (const auto& e : v) if (same(e, d)) return true;
+        return false;
+    };
+    auto short_msg = [](std::string m) {   // drop the analyzer's "Try ..." advice
+        const size_t t = m.find(". Try ");
+        if (t != std::string::npos) m = m.substr(0, t + 1);
+        return m;
+    };
+    std::string s;
+    if (cur.empty()) s = "[check summary] no errors or warnings found.";
+    else {
+        int ne = 0;
+        for (const auto& d : cur) ne += d.severity == "error";
+        s = "[check summary] " + std::to_string(ne) + " error(s), " + std::to_string((int)cur.size() - ne) + " warning(s).";
+    }
+    if (has_prev_) {
+        int fixed = 0, still = 0, added = 0;
+        for (const auto& d : prev_) fixed += !contains(cur, d);
+        for (const auto& d : cur) (contains(prev_, d) ? still : added) += 1;
+        s += " Compared with your previous check: " + std::to_string(fixed) + " fixed, " + std::to_string(still) +
+             " still failing, " + std::to_string(added) + " new.";
+    }
+    for (size_t k = 0; k < cur.size() && k < 12; ++k) {
+        const auto& d = cur[k];
+        // Relative paths are shown as printed; absolute ones from lib/ or test/ on.
+        std::string f = d.file;
+        if (!f.empty() && f[0] == '/') {
+            const size_t l = f.rfind("/lib/"), t = f.rfind("/test/"), sl = f.find_last_of('/');
+            f = l != std::string::npos ? f.substr(l + 1) : t != std::string::npos ? f.substr(t + 1) : f.substr(sl + 1);
+        }
+        s += "\n  " + f + ":" + std::to_string(d.line) + ": " + d.severity + ": " + short_msg(d.message) +
+             (has_prev_ && contains(prev_, d) ? "  [still failing]" : "");
+    }
+    if (cur.size() > 12) s += "\n  ... " + std::to_string(cur.size() - 12) + " more";
+    prev_ = cur;
+    has_prev_ = true;
+    return s;
 }
 
 const char* agent_stop_name(AgentStop s) {

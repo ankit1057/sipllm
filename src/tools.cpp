@@ -1059,6 +1059,135 @@ ToolHandler make_grep_search_handler(const std::string& workdir) {
     };
 }
 
+// ---- Diagnostics -------------------------------------------------------------
+
+static std::string trim_ws(const std::string& s) {
+    const size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    return s.substr(a, s.find_last_not_of(" \t\r\n") - a + 1);
+}
+
+static std::string lower(std::string s) {
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+std::vector<Diagnostic> parse_diagnostics(const std::string& output) {
+    std::vector<Diagnostic> out;
+    auto add = [&](Diagnostic d) {
+        for (const auto& e : out)
+            if (e.severity == d.severity && e.file == d.file && e.line == d.line && e.message == d.message) return;
+        out.push_back(std::move(d));
+    };
+    std::istringstream in(output);
+    std::string raw;
+    const std::string bullet = "\xE2\x80\xA2";   // "•"
+    while (std::getline(in, raw)) {
+        const std::string ln = trim_ws(raw);
+        if (ln.empty()) continue;
+        // dart analyze --format=machine: SEVERITY|TYPE|CODE|FILE|LINE|COL|LEN|MESSAGE
+        if (ln.compare(0, 6, "ERROR|") == 0 || ln.compare(0, 8, "WARNING|") == 0 || ln.compare(0, 5, "INFO|") == 0) {
+            std::vector<std::string> f;
+            size_t p = 0;
+            for (int k = 0; k < 7; ++k) {
+                const size_t q = ln.find('|', p);
+                if (q == std::string::npos) break;
+                f.push_back(ln.substr(p, q - p));
+                p = q + 1;
+            }
+            if (f.size() == 7) {
+                Diagnostic d;
+                d.severity = lower(f[0]);
+                d.code = lower(f[2]);
+                d.file = f[3];
+                d.line = std::atoi(f[4].c_str());
+                d.message = ln.substr(p);
+                add(std::move(d));
+            }
+            continue;
+        }
+        // flutter/dart analyze human: "error • message • file:L:C • code"
+        size_t b1 = ln.find(bullet);
+        if (b1 != std::string::npos) {
+            const std::string sev = lower(trim_ws(ln.substr(0, b1)));
+            if (sev == "error" || sev == "warning" || sev == "info") {
+                std::vector<std::string> f{sev};
+                size_t p = b1 + bullet.size();
+                for (size_t q; (q = ln.find(bullet, p)) != std::string::npos; p = q + bullet.size())
+                    f.push_back(trim_ws(ln.substr(p, q - p)));
+                f.push_back(trim_ws(ln.substr(p)));
+                if (f.size() >= 3) {
+                    Diagnostic d;
+                    d.severity = sev;
+                    d.message = f[1];
+                    const std::string loc = f[2];
+                    const size_t c1 = loc.find(':');
+                    d.file = c1 == std::string::npos ? loc : loc.substr(0, c1);
+                    if (c1 != std::string::npos) d.line = std::atoi(loc.c_str() + c1 + 1);
+                    if (f.size() >= 4) d.code = f[3];
+                    add(std::move(d));
+                }
+                continue;
+            }
+        }
+        // dart analyze (CLI): "error - file:L:C - message - code"
+        if (ln.compare(0, 8, "error - ") == 0 || ln.compare(0, 10, "warning - ") == 0 || ln.compare(0, 7, "info - ") == 0) {
+            const size_t s1 = ln.find(" - ");
+            const size_t s2 = ln.find(" - ", s1 + 3);
+            const size_t sl = ln.rfind(" - ");
+            if (s2 != std::string::npos) {
+                Diagnostic d;
+                d.severity = ln.substr(0, s1);
+                const std::string loc = ln.substr(s1 + 3, s2 - s1 - 3);
+                const size_t c1 = loc.find(':');
+                d.file = c1 == std::string::npos ? loc : loc.substr(0, c1);
+                if (c1 != std::string::npos) d.line = std::atoi(loc.c_str() + c1 + 1);
+                const bool has_code = sl > s2 && ln.find(' ', sl + 3) == std::string::npos;
+                d.code = has_code ? ln.substr(sl + 3) : "";
+                d.message = ln.substr(s2 + 3, (has_code ? sl : ln.size()) - s2 - 3);
+                add(std::move(d));
+                continue;
+            }
+        }
+        // compiler-style: "file:L:C: error: msg" / "file:L:C: Error: msg"
+        const size_t e = ln.find(": error: ") != std::string::npos ? ln.find(": error: ") : ln.find(": Error: ");
+        const size_t w = ln.find(": warning: ") != std::string::npos ? ln.find(": warning: ") : ln.find(": Warning: ");
+        const size_t at = e != std::string::npos ? e : w;
+        if (at != std::string::npos) {
+            const std::string loc = ln.substr(0, at);
+            const size_t c1 = loc.find(':');
+            if (c1 == std::string::npos || loc.find(' ') != std::string::npos) continue;
+            Diagnostic d;
+            d.severity = e != std::string::npos ? "error" : "warning";
+            d.file = loc.substr(0, c1);
+            d.line = std::atoi(loc.c_str() + c1 + 1);
+            d.message = trim_ws(ln.substr(at + (e != std::string::npos ? 9 : 11)));
+            add(std::move(d));
+        }
+    }
+    return out;
+}
+
+std::string strip_check_noise(const std::string& output) {
+    std::istringstream in(output);
+    std::string ln, out;
+    while (std::getline(in, ln)) {
+        const std::string t = trim_ws(ln);
+        if (t == "Resolving dependencies..." || t == "Downloading packages..." || t == "Got dependencies!" ||
+            t.find("packages have newer versions incompatible") != std::string::npos ||
+            t.find("package has newer versions incompatible") != std::string::npos ||
+            t.compare(0, 23, "Try `flutter pub outdat") == 0 || t.compare(0, 19, "Try `dart pub outda") == 0)
+            continue;
+        // "  clock 1.1.2 (1.1.3 available)"
+        if (t.size() > 12 && t.back() == ')' && t.find(" available)") != std::string::npos &&
+            std::count(t.begin(), t.end(), ' ') == 3)
+            continue;
+        out += ln + "\n";
+    }
+    if (!output.empty() && output.back() != '\n' && !out.empty()) out.pop_back();
+    return out;
+}
+
 // ---- Post-edit syntax checks ------------------------------------------------
 
 static std::string shell_quote(const std::string& v) {
@@ -1093,22 +1222,49 @@ ToolHandler with_edit_checks(ToolHandler inner, const std::string& workdir, std:
         const std::string raw_path = call.get("path", call.get("file_path", ""));
         std::filesystem::path p;
         std::string err;
-        const EditCheck* chk = nullptr;
+        const EditCheck* chk = nullptr;              // the (first) undo-on-break check
+        std::vector<const EditCheck*> warns;         // warn-only checks
         if (!raw_path.empty() && resolve_tool_path(raw_path, workdir, p, err)) {
             const std::string ps = p.string();
             for (const auto& c : checks)
                 if (ps.size() >= c.ext.size() && ps.compare(ps.size() - c.ext.size(), c.ext.size(), c.ext) == 0) {
-                    chk = &c;
-                    break;
+                    if (c.warn_only) warns.push_back(&c);
+                    else if (!chk) chk = &c;
                 }
         }
-        if (!chk) return inner(call);
+        if (!chk && warns.empty()) return inner(call);
+        // Appends each warn-only checker's findings for this file (or "no
+        // issues") so a broken change is visible in the same step.
+        auto with_warnings = [&](std::string result) {
+            for (const EditCheck* wc : warns) {
+                std::string wout;
+                const int rc = run_edit_check(*wc, p, wout);
+                std::vector<Diagnostic> ds;
+                for (auto& d : parse_diagnostics(wout))
+                    if (d.severity != "info") ds.push_back(d);
+                if (ds.empty() && rc == 0) { result += "\n[analyzer] no errors or warnings in " + raw_path + "."; continue; }
+                if (ds.empty()) { result += "\n[analyzer] " + trim_ws(wout).substr(0, 600); continue; }
+                int ne = 0;
+                for (const auto& d : ds) ne += d.severity == "error";
+                result += "\n[analyzer] after this change " + raw_path + " has " + std::to_string(ne) + " error(s), " +
+                          std::to_string((int)ds.size() - ne) + " warning(s):";
+                for (size_t k = 0; k < ds.size() && k < 10; ++k)
+                    result += "\n  line " + std::to_string(ds[k].line) + ": " + ds[k].severity + ": " + ds[k].message +
+                              (ds[k].code.empty() ? "" : " (" + ds[k].code + ")");
+                if (ds.size() > 10) result += "\n  ... " + std::to_string(ds.size() - 10) + " more";
+            }
+            return result;
+        };
+        if (!chk) {
+            std::string r = inner(call);
+            return r.compare(0, 3, "ok:") == 0 ? with_warnings(std::move(r)) : r;
+        }
         std::string before;
         const bool existed = slurp_file(p, before);
         std::string result = inner(call);
         if (result.compare(0, 3, "ok:") != 0) return result;      // the tool itself refused
         std::string out;
-        if (run_edit_check(*chk, p, out) == 0) return result;      // still parses
+        if (run_edit_check(*chk, p, out) == 0) return with_warnings(std::move(result));   // still parses
         // The changed file no longer parses. Only undo if it parsed before, so
         // edits that repair an already-broken file are never blocked.
         bool parsed_before = false;
@@ -1128,7 +1284,7 @@ ToolHandler with_edit_checks(ToolHandler inner, const std::string& workdir, std:
                    "restored unchanged. Checker output:\n" + out +
                    "\nRedo the change without that mistake (often a missing comma, bracket or semicolon).";
         }
-        return result + "\nwarning: " + raw_path + " does not parse yet. Checker output:\n" + out;
+        return with_warnings(result + "\nwarning: " + raw_path + " does not parse yet. Checker output:\n" + out);
     };
 }
 

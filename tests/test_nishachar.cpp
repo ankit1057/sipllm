@@ -7,12 +7,15 @@
 #include "llm/tools.h"
 #include "tests/test_util.h"
 
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 using namespace llm;
+
+static bool has_text(const std::string& s, const std::string& sub) { return s.find(sub) != std::string::npos; }
 
 // A scripted generator: yields `outputs` in order across successive calls, then
 // empty once exhausted. The shared index makes the counter survive the copy the
@@ -425,6 +428,62 @@ TEST(native_step_seeds_differ_per_step_and_reproduce) {
     CHECK(native_step_seed(42, 0) != native_step_seed(42, 1));
     CHECK(native_step_seed(42, 7) == native_step_seed(42, 7));
     CHECK(native_step_seed(42, 3) != native_step_seed(43, 3));
+}
+
+TEST(step_token_guard_rules) {
+    ControlTokenIds ids;
+    ids.channel_open = 1; ids.channel_close = 2; ids.turn_open = 3; ids.tool_response = 4;
+    float lg[8];
+    auto fresh = [&] { for (float& v : lg) v = 0.f; };
+    // Thinking off: "<|channel>" allowed only as the first token; never <|turn> / <|tool_response>.
+    StepTokenGuard g(ids, /*prefilled=*/false, /*budget=*/0);
+    fresh(); g.filter(lg, 8);
+    CHECK(lg[1] == 0.f && std::isinf(lg[2]) && std::isinf(lg[3]) && std::isinf(lg[4]));
+    CHECK(g.on_token(1));                                   // <|channel>
+    fresh(); g.filter(lg, 8);
+    CHECK(std::isinf(lg[1]) && lg[2] == 0.f);               // no 2nd open; close allowed
+    CHECK(g.on_token(5)); CHECK(g.on_token(2));             // "thought", <channel|>
+    fresh(); g.filter(lg, 8);
+    CHECK(std::isinf(lg[1]) && std::isinf(lg[2]));          // the L3 loop is now impossible
+    // Thinking on, block prefilled: no open at all; budget enforced.
+    StepTokenGuard t(ids, /*prefilled=*/true, /*budget=*/3);
+    fresh(); t.filter(lg, 8);
+    CHECK(std::isinf(lg[1]) && lg[2] == 0.f);
+    CHECK(t.on_token(5) && t.on_token(5) && t.on_token(5));
+    CHECK(!t.on_token(5));                                  // 4th thought token: over budget
+    t.force_close();
+    fresh(); t.filter(lg, 8);
+    CHECK(std::isinf(lg[2]) && !t.thought_open());
+}
+
+TEST(thought_blocks_are_stripped_from_answers) {
+    const std::string th = "<|channel>thought\nThe analyzer says line 38 needs a finder first.<channel|>";
+    CHECK(strip_thoughts(th + "Fixed it.") == "Fixed it.");
+    CHECK(strip_thoughts("<|channel>thought\nunfinished reasoning") == "");
+    NativeStep f = classify_native_step(th + "Done: all checks pass.", false, "", false);
+    CHECK(f.kind == NativeStepKind::Final && f.final_text == "Done: all checks pass.");
+    CHECK(classify_native_step(th, false, "", false).kind == NativeStepKind::JunkFinal);   // only thinking
+    CHECK(classify_native_step(th + "<|tool_call>call:bash{command:<|\"|>ls<|\"|>}<tool_call|>", true, "", false).kind ==
+          NativeStepKind::ToolCall);
+}
+
+TEST(check_digest_reports_fixed_still_new) {
+    // v6-r1 L5: the same three errors on consecutive checks; line 15 never touched.
+    std::vector<Diagnostic> a{
+        {"error", "test/widget_test.dart", 15, "use_of_void_result", "This expression has a type of 'void' so its value can't be used. Try checking."},
+        {"error", "test/widget_test.dart", 38, "argument_type_not_assignable", "The argument type 'String' can't be assigned to the parameter type 'FinderBase<Element>'."},
+        {"error", "test/widget_test.dart", 38, "not_enough_positional_arguments", "2 positional arguments expected by 'enterText', but 1 found."}};
+    CheckDigest dg;
+    std::string s1 = dg.update(a);
+    CHECK_MSG(has_text(s1, "3 error(s)") && !has_text(s1, "Compared"), s1);
+    CHECK(has_text(s1, "test/widget_test.dart:15: error: This expression has a type of 'void' so its value can't be used."));
+    CHECK(!has_text(s1, "Try checking"));                  // advice trimmed
+    std::string s2 = dg.update(a);
+    CHECK_MSG(has_text(s2, "0 fixed, 3 still failing, 0 new") && has_text(s2, ":15: error") && has_text(s2, "[still failing]"), s2);
+    std::vector<Diagnostic> b{a[0], {"error", "test/widget_test.dart", 38, "undefined_named_parameter", "The named parameter 'into' isn't defined."}};
+    std::string s3 = dg.update(b);
+    CHECK_MSG(has_text(s3, "2 fixed, 1 still failing, 1 new"), s3);
+    CHECK(has_text(dg.update({}), "no errors or warnings found") );
 }
 
 int main() {

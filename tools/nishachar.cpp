@@ -66,6 +66,11 @@ static void print_usage(const char* prog) {
             "  --check-pattern S  bash commands containing S count as running the checks\n"
             "                   (repeatable; default: any bash call)\n"
             "  --steps-left-warning N  remind the agent when N steps remain (default 3, 0 = off)\n"
+            "  --edit-warn E:C  after write_file/edit_file on *E run C ({file} = path) and append\n"
+            "                   its findings to the result (never undoes). Repeatable. e.g.\n"
+            "                   --edit-warn '.dart:dart analyze --format=machine {file}'\n"
+            "  --thinking       enable Gemma 4 thinking (<|think|>); see --think-budget\n"
+            "  --think-budget N max tokens per thought block before it is closed (default 512)\n"
             "  --start-cmd C    run shell command C in the workdir first and show its output\n"
             "                   to the agent with the goal (e.g. the project's checks)\n"
             "  --edit-check E:C after write_file/edit_file on *E run shell command C ({file} =\n"
@@ -171,7 +176,8 @@ static bool parse_native_call(const std::string& s, ToolCall& call, std::string&
 static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, const AgentConfig& cfg,
                                      const std::string& goal, const std::vector<ToolDef>& defs,
                                      const std::map<std::string, ToolHandler>& handlers, FILE* logf,
-                                     const LoopGuardConfig& guard_cfg, uint64_t seed_base) {
+                                     const LoopGuardConfig& guard_cfg, uint64_t seed_base,
+                                     FILE* trf, bool thinking, int think_budget) {
     AgentResult result;
     result.goal = goal;
     result.stop = AgentStop::MaxSteps;
@@ -182,9 +188,28 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
     std::string decl;
     for (const ToolDef& d : defs) decl += native_declaration(d);
     // Pending text to feed next; the model's own tokens are already in the KV.
-    std::string feed = "<|turn>system\n" + sys + decl + "<turn|>\n<|turn>user\n" + goal +
-                       "<turn|>\n<|turn>model\n";
+    // Gemma 4 template: thinking is enabled by "<|think|>" at the top of the
+    // system turn (enable_thinking defaults to false; v6/v6.1 never sent it).
+    std::string feed = "<|turn>system\n" + std::string(thinking ? "<|think|>\n" : "") + sys + decl +
+                       "<turn|>\n<|turn>user\n" + goal + "<turn|>\n<|turn>model\n";
     rt.reset();
+    if (trf) {
+        fprintf(trf, "{\"type\":\"native_start\",\"thinking\":%s,\"prompt\":%s}\n",
+                thinking ? "true" : "false", json_str(feed).c_str());
+        fflush(trf);
+    }
+    // Control tokens the per-step guard constrains (single-token specials only).
+    auto special_id = [&](const char* text) -> int64_t {
+        const auto ids = rt.tokenizer().encode(text, /*add_bos=*/false);
+        return ids.size() == 1 ? ids[0] : -1;
+    };
+    ControlTokenIds ctl;
+    ctl.channel_open = special_id("<|channel>");
+    ctl.channel_close = special_id("<channel|>");
+    ctl.turn_open = special_id("<|turn>");
+    ctl.tool_response = special_id("<|tool_response>");
+    bool thought_prefilled = false;   // the feed ends with an opened "<|channel>thought\n"
+    CheckDigest digest;
     const double t0 = now_sec();
     FailedCallTracker fail_tracker;
     LoopGuards guards(guard_cfg);
@@ -202,14 +227,35 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
         std::string out;
         SamplerConfig sc = scfg;
         sc.seed = native_step_seed(seed_base, step);   // a fresh, reproducible stream per step
+        StepTokenGuard guard(ctl, thought_prefilled, thinking ? think_budget : 0);
+        rt.set_logit_filter([&guard](float* lg, int64_t v) { guard.filter(lg, v); });
+        bool budget_hit = false;
+        const std::string step_feed = feed;
+        auto on_piece = [&](const std::string& piece, int64_t id) {
+            fputs(piece.c_str(), stdout); fflush(stdout);
+            acc += piece; last_piece = piece;
+            if (!guard.on_token(id)) { budget_hit = true; return false; }
+            if (acc.find("<tool_call|>") != std::string::npos) { stopped = true; return false; }
+            if (!(rut = degenerate_tail_unit(acc)).empty()) return false;
+            return true;
+        };
         try {
-            out = rt.generate(feed, cfg.max_new_tokens, sc, [&](const std::string& piece, int64_t) {
-                fputs(piece.c_str(), stdout); fflush(stdout);
-                acc += piece; last_piece = piece;
-                if (acc.find("<tool_call|>") != std::string::npos) { stopped = true; return false; }
-                if (!(rut = degenerate_tail_unit(acc)).empty()) return false;
-                return true;
-            }, &st);
+            out = rt.generate(feed, cfg.max_new_tokens, sc, on_piece, &st);
+            if (budget_hit && rut.empty() && !stopped) {
+                // Thought budget spent: close the block for the model and let it act.
+                // The piece that tripped the budget is in `out` but not in the KV.
+                printf("\n\033[1;33m[thought budget %d reached — closing the thought block]\033[0m\n", think_budget);
+                guard.force_close();
+                GenStats st2;
+                const int left = std::max(64, cfg.max_new_tokens - st.gen_tokens);
+                out += "<channel|>";
+                acc += "<channel|>";
+                out += rt.generate(last_piece + "<channel|>", left, sc, on_piece, &st2);
+                st.gen_tokens += st2.gen_tokens;
+                st.ctx_used = st2.ctx_used;
+                st.processed_tokens += st2.processed_tokens;
+                st.prefill_s += st2.prefill_s;
+            }
         } catch (const std::exception& e) {
             printf("\n[generate failed: %s]\n", e.what());
             result.stop = AgentStop::Empty;
@@ -231,7 +277,15 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
         AgentStep s;
         s.index = step;
         s.model_output = out;
-        const NativeStep ns = classify_native_step(out, stopped, rut, hit_cap);
+        const NativeStep ns = classify_native_step((thought_prefilled ? "<|channel>thought\n" : "") + out,
+                                                   stopped, rut, hit_cap);
+        auto log_step = [&](const char* kind, const std::string& result) {
+            if (!trf) return;
+            fprintf(trf, "{\"type\":\"native_step\",\"step\":%d,\"kind\":\"%s\",\"feed\":%s,\"output\":%s,"
+                         "\"result\":%s}\n", step + 1, kind, json_str(step_feed).c_str(), json_str(out).c_str(),
+                    json_str(result).c_str());
+            fflush(trf);
+        };
 
         // ---- No tool call: an answer, an empty answer, a cut-off reply, or a rut outside a call.
         if (!ns.in_call) {
@@ -252,6 +306,7 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
                     break;
                 }
                 if (msg.empty()) {                        // a real final answer
+                    log_step("final", "");
                     result.final_text = ns.final_text;
                     result.stop = AgentStop::Done;
                     result.steps.push_back(std::move(s));
@@ -263,8 +318,10 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
             log_event(step + 1, "nudge", msg);
             s.nudged = true;
             s.tool_result = "[harness] " + msg;
+            log_step("nudge", s.tool_result);
             result.steps.push_back(std::move(s));
             feed = native_user_turn(msg);
+            thought_prefilled = false;   // a new model turn: the model opens its own block
             continue;
         }
 
@@ -304,6 +361,14 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
             tool_result += repeat_failure_note(tool_key, n_fail);
             printf("\033[1;33m[repeat guard: failure #%d of %s with the same error]\033[0m\n", n_fail, tool_key.c_str());
         }
+        if (ok && call.name == "bash") {
+            const std::string cmd = call.get("command", call.get("cmd", ""));
+            bool is_check = false;
+            for (const auto& pat : guard_cfg.check_patterns) is_check = is_check || cmd.find(pat) != std::string::npos;
+            const auto diags = parse_diagnostics(tool_result);
+            if (is_check || !diags.empty())
+                tool_result = strip_check_noise(tool_result) + "\n" + digest.update(diags);
+        }
         guards.on_tool(call.name, call.name == "bash" ? call.get("command", call.get("cmd", "")) : std::string(),
                        ok, tool_result);
         tool_result += guards.steps_left_note(steps_left);
@@ -319,7 +384,12 @@ static AgentResult run_gemma4_native(Runtime& rt, const SamplerConfig& scfg, con
         for (size_t k; (k = body.find(kQ)) != std::string::npos;) body.replace(k, 5, "\"");
         feed = (stopped ? last_piece : std::string("<tool_call|>")) + "<|tool_response>response:" +
                (call.name.empty() ? std::string("error") : call.name) + "{value:" + kQ + body + kQ + "}<tool_response|>";
+        log_step("tool", tool_result);
+        // Template, thinking on: after a tool response the model's thought block is prefilled open.
+        thought_prefilled = thinking;
+        if (thinking) feed += "<|channel>thought\n";
     }
+    rt.set_logit_filter(nullptr);
     return result;
 }
 
@@ -348,6 +418,8 @@ int main(int argc, char** argv) {
     LoopGuardConfig guard_cfg;
     uint64_t seed_base = SamplerConfig{}.seed;
     std::string start_cmd;
+    bool thinking = false;
+    int think_budget = 512;
     std::string log_path, transcript_path;
     bool require_tool = false;
 
@@ -385,6 +457,18 @@ int main(int argc, char** argv) {
             guard_cfg.check_patterns.push_back(argv[++i]);
         } else if (a == "--steps-left-warning" && i + 1 < argc) {
             guard_cfg.steps_left_warning = std::stoi(argv[++i]);
+        } else if (a == "--thinking") {
+            thinking = true;
+        } else if (a == "--think-budget" && i + 1 < argc) {
+            think_budget = std::stoi(argv[++i]);
+        } else if (a == "--edit-warn" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            const size_t colon = v.find(':');
+            if (colon == std::string::npos || colon == 0 || colon + 1 >= v.size()) {
+                fprintf(stderr, "error: --edit-warn expects EXT:COMMAND, got '%s'\n", v.c_str());
+                return 1;
+            }
+            tool_opts.edit_checks.push_back({v.substr(0, colon), v.substr(colon + 1), /*warn_only=*/true});
         } else if (a == "--start-cmd" && i + 1 < argc) {
             start_cmd = argv[++i];
         } else if (a == "--read-page" && i + 1 < argc) {
@@ -604,7 +688,7 @@ int main(int argc, char** argv) {
                            "`):\n" + o;
             }
             AgentResult r = run_gemma4_native(rt, scfg, cfg, goal_in, native_defs, native_handlers, logf,
-                                              guard_cfg, seed_base);
+                                              guard_cfg, seed_base, trf, thinking, think_budget);
             print_result(r);
             return (r.stop == AgentStop::Done) ? 0 : 1;
         }

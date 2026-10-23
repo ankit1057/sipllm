@@ -190,7 +190,26 @@ void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
 struct EditCheck {
     std::string ext;
     std::string cmd;
+    bool warn_only = false;   // true: never undo; append the checker's findings to the result
 };
+
+// ---- Diagnostics in tool output (checks, compilers, analyzers) ---------------
+struct Diagnostic {
+    std::string severity;   // "error" | "warning" | "info"
+    std::string file;       // as printed (may be absolute)
+    int line = 0;
+    std::string code;       // analyzer/lint code if any ("" for compiler-style lines)
+    std::string message;
+};
+// Recognises `flutter analyze` lines ("  error • msg • file:L:C • code"), `dart
+// analyze` lines ("error - file:L:C - msg - code"),
+// `dart analyze --format=machine` lines ("ERROR|TYPE|CODE|file|L|C|len|msg") and
+// compiler-style lines ("file:L:C: error: msg", also "Error:"). Order preserved,
+// exact duplicates dropped.
+std::vector<Diagnostic> parse_diagnostics(const std::string& output);
+// Drops package-manager chatter (pub "Resolving dependencies...", "x 1.0 (1.1
+// available)", "Got dependencies!", "Try `flutter pub outdated`...").
+std::string strip_check_noise(const std::string& output);
 
 struct SystemToolOptions {
     size_t read_page_bytes = 5000;         // read_file per-call output cap

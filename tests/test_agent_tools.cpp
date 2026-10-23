@@ -343,6 +343,55 @@ TEST(read_file_page_size_and_last_line_guard) {
     CHECK(slurp(d + "/m.dart") == big);
 }
 
+TEST(parse_diagnostics_real_formats_and_noise) {
+    // Lines captured from the v6-r1 broken-L7 snapshot (flutter 3.x / dart 3.x).
+    const std::string machine =
+        "ERROR|COMPILE_TIME_ERROR|UNDEFINED_METHOD|/tmp/p/lib/main.dart|203|48|8|The method 'scrollTo' isn't defined for the type 'PortfolioPage'.\n"
+        "INFO|LINT|PREFER_CONST|/tmp/p/lib/main.dart|10|3|5|Use const.\n";
+    auto m = parse_diagnostics(machine);
+    CHECK(m.size() == 2 && m[0].severity == "error" && m[0].line == 203 && m[0].code == "undefined_method" &&
+          m[0].file == "/tmp/p/lib/main.dart" && m[1].severity == "info");
+    const std::string human =
+        "Analyzing portfolio...\n"
+        "  error \xE2\x80\xA2 Undefined name '_projectsKey'. Try correcting the name to one that is defined, or defining the name \xE2\x80\xA2 lib/main.dart:203:57 \xE2\x80\xA2 undefined_identifier\n"
+        "warning \xE2\x80\xA2 The value of the field '_x' isn't used \xE2\x80\xA2 lib/widgets/a.dart:7:3 \xE2\x80\xA2 unused_field\n"
+        "2 issues found. (ran in 1.2s)\n";
+    auto h = parse_diagnostics(human);
+    CHECK(h.size() == 2 && h[0].file == "lib/main.dart" && h[0].line == 203 && h[0].code == "undefined_identifier" &&
+          h[1].severity == "warning" && h[1].file == "lib/widgets/a.dart");
+    const std::string compiler =
+        "test/widget_test.dart:15:31: Error: This expression has type 'void' and can't be used.\n"
+        "test/widget_test.dart:38:29: Error: Too few positional arguments: 2 required, 1 given.\n"
+        "src/x.cpp:4:2: warning: unused variable 'y'\n";
+    auto cmp = parse_diagnostics(compiler);
+    CHECK(cmp.size() == 3 && cmp[0].line == 15 && cmp[1].line == 38 && cmp[2].severity == "warning");
+    // dart analyze CLI (dash format), captured from the v6.2 smoke test.
+    auto dd = parse_diagnostics("Analyzing a.dart...\n\n  error - a.dart:1:12 - Undefined name 'missingName'. Try correcting the name to one that is defined, or defining the name. - undefined_identifier\n\n1 issue found.\n");
+    CHECK(dd.size() == 1 && dd[0].severity == "error" && dd[0].file == "a.dart" && dd[0].line == 1 &&
+          dd[0].code == "undefined_identifier" && dd[0].message.compare(0, 29, "Undefined name 'missingName'.") == 0);
+    CHECK(parse_diagnostics("All tests passed!\nexit 0").empty());
+    const std::string pub =
+        "Resolving dependencies...\nDownloading packages...\n  clock 1.1.2 (1.1.3 available)\n"
+        "  vector_math 2.2.0 (2.4.3 available)\nGot dependencies!\n"
+        "8 packages have newer versions incompatible with dependency constraints.\n"
+        "Try `flutter pub outdated` for more information.\nAnalyzing portfolio...\nNo issues found!";
+    CHECK_MSG(strip_check_noise(pub) == "Analyzing portfolio...\nNo issues found!", strip_check_noise(pub));
+}
+
+TEST(warn_only_edit_check_appends_findings_never_undoes) {
+    std::string d = fresh_dir("editwarn");
+    // Fake analyzer: one machine-format error per line containing BAD.
+    const std::string cmd = "grep -n BAD {file} | sed 's/^\\([0-9]*\\):.*/ERROR|COMPILE_TIME_ERROR|UNDEFINED_IDENTIFIER|x.dart|\\1|1|1|Undefined name BAD./'";
+    std::vector<EditCheck> checks{{".dart", cmd, true}};
+    ToolHandler ed = with_edit_checks(make_edit_file_handler(d), d, checks);
+    put(d + "/w.dart", "a\nb\n");
+    std::string r = ed(mk("edit_file", {{"path", "w.dart"}, {"old_string", "b"}, {"new_string", "BAD"}}));
+    CHECK_MSG(has(r, "ok: replaced") && has(r, "has 1 error(s)") && has(r, "line 2: error: Undefined name BAD."), r);
+    CHECK(slurp(d + "/w.dart") == "a\nBAD\n");                      // kept, not undone
+    r = ed(mk("edit_file", {{"path", "w.dart"}, {"old_string", "BAD"}, {"new_string", "fine"}}));
+    CHECK_MSG(has(r, "[analyzer] no errors or warnings in w.dart"), r);
+}
+
 int main() {
     printf("== test_agent_tools ==\n");
     return llmtest::run_all();
