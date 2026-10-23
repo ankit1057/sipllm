@@ -78,6 +78,8 @@ public:
                            int64_t pos, float theta_base);
     static void apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                            int64_t pos, float theta_base, const RopeScaling& rs);
+    static void apply_rope_neox(float* vec, int64_t n_heads, int64_t head_dim,
+                                int64_t rot_dim, int64_t pos, float theta);
 
     const ModelConfig& config() const { return cfg_; }
 

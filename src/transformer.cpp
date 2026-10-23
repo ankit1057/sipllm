@@ -113,6 +113,25 @@ static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
     }
 }
 
+// Rotate-half RoPE (ggml "rope_neox"): pairs (i, i + rot_dim/2) over the first
+// `rot_dim` dims of each head; the rest pass through. For archs whose GGUF q/k
+// are not permuted at conversion (Qwen2, Gemma, Phi).
+void Transformer::apply_rope_neox(float* vec, int64_t n_heads, int64_t head_dim,
+                                  int64_t rot_dim, int64_t pos, float theta) {
+    const int64_t half = rot_dim / 2;
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* p = vec + h * head_dim;
+        for (int64_t i = 0; i < half; ++i) {
+            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+            float angle = (float)pos * freq;
+            float c = std::cos(angle), s = std::sin(angle);
+            float x0 = p[i], x1 = p[i + half];
+            p[i]        = x0 * c - x1 * s;
+            p[i + half] = x0 * s + x1 * c;
+        }
+    }
+}
+
 // Single data-driven transformer block pipeline (Issue #44).
 // Conditionally applies all per-architecture features based on cfg_.block_spec.
 void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
@@ -215,10 +234,17 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             int64_t pos_i = pos + i;
             switch (b.rope) {
                 case RopeKind::None: break;
-                case RopeKind::Partial:
-                    rope_rot(qi, n_heads, hd, b.rope_dim > 0 ? b.rope_dim : hd, pos_i, theta_base);
-                    rope_rot(ki, n_kv,    hd, b.rope_dim > 0 ? b.rope_dim : hd, pos_i, theta_base);
+                case RopeKind::Partial: {
+                    const int64_t rd = b.rope_dim > 0 ? b.rope_dim : hd;
+                    if (b.rope_neox) {
+                        apply_rope_neox(qi, n_heads, hd, rd, pos_i, theta_base);
+                        apply_rope_neox(ki, n_kv,    hd, rd, pos_i, theta_base);
+                    } else {
+                        rope_rot(qi, n_heads, hd, rd, pos_i, theta_base);
+                        rope_rot(ki, n_kv,    hd, rd, pos_i, theta_base);
+                    }
                     break;
+                }
                 case RopeKind::Llama3Scaled: {
                     RopeScaling rs;
                     rs.llama3 = true;
@@ -231,8 +257,13 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
                     break;
                 }
                 case RopeKind::Full:
-                    apply_rope(qi, n_heads, hd, pos_i, theta_base);
-                    apply_rope(ki, n_kv,    hd, pos_i, theta_base);
+                    if (b.rope_neox) {
+                        apply_rope_neox(qi, n_heads, hd, hd, pos_i, theta_base);
+                        apply_rope_neox(ki, n_kv,    hd, hd, pos_i, theta_base);
+                    } else {
+                        apply_rope(qi, n_heads, hd, pos_i, theta_base);
+                        apply_rope(ki, n_kv,    hd, pos_i, theta_base);
+                    }
                     break;
             }
         }

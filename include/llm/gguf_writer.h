@@ -11,6 +11,7 @@
 #include "llm/model.h"
 #include "llm/quant.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -157,6 +158,8 @@ struct ToyGgufConfig {
     bool gelu_ffn = false;            // GPT-2/Phi-2 non-gated GELU MLP (ffn_up/down only)
     bool full_bias = false;           // GPT-2/Phi-2 LayerNorm + projection biases
     bool pos_emb = false;             // GPT-2 learned position embeddings
+    bool permute_qk = false;          // reorder q/k rows as llama.cpp's HF->GGUF Llama
+                                      // converter does (adjacent-pair RoPE == rotate-half)
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -206,10 +209,24 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
         w.u32("tokenizer.ggml.eos_token_id", 2);
     }
 
-    auto emit = [&](const std::string& name, std::vector<int64_t> shape, bool quant) {
+    // permute_heads > 0: reorder rows within each head so row (h, 2i + j) takes
+    // row (h, j * half + i), the converter's permute(); values are unchanged.
+    auto emit = [&](const std::string& name, std::vector<int64_t> shape, bool quant,
+                    int64_t permute_heads = 0) {
         int64_t n = 1; for (auto d : shape) n *= d;
         std::vector<float> f(n);
         for (auto& v : f) v = nd(rng);
+        if (permute_heads > 0) {
+            const int64_t rows = shape[0], cols = n / shape[0];
+            const int64_t hd = rows / permute_heads, half = hd / 2;
+            std::vector<float> g(f);
+            for (int64_t h = 0; h < permute_heads; ++h)
+                for (int64_t i = 0; i < half; ++i)
+                    for (int64_t j = 0; j < 2; ++j)
+                        std::copy_n(&f[(h * hd + j * half + i) * cols], cols,
+                                    &g[(h * hd + 2 * i + j) * cols]);
+            f.swap(g);
+        }
         DType dt = quant ? c.weight_type : DType::F32;
         if (dt == DType::F32) {
             w.add_tensor(name, DType::F32, shape, f.data(), n * 4);
@@ -233,8 +250,8 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
             // separate q,k,v below, so the values are identical.
             emit(names::blk(i, "attn_qkv.weight"), {q_dim + 2 * kv_dim, c.dim}, true);
         } else {
-            emit(names::attn_q(i), {q_dim, c.dim}, true);
-            emit(names::attn_k(i), {kv_dim, c.dim}, true);
+            emit(names::attn_q(i), {q_dim, c.dim}, true, c.permute_qk ? c.n_heads : 0);
+            emit(names::attn_k(i), {kv_dim, c.dim}, true, c.permute_qk ? c.n_kv_heads : 0);
             emit(names::attn_v(i), {kv_dim, c.dim}, true);
         }
         emit(names::attn_out(i), {c.dim, q_dim}, true);

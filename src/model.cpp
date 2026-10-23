@@ -212,6 +212,15 @@ ModelConfig ModelConfig::from_source(const WeightSource& src) {
         c.block_spec.rope = RopeKind::Full;
     }
     c.block_spec.rope_dual_base = (c.rope_theta_local > 0.f && c.sliding_window_pattern > 0);
+    // Pair layout. GGUF converters permute q/k for the Llama family only, so that
+    // adjacent-pair rotation reproduces HF rotate_half. These architectures ship
+    // unpermuted and rotate pairs (i, i + n_rot/2), llama.cpp's ROPE_TYPE_NEOX.
+    switch (c.arch_kind) {
+        case Arch::Qwen2: case Arch::Gemma2: case Arch::Gemma3: case Arch::Gemma4:
+        case Arch::Phi2:  case Arch::Phi3:   case Arch::Phi4:
+            c.block_spec.rope_neox = true; break;
+        default: break;
+    }
 
     // FFN kind logic (if not already set by GPT2/Phi2).
     if (c.block_spec.ffn == FfnKind::SwiGLU) {

@@ -98,17 +98,37 @@ TEST(qwen2_config_discovery) {
 }
 
 TEST(qwen2_zero_bias_equals_llama) {
-    // Qwen2 with zero q/k/v biases must reproduce the bias-free Llama forward
-    // over identical weights — proves the bias plumbing is a clean no-op at 0.
+    // Qwen2 with zero q/k/v biases must reproduce the bias-free Llama forward —
+    // proves the bias plumbing is a clean no-op at 0. Qwen2 GGUFs keep HF's q/k
+    // row order (rotate-half RoPE); the Llama reference gets the converter's q/k
+    // permutation, under which adjacent-pair RoPE is the same rotation.
     ToyGgufConfig cl; cl.arch = "llama";
     cl.n_layers = 3; cl.dim = 32; cl.n_heads = 4; cl.n_kv_heads = 2;
     cl.ffn_dim = 64; cl.vocab_size = 48; cl.seed = 21;
     ToyGgufConfig cq = cl; cq.arch = "qwen2"; cq.attn_qkv_bias = true; cq.zero_bias = true;
+    cl.permute_qk = true;
     std::string pl = scratch("q_llama.gguf"), pq = scratch("q_zero.gguf");
     write_toy_gguf(pl, cl); write_toy_gguf(pq, cq);
     std::vector<int64_t> toks = {3, 1, 4, 1, 5};
     auto a = forward_gguf(pl, toks), b = forward_gguf(pq, toks);
-    for (size_t i = 0; i < a.size(); ++i) APPROX(a[i], b[i], 0);
+    CHECK(a.size() == b.size() && !a.empty());
+    for (size_t i = 0; i < a.size(); ++i) APPROX(a[i], b[i], 1e-5);   // dot order differs
+}
+
+TEST(qwen2_unpermuted_differs_from_llama) {
+    // Without the permutation the two pair layouts are different rotations; if
+    // Qwen2 ever falls back to adjacent pairs this catches it.
+    ToyGgufConfig cl; cl.arch = "llama";
+    cl.n_layers = 3; cl.dim = 32; cl.n_heads = 4; cl.n_kv_heads = 2;
+    cl.ffn_dim = 64; cl.vocab_size = 48; cl.seed = 21;
+    ToyGgufConfig cq = cl; cq.arch = "qwen2"; cq.attn_qkv_bias = true; cq.zero_bias = true;
+    std::string pl = scratch("q_llama_np.gguf"), pq = scratch("q_zero_np.gguf");
+    write_toy_gguf(pl, cl); write_toy_gguf(pq, cq);
+    std::vector<int64_t> toks = {3, 1, 4, 1, 5};
+    auto a = forward_gguf(pl, toks), b = forward_gguf(pq, toks);
+    float maxdiff = 0.f;
+    for (size_t i = 0; i < a.size(); ++i) maxdiff = std::max(maxdiff, std::fabs(a[i] - b[i]));
+    CHECK(maxdiff > 1e-4f);
 }
 
 TEST(qwen2_bias_changes_output) {
@@ -240,13 +260,15 @@ TEST(phi3_config_discovery) {
 }
 
 TEST(phi3_full_rotary_matches_llama) {
-    // Phi-3 with full rotary == Llama over the same weights: the fused
-    // attn_qkv / ffn_up tensors are filled in the same RNG order as the split
-    // tensors, and block_phi3 with rot=head_dim is exactly the Llama block.
+    // Phi-3 with full rotary == Llama: the fused attn_qkv / ffn_up tensors are
+    // filled in the same RNG order as the split tensors, and Phi-3 with
+    // rot=head_dim is the Llama block with rotate-half RoPE, so the reference
+    // Llama gets the converter's q/k permutation (see qwen2_zero_bias_equals_llama).
     ToyGgufConfig cl; cl.arch = "llama";
     cl.n_layers = 3; cl.dim = 32; cl.n_heads = 4; cl.n_kv_heads = 2;
     cl.ffn_dim = 64; cl.vocab_size = 48; cl.seed = 51;
     ToyGgufConfig cp = cl; cp.arch = "phi3"; cp.fused_qkv = true;   // full rotary (no rope_dim)
+    cl.permute_qk = true;
     std::string pl = scratch("phi_llama.gguf"), pp = scratch("phi_phi3.gguf");
     write_toy_gguf(pl, cl); write_toy_gguf(pp, cp);
     std::vector<int64_t> toks = {5, 2, 9, 1, 7};
