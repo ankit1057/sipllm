@@ -113,6 +113,14 @@ static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
     }
 }
 
+// The q/k and post-sublayer RMS norms follow the block's norm kind: (1+w) for
+// raw HF Gemma weights, plain w for GGUF (the converter bakes in the +1).
+static inline void rms_norm_kind(NormKind k, float* out, const float* x, const float* w,
+                                 int64_t n, float eps) {
+    if (k == NormKind::RMSNormGemma) rmsnorm_gemma(out, x, w, n, eps);
+    else rmsnorm(out, x, w, n, eps);
+}
+
 // Rotate-half RoPE (ggml "rope_neox"): pairs (i, i + rot_dim/2) over the first
 // `rot_dim` dims of each head; the rest pass through. For archs whose GGUF q/k
 // are not permuted at conversion (Qwen2, Gemma, Phi).
@@ -211,12 +219,12 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             if (qn.valid())
                 for (int64_t h = 0; h < n_heads; ++h) {
                     float* qh = q_.data() + i * q_dim + h * hd;
-                    rmsnorm_gemma(qh, qh, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
+                    rms_norm_kind(b.norm, qh, qh, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
                 }
             if (kn.valid())
                 for (int64_t h = 0; h < n_kv; ++h) {
                     float* kh = k_.data() + i * kv_dim + h * hd;
-                    rmsnorm_gemma(kh, kh, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
+                    rms_norm_kind(b.norm, kh, kh, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
                 }
         }
     }
@@ -296,7 +304,11 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         float* qi = q_.data() + i * q_dim;
         float* attn_out_i = attn_out_.data() + i * q_dim;
         
-        const int64_t start_t = cfg_.sliding_window > 0 ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
+        // The window applies to every layer, unless a local/global pattern says
+        // this one is global (Gemma 2/3: every Nth layer sees the full context).
+        const bool windowed = cfg_.sliding_window > 0 &&
+            (cfg_.sliding_window_pattern <= 0 || ((layer + 1) % cfg_.sliding_window_pattern) != 0);
+        const int64_t start_t = windowed ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
         const int64_t window_len = pos_i - start_t + 1;
         
         for (int64_t h = 0; h < n_heads; ++h) {
@@ -335,7 +347,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         add_bias(proj_i, loader_->getWeight(Role::AttnOutBias), dim);
         if (b.post_attn_norm) {
             WeightRef apn = loader_->getWeight(Role::AttnPostNorm);
-            if (apn.valid()) rmsnorm_gemma(proj_i, proj_i, static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
+            if (apn.valid()) rms_norm_kind(b.norm, proj_i, proj_i, static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
         }
         vec_add_inplace(x_i, proj_i, dim);
     }
@@ -466,7 +478,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
         for (int64_t i = 0; i < bs; ++i) {
             float* ffn_out_i = ffn_out + i * dim;
-            if (fpn.valid()) rmsnorm_gemma(ffn_out_i, ffn_out_i, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
+            if (fpn.valid()) rms_norm_kind(b.norm, ffn_out_i, ffn_out_i, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
         }
     }
 

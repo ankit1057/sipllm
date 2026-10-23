@@ -267,6 +267,8 @@ void SafetensorsSource::load_config(const std::string& path) {
     arch_ = "llama";
     if (const JsonValue* mt = c.find("model_type"); mt && mt->is_str()) arch_ = mt->str;
     set_str("general.architecture", arch_);
+    // Norm weights are as HF stores them (Gemma's +1 is not baked in as in GGUF).
+    set_int("sipllm.raw_hf_norm_weights", 1);
     const std::string A = arch_ + ".";
     auto ci = [&](const char* k, const std::string& gguf) {
         if (const JsonValue* v = c.find(k); v && v->is_num()) set_int(gguf, (int64_t)v->as_num());

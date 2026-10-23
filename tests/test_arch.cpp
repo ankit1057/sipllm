@@ -160,7 +160,7 @@ TEST(gemma2_config_discovery) {
     std::string p = scratch("gemma2_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::Gemma2 && cfg.block_spec.norm == NormKind::RMSNormGemma);
+    CHECK(cfg.arch_kind == Arch::Gemma2 && cfg.block_spec.norm == NormKind::RMSNorm && cfg.block_spec.ffn == FfnKind::GeGLU);
     APPROX(cfg.embedding_scale, std::sqrt(32.0), 1e-4);
     APPROX(cfg.attn_logit_softcap, 50.0, 1e-4);
     APPROX(cfg.final_logit_softcap, 30.0, 1e-4);
@@ -194,12 +194,28 @@ TEST(gemma3_config_discovery) {
     std::string p = scratch("gemma3_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::Gemma3 && cfg.block_spec.norm == NormKind::RMSNormGemma);
+    CHECK(cfg.arch_kind == Arch::Gemma3 && cfg.block_spec.norm == NormKind::RMSNorm && cfg.block_spec.ffn == FfnKind::GeGLU);
     APPROX(cfg.embedding_scale, std::sqrt(32.0), 1e-4);
     APPROX(cfg.rope_theta_local, 10000.0, 1e-3);
     CHECK(cfg.sliding_window_pattern == 3);
     CHECK(g.find("blk.0.attn_q_norm.weight") != nullptr);
     CHECK(g.find("blk.0.attn_k_norm.weight") != nullptr);
+}
+
+TEST(gemma3_local_global_defaults_follow_llama_cpp) {
+    // Real Gemma 3 GGUFs carry sliding_window but no pattern or local RoPE base;
+    // llama.cpp then uses period 6 and base 10000 for the local layers.
+    ToyGgufConfig c; c.arch = "gemma3"; c.post_norms = true; c.qk_norm = true;
+    c.rope_theta = 1000000.f; c.sliding_window = 512;
+    c.n_layers = 6; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 2;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = 42;
+    std::string p = scratch("gemma3_swa_defaults.gguf"); write_toy_gguf(p, c);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    CHECK(cfg.sliding_window == 512);
+    CHECK(cfg.sliding_window_pattern == 6);
+    APPROX(cfg.rope_theta_local, 10000.0, 1e-3);
+    CHECK(cfg.block_spec.rope_dual_base);
 }
 
 static ToyGgufConfig gemma3_base(uint32_t seed) {
@@ -433,7 +449,7 @@ TEST(gemma4_and_phi4_discovery) {
     std::string pg = scratch("gemma4_cfg.gguf"); write_toy_gguf(pg, cg);
     GgufFile gg(pg);
     ModelConfig cfgg = ModelConfig::from_source(gg);
-    CHECK(cfgg.arch_kind == Arch::Gemma4 && cfgg.block_spec.norm == NormKind::RMSNormGemma);
+    CHECK(cfgg.arch_kind == Arch::Gemma4 && cfgg.block_spec.norm == NormKind::RMSNorm && cfgg.block_spec.ffn == FfnKind::GeGLU);
 
     ToyGgufConfig cp; cp.arch = "phi4";
     cp.n_layers = 2; cp.dim = 32; cp.n_heads = 4; cp.n_kv_heads = 2;

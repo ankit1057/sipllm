@@ -151,6 +151,7 @@ struct ToyGgufConfig {
     bool qk_norm = false;             // emit Gemma3 per-head q/k norms
     float rope_local = 0.f;           // Gemma3 local (sliding) RoPE base (0 = none)
     int64_t swa_pattern = 0;          // Gemma3 global-layer period (0 = all global)
+    int64_t sliding_window = 0;       // attention.sliding_window (0 = not written)
     bool fused_qkv = false;           // Phi3: one attn_qkv + fused ffn_up (gate;up)
     int64_t rope_dim = 0;             // Phi3 partial rotary dims (0 = full head_dim)
     int64_t n_experts = 0;            // Mixtral expert count (0 = dense FFN)
@@ -184,6 +185,7 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     if (c.final_softcap > 0.f) w.f32(a + "final_logit_softcapping", c.final_softcap);
     if (c.rope_local > 0.f)    w.f32(a + "rope.local_freq_base", c.rope_local);
     if (c.swa_pattern > 0)     w.u32(a + "attention.sliding_window_pattern", (uint32_t)c.swa_pattern);
+    if (c.sliding_window > 0)  w.u32(a + "attention.sliding_window", (uint32_t)c.sliding_window);
     if (c.fused_qkv) {
         // Pin head_dim explicitly so rope.dimension_count (partial rotary) is
         // not mistaken for it during config discovery.
