@@ -103,6 +103,12 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
 }
 
 void Runtime::enable_semantic_cache(size_t max_bytes) {
+    // The cache stores and re-injects FP32 rows for every layer; a Q8_0 KV row is
+    // smaller than kv_dim floats, so reading it as float would run off the row.
+    LLM_CHECK(kv_->precision() == KVPrecision::FP32,
+              "--semantic-cache-budget needs the FP32 KV cache (drop --kv-q8)");
+    LLM_CHECK(layer_begin_ == 0 && layer_end_ == (int)cfg_.n_layers,
+              "--semantic-cache-budget is not supported on a LAN worker");
     if (!semantic_cache_) {
         semantic_cache_ = std::make_unique<SemanticCache>(max_bytes, cfg_.n_layers, cfg_.kv_dim());
     }

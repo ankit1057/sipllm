@@ -39,7 +39,7 @@ static void print_usage(const char* prog) {
         "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
         "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
         "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy] [--schedule P]\n"
-        "          [--ram-budget BYTES|N{K,M,G}] [--fast] [--spec N]\n"
+        "          [--ram-budget BYTES|N{K,M,G}] [--fast] [--spec N] [--semantic-cache-budget BYTES]\n"
         "          [--kosh] [--kosh-max-run N] [--rtk] [--reuse]\n"
         "          [--save-session F] [--load-session F]\n"
         "          [--nodes host:port:A-B,...]          (LAN: coordinator owns layers [0,A))\n"
@@ -105,6 +105,7 @@ int main(int argc, char** argv) {
     int  kosh_max_run = 8;
     bool use_reuse = false;
     int  spec_draft = 0;   // --spec N: prompt-lookup speculative decoding, N draft tokens (0 = off)
+    size_t semantic_cache_budget = 0;   // #53: prefix KV cache across turns (0 = off)
     // Issue #70 (LAN pooling)
     bool worker_mode = false;
     std::string worker_layers, worker_listen, nodes_arg;
@@ -166,6 +167,7 @@ int main(int argc, char** argv) {
         else if (a == "--rtk") use_rtk = true;
         else if (a == "--reuse") use_reuse = true;
         else if (a == "--spec") spec_draft = std::stoi(next("3"));
+        else if (a == "--semantic-cache-budget") semantic_cache_budget = parse_bytes(next("0"));
         else if (a == "--worker") worker_mode = true;
         else if (a == "--layers") worker_layers = next("");
         else if (a == "--listen") worker_listen = next("");
@@ -281,6 +283,7 @@ int main(int argc, char** argv) {
         if (use_kosh || use_rtk) rt.set_plugins(&plugins);
         if (use_reuse) rt.set_context_reuse(true);
         if (spec_draft > 0) rt.enable_speculative_decoding(spec_draft);
+        if (semantic_cache_budget > 0) rt.enable_semantic_cache(semantic_cache_budget);
         if (!load_path.empty() && !rt.load_session(load_path))
             fprintf(stderr, "warning: could not load session '%s'\n", load_path.c_str());
 
@@ -481,7 +484,7 @@ int main(int argc, char** argv) {
                     (unsigned long long)r->calls(), r->bytes_sent() / 1e6, r->bytes_received() / 1e6,
                     toks > 0 ? (r->bytes_sent() + r->bytes_received()) / 1024.0 / toks : 0.0, r->wait_ms());
         }
-        if (st.kosh_active || st.rtk_active || st.reuse_active) {
+        if (st.kosh_active || st.rtk_active || st.reuse_active || st.semantic_cache_hits > 0) {
             fprintf(stderr, "── plugins ───────────────\n");
             if (st.kosh_active) {
                 double pct = st.kosh_tokens_in > 0
@@ -499,6 +502,9 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "reuse:           %d reused / %d processed tokens\n",
                         st.reused_prefix_tokens, st.processed_tokens);
             }
+            if (st.semantic_cache_hits > 0)
+                fprintf(stderr, "semantic cache:  %llu prefix tokens reused\n",
+                        (unsigned long long)st.semantic_cache_hits);
         }
         return 0;
     } catch (const std::exception& e) {
