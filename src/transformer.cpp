@@ -158,10 +158,9 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         hb_.resize(bs * cfg_.ffn_dim);
         hb2_.resize(bs * cfg_.ffn_dim);
         fused_.resize(bs * std::max(q_dim + 2 * kv_dim, 2 * cfg_.ffn_dim));
-        if (b.n_experts > 0) {
-            router_.resize(bs * b.n_experts);
-            moe_.resize(bs * dim);
-        }
+        if (b.n_experts > 0) router_.resize(bs * b.n_experts);
+        // moe_ is also the parallel-residual FFN output (Phi-2), bs rows of dim.
+        if (b.n_experts > 0 || b.parallel_residual) moe_.resize(bs * dim);
     }
 
     // --- 1. Pre-Attention Norm ---

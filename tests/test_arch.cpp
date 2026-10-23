@@ -386,6 +386,28 @@ TEST(phi2_forward_finite_and_deterministic) {
     for (float v : a) CHECK(std::isfinite(v));
 }
 
+TEST(phi2_prefill_matches_per_token_forward) {
+    // Batched prefill on the parallel-residual block: the FFN output buffer
+    // must hold bs rows (it held one, so a 5-token prefill wrote 4 rows past
+    // it; ASan heap-buffer-overflow). Logits must equal the per-token path.
+    ToyGgufConfig c; c.arch = "phi2"; c.fused_qkv = true; c.gelu_ffn = true;
+    c.full_bias = true; c.rope_dim = 4;
+    c.n_layers = 2; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 4;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = 73;
+    std::string p = scratch("phi2_prefill.gguf"); write_toy_gguf(p, c);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(p, toks);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false; opt.n_buffers = 1;
+    LayerLoader loader(&g, cfg, opt);
+    KVCache kv(cfg.n_layers, cfg.kv_dim(), cfg.ctx_len);
+    ThreadPool pool(2);
+    Transformer tf(&loader, &kv, &pool);
+    const float* lg = tf.prefill(toks.data(), (int64_t)toks.size(), 0);
+    for (int64_t i = 0; i < cfg.vocab_size; ++i) APPROX(lg[i], a[i], 1e-4);
+}
+
 TEST(kimi_and_chinese_arch_discovery) {
     ToyGgufConfig ck; ck.arch = "kimi";
     ck.n_layers = 2; ck.dim = 32; ck.n_heads = 4; ck.n_kv_heads = 2;
