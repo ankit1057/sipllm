@@ -47,6 +47,22 @@ static inline float llama3_scale_freq(float freq, const Transformer::RopeScaling
     return (1.0f - smooth) * (freq / rs.factor) + smooth * freq;  // medium: interpolate
 }
 
+// #80: cos/sin depend on (pos, pair) only, so each RoPE call computes them once
+// and applies them to every head instead of once per head. Same expressions in
+// the same order, so the rotated values are bit-identical.
+namespace {
+struct RopeAngles {
+    static constexpr int64_t kStack = 256;
+    float c_stack[kStack], s_stack[kStack];
+    std::vector<float> c_heap, s_heap;
+    float* c = c_stack;
+    float* s = s_stack;
+    explicit RopeAngles(int64_t half) {
+        if (half > kStack) { c_heap.resize(half); s_heap.resize(half); c = c_heap.data(); s = s_heap.data(); }
+    }
+};
+} // namespace
+
 // Rotary embedding on adjacent element pairs (ggml "rope_norm"). GGUF Llama
 // weights are permuted at conversion time so that this adjacent-pair rotation
 // reproduces HF's rotate_half — so we apply exactly this to both q and k. This
@@ -55,12 +71,16 @@ static inline float llama3_scale_freq(float freq, const Transformer::RopeScaling
 void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                              int64_t pos, float theta_base) {
     const int64_t half = head_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -75,13 +95,17 @@ void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                              int64_t pos, float theta_base, const RopeScaling& rs) {
     if (!rs.llama3) { apply_rope(vec, n_heads, head_dim, pos, theta_base); return; }
     const int64_t half = head_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
+        freq = llama3_scale_freq(freq, rs);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
-            freq = llama3_scale_freq(freq, rs);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -102,12 +126,16 @@ static inline void add_bias(float* y, const WeightRef& b, int64_t n) {
 static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
                      int64_t rot_dim, int64_t pos, float theta) {
     const int64_t half = rot_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -129,12 +157,16 @@ static inline void rms_norm_kind(NormKind k, float* out, const float* x, const f
 void Transformer::apply_rope_neox(float* vec, int64_t n_heads, int64_t head_dim,
                                   int64_t rot_dim, int64_t pos, float theta) {
     const int64_t half = rot_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[i], x1 = p[i + half];
             p[i]        = x0 * c - x1 * s;
             p[i + half] = x0 * s + x1 * c;
