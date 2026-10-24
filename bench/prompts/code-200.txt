@@ -1,0 +1,21 @@
+// loader.cpp — streaming LayerLoader implementation (see loader.h).
+#include "llm/loader.h"
+#include "llm/common.h"
+#include "llm/quant.h"
+#include "llm/linear.h"
+
+#include <cstring>
+#include <algorithm>
+
+namespace llm {
+
+const char* LayerLoader::role_suffix(Role r) {
+    switch (r) {
+        case Role::AttnNorm: return "attn_norm.weight";
+        case Role::AttnQ:    return "attn_q.weight";
+        case Role::AttnK:    return "attn_k.weight";
+        case Role::AttnV:    return "attn_v.weight";
+        case Role::AttnOut:  return "attn_output.weight";
+        case Role::FfnNorm:  return "ffn_norm.weight";
+        case Role::FfnGate:  return "ffn_gate.weight";
+        case Role::FfnUp:    return "ffn_up.weight";
