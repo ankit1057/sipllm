@@ -1,0 +1,507 @@
+{
+  "meta": {
+    "host": "x86-i7-12700H",
+    "date": "2026-10-24",
+    "os": "Linux 7.0.0-38-generic",
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700H",
+    "logical_cpus": 20,
+    "ram_gb": 37.6,
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU, 4096 MiB, 580.178.04",
+    "on_ac_power": true,
+    "peak_rss_source": "GNU /usr/bin/time -v (maximum resident set size)",
+    "vram_source": "nvidia-smi memory.used, peak during run minus idle baseline",
+    "cache_state": "warm (model file read at least once before timing)",
+    "notes": "6 P-cores pinned (taskset 0,2,4,6,8,10), --threads 6, CPU package cooled to <= 70 C before each run. SipLLM rows: median of n_runs; llama.cpp rows: llama-bench -r 3 average (prefill and decode are separate tests). SipLLM tokenizes code-200.txt as 244 tokens (Gemma 4) / 269 (Qwen2.5); llama.cpp counts 245 / 200."
+  },
+  "sipllm": [
+    {
+      "label": "gemma4-cpu-default-resident",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 32 --greedy --threads 6 --ram-budget 20G",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 3,
+      "note": null,
+      "decode_tok_s": 1.52,
+      "prefill_tok_s": 6.4,
+      "ttft_ms": 38125.0,
+      "peak_rss_mb": 7241.1,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 352.3,
+      "wall_s": 62.23,
+      "prompt_tokens": 244,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          1.49,
+          1.52,
+          1.55
+        ],
+        "prefill_tok_s": [
+          6.34,
+          6.4,
+          6.4
+        ],
+        "peak_rss_mb": [
+          7241.1,
+          7241.1,
+          7241.2
+        ],
+        "vram_peak_mb": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "start_temp_c": [
+          55.0,
+          67.0,
+          64.0
+        ]
+      }
+    },
+    {
+      "label": "gemma4-cpu-fast-resident",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 32 --greedy --threads 6 --ram-budget 20G --fast",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 3,
+      "note": null,
+      "decode_tok_s": 4.31,
+      "prefill_tok_s": 16.84,
+      "ttft_ms": 14488.0,
+      "peak_rss_mb": 7241.1,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 352.3,
+      "wall_s": 24.93,
+      "prompt_tokens": 244,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          4.31,
+          4.15,
+          4.33
+        ],
+        "prefill_tok_s": [
+          17.06,
+          16.84,
+          16.82
+        ],
+        "peak_rss_mb": [
+          7241.1,
+          7241.1,
+          7240.9
+        ],
+        "vram_peak_mb": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "start_temp_c": [
+          60.0,
+          67.0,
+          66.0
+        ]
+      }
+    },
+    {
+      "label": "gemma4-cpu-fast-budget3G",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 8 --greedy --threads 6 --ram-budget 3G --fast",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 1,
+      "note": "streaming: layers beyond the budget re-read from the page cache every token",
+      "decode_tok_s": 1.36,
+      "prefill_tok_s": 16.99,
+      "ttft_ms": 14361.0,
+      "peak_rss_mb": 2356.4,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 176.2,
+      "wall_s": 21.17,
+      "prompt_tokens": 244,
+      "gen_tokens": 8,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          1.36
+        ],
+        "prefill_tok_s": [
+          16.99
+        ],
+        "peak_rss_mb": [
+          2356.4
+        ],
+        "vram_peak_mb": [
+          0.0
+        ],
+        "start_temp_c": [
+          60.0
+        ]
+      }
+    },
+    {
+      "label": "gemma4-long1740-fast-serial-attn",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -p \"<first 5.1 KB of src/loader.cpp, 1740 tokens>\" -n 32 --greedy --threads 6 --ram-budget 20G --fast --ctx 4096",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 1,
+      "note": "build at the commit before parallel attention",
+      "decode_tok_s": 3.2,
+      "prefill_tok_s": 10.79,
+      "ttft_ms": 161238.0,
+      "peak_rss_mb": 7636.9,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 738.2,
+      "wall_s": 174.36,
+      "prompt_tokens": 1740,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "this PR at 3d6662d (before parallel attention)",
+      "_samples": {
+        "decode_tok_s": [
+          3.2
+        ],
+        "prefill_tok_s": [
+          10.79
+        ],
+        "peak_rss_mb": [
+          7636.9
+        ],
+        "vram_peak_mb": [
+          0.0
+        ],
+        "start_temp_c": [
+          66.0
+        ]
+      }
+    },
+    {
+      "label": "gemma4-long1740-fast-parallel-attn",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -p \"<first 5.1 KB of src/loader.cpp, 1740 tokens>\" -n 32 --greedy --threads 6 --ram-budget 20G --fast --ctx 4096",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 1,
+      "note": null,
+      "decode_tok_s": 3.37,
+      "prefill_tok_s": 12.15,
+      "ttft_ms": 143177.0,
+      "peak_rss_mb": 7641.3,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 738.2,
+      "wall_s": 155.69,
+      "prompt_tokens": 1740,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          3.37
+        ],
+        "prefill_tok_s": [
+          12.15
+        ],
+        "peak_rss_mb": [
+          7641.3
+        ],
+        "vram_peak_mb": [
+          0.0
+        ],
+        "start_temp_c": [
+          59.0
+        ]
+      }
+    },
+    {
+      "label": "qwen14b-UP-default",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 32 --greedy --threads 6 --ram-budget 20G",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 3,
+      "note": null,
+      "decode_tok_s": 1.15,
+      "prefill_tok_s": 5.55,
+      "ttft_ms": 48461.0,
+      "peak_rss_mb": 8498.6,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 201.3,
+      "wall_s": 79.77,
+      "prompt_tokens": 269,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "main 13558c9",
+      "_samples": {
+        "decode_tok_s": [
+          1.15,
+          1.15,
+          1.15
+        ],
+        "prefill_tok_s": [
+          5.58,
+          5.54,
+          5.55
+        ],
+        "peak_rss_mb": [
+          8498.8,
+          8498.6,
+          8498.5
+        ],
+        "vram_peak_mb": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "start_temp_c": [
+          60.0,
+          68.0,
+          66.0
+        ]
+      }
+    },
+    {
+      "label": "qwen14b-UP-fast",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 32 --greedy --threads 6 --ram-budget 20G --fast",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 3,
+      "note": null,
+      "decode_tok_s": 3.06,
+      "prefill_tok_s": 4.0,
+      "ttft_ms": 67320.0,
+      "peak_rss_mb": 8498.8,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 201.3,
+      "wall_s": 81.33,
+      "prompt_tokens": 269,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "main 13558c9",
+      "_samples": {
+        "decode_tok_s": [
+          3.08,
+          3.04,
+          3.06
+        ],
+        "prefill_tok_s": [
+          4.0,
+          4.0,
+          3.98
+        ],
+        "peak_rss_mb": [
+          8498.7,
+          8498.8,
+          8498.9
+        ],
+        "vram_peak_mb": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "start_temp_c": [
+          62.0,
+          66.0,
+          68.0
+        ]
+      }
+    },
+    {
+      "label": "qwen14b-P1-default",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 32 --greedy --threads 6 --ram-budget 20G",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 3,
+      "note": null,
+      "decode_tok_s": 1.13,
+      "prefill_tok_s": 5.34,
+      "ttft_ms": 50421.0,
+      "peak_rss_mb": 8405.3,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 201.3,
+      "wall_s": 82.33,
+      "prompt_tokens": 269,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          1.13,
+          1.13,
+          1.12
+        ],
+        "prefill_tok_s": [
+          5.44,
+          5.34,
+          5.3
+        ],
+        "peak_rss_mb": [
+          8405.3,
+          8405.4,
+          8405.2
+        ],
+        "vram_peak_mb": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "start_temp_c": [
+          63.0,
+          63.0,
+          68.0
+        ]
+      }
+    },
+    {
+      "label": "qwen14b-P1-fast",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 32 --greedy --threads 6 --ram-budget 20G --fast",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 3,
+      "note": null,
+      "decode_tok_s": 3.73,
+      "prefill_tok_s": 15.23,
+      "ttft_ms": 17663.0,
+      "peak_rss_mb": 8405.5,
+      "vram_peak_mb": 0.0,
+      "kv_mb": 201.3,
+      "wall_s": 29.78,
+      "prompt_tokens": 269,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          3.73,
+          3.71,
+          3.77
+        ],
+        "prefill_tok_s": [
+          15.14,
+          15.27,
+          15.23
+        ],
+        "peak_rss_mb": [
+          8405.5,
+          8405.5,
+          8405.4
+        ],
+        "vram_peak_mb": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "start_temp_c": [
+          63.0,
+          68.0,
+          70.0
+        ]
+      }
+    }
+  ],
+  "llama_cpp": [
+    {
+      "label": "llama.cpp-gemma4-cpu",
+      "runtime": "llama_bench",
+      "cmd": "llama.cpp/build/bin/llama-bench -m ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -t 6 -p 245 -n 32 -r 3 -ngl 0 -o json",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 1,
+      "note": null,
+      "decode_tok_s": 4.55,
+      "prefill_tok_s": 25.15,
+      "ttft_ms": null,
+      "peak_rss_mb": 12579.4,
+      "vram_peak_mb": 0.0,
+      "kv_mb": null,
+      "wall_s": 64.56,
+      "prompt_tokens": 245,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "llama.cpp 1a3011c (CPU)",
+      "_samples": {
+        "decode_tok_s": [
+          4.550015
+        ],
+        "prefill_tok_s": [
+          25.14576
+        ],
+        "peak_rss_mb": [
+          12579.4
+        ],
+        "vram_peak_mb": [
+          0.0
+        ],
+        "start_temp_c": [
+          62.0
+        ],
+        "llama_bench_prefill_ts": [
+          25.4334,
+          24.7156,
+          25.2883
+        ],
+        "llama_bench_decode_ts": [
+          4.66714,
+          4.44285,
+          4.54005
+        ]
+      }
+    },
+    {
+      "label": "llama.cpp-qwen14b-cpu",
+      "runtime": "llama_bench",
+      "cmd": "llama.cpp/build/bin/llama-bench -m ~/.sipllm/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf -t 6 -p 200 -n 32 -r 3 -ngl 0 -o json",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 1,
+      "note": null,
+      "decode_tok_s": 4.29,
+      "prefill_tok_s": 20.83,
+      "ttft_ms": null,
+      "peak_rss_mb": 14796.8,
+      "vram_peak_mb": 0.0,
+      "kv_mb": null,
+      "wall_s": 64.85,
+      "prompt_tokens": 200,
+      "gen_tokens": 32,
+      "gpu_layers": null,
+      "gpu_weights_mb": null,
+      "build": "llama.cpp 1a3011c (CPU)",
+      "_samples": {
+        "decode_tok_s": [
+          4.2876
+        ],
+        "prefill_tok_s": [
+          20.832459
+        ],
+        "peak_rss_mb": [
+          14796.8
+        ],
+        "vram_peak_mb": [
+          0.0
+        ],
+        "start_temp_c": [
+          63.0
+        ],
+        "llama_bench_prefill_ts": [
+          20.7085,
+          20.9274,
+          20.8615
+        ],
+        "llama_bench_decode_ts": [
+          4.29428,
+          4.2723,
+          4.29621
+        ]
+      }
+    }
+  ]
+}

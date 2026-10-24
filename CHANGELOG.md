@@ -195,6 +195,77 @@ byte-identical greedy output for 24 tokens).
 
 ## [Unreleased]
 
+### x86: real Gemma 4 12B, sliding-window ring KV, AVX2 `--fast` K-quants, parallel attention (2026-10-24)
+
+Measured on an i7-12700H (6 P-cores pinned, `--threads 6`, warm cache, median of 3;
+raw rows in `bench/results/x86-i7-12700H-2026-10-24-cpu.json`, harness
+`scripts/bench_linux.py`):
+
+```
+Gemma 4 12B Q4_K_M, 244-token code prompt, 32 new tokens
+                       decode   prefill   peak RSS
+  default (resident)    1.52      6.40    7241 MB
+  --fast  (resident)    4.31     16.84    7241 MB
+  --fast --ram-budget 3G 1.36    16.99    2356 MB
+  llama.cpp 1a3011c     4.55     25.15   12579 MB   (llama-bench -p 245 -n 32)
+Qwen2.5-Coder 14B Q4_K_M, same prompt (269 SipLLM tokens)
+  main 13558c9 default  1.15      5.55    8499 MB
+  main 13558c9 --fast   3.06      4.00    8499 MB   (int8 path: prefill slower than default)
+  this    default       1.13      5.34    8405 MB   (final logits byte-identical to main)
+  this    --fast        3.73     15.23    8405 MB
+  llama.cpp 1a3011c     4.29     20.83   14797 MB   (llama-bench -p 200 -n 32)
+```
+
+The previous `gemma4` path was built against synthetic models only and could not
+load Google's GGUFs (per-layer `head_count_kv` array read as 0, `(1+w)` norms,
+adjacent-pair RoPE, no K=V layers). Now validated against llama.cpp `1a3011c`
+(`LLAMA_DUMP_EXACT=1`) on `unsloth/gemma-4-12b-it` Q4_K_M: argmax agrees at 6, 965
+and 1384 prompt tokens (worst layer cosine ≥ 0.981, KL ≤ 0.03). A 1740-token
+prompt that ends mid-identifier keeps every layer ≥ 0.994 but picks llama.cpp's
+#3 token.
+
+- **Per-layer geometry** — `ModelConfig::layer_{n_kv_heads,head_dim,swa}`: SWA
+  layers 8×256 kv heads, global layers 1×512 with **K reused as V** (no `attn_v`);
+  buffers sized by the widest layer; array metadata no longer read as scalar 0.
+- **Gemma 4 block** — plain RMSNorm (no +1), weightless V-norm, attention scale
+  1.0, NeoX RoPE with dual base (1e6 global / 1e4 SWA) and **proportional RoPE**
+  from `rope_freqs.weight` on global layers, per-layer `layer_output_scale`,
+  window applied only to SWA layers.
+- **`gemma4` tokenizer** (`Tokenizer::Kind::SpmBpe`) — rank BPE over raw UTF-8,
+  `▁` escaping, newline-run splitting, `<0xNN>` fallback, literal special tokens.
+  60/60 identical to llama.cpp incl. its 46 upstream test vectors.
+- **Sliding-window ring KV** — `KVCache` supports per-layer row widths and
+  window-sized rings. Gemma 4 KV is 768 MiB at 4K context (flat: 3,072 MiB) and
+  1,664 MiB at 32K (flat: 24,576 MiB); it grows only with the 8 global layers past
+  the 1024 window. Bitwise-identical to a full cache (test). Session files store
+  per-layer rows (also fixes an over-read when saving a Q8_0 KV cache); `--reuse`
+  refuses a rewind into history a ring already overwrote.
+- **REPL append-only turns** — interactive chat feeds only the new turn on top of
+  the model's exact tokens when the template re-renders prefix-stably; Gemma 4
+  chat template (`<|turn>`/`<turn|>`, empty thought channel).
+- **AVX2 Q4_K/Q5_K/Q6_K × Q8_K kernels** (`src/kquant_avx2.cpp`, opt-in
+  `--fast`) — llama.cpp's scheme: the activation is quantized once per row to
+  Q8_K and dotted against the packed weight blocks, with a batched kernel for
+  prefill. On AVX2+FMA hosts `linear()` routes Q4_K/Q5_K/Q6_K here ahead of the
+  wave-12 int8 kernels (table above); ARM keeps the SDOT kernels. The wave-12
+  int8 kernels pass `test_neon` 7/7 on this AVX2 host.
+- **Parallel GQA attention** — heads sharing a KV head are scored together (one
+  K/V read), spread over (token, kv head, time chunk); spans > 512 positions are
+  split into fixed chunks merged by log-sum-exp. Chunking depends only on the
+  row's own span, so results are identical for any `--threads` and batched
+  prefill / `--spec` verify still equal per-token decode (tests); spans ≤ 512
+  are byte-identical to the old loop. Gemma 4 `--fast` at 1740 tokens: decode
+  3.20 → 3.37, prefill 10.79 → 12.15 tok/s.
+- **Golden harness** — `LLAMA_DUMP_EXACT=1` (f32 KV, no flash-attn) and
+  `LLAMA_DUMP_CTX`; `dump_logits --fast --ctx --threads`.
+- **Registry** — removed dead `gemma4:9b` / `kimi` and fixed `deepseek-r1` /
+  `phi4` URLs; added `gemma4:12b[:q8_0]`, `qwen2.5-coder:{3b,7b,14b}`. The
+  `sipllm` wrapper no longer uses bash-only `set -o pipefail` under `/bin/sh`.
+
+**What an x86 laptop user still cannot do:** match llama.cpp's prefill (16.8 vs
+25.2 tok/s on Gemma 4) or run the Gemma 4 E2B/E4B (per-layer embeddings) and
+26B-A4B (MoE) variants.
+
 ### Wave 12 — edge truth: K-quant integer kernels, `--spec`, planner fix, honest claims (2026-10-19)
 
 Standing goal set by the maintainer this session: SipLLM is complete when it is a
@@ -382,44 +453,6 @@ sampling hits EOS early); their peak-RSS rows are the point and stay flat.
 **Deferred:** same-hardware head-to-head vs LiteRT-LM (its macOS CLI exists; not run);
 Q5_K / Q8_K integer paths; VNNI (Zen4+) fast path; batched lm_head projection in
 `spec_forward` (streams the head K+1× per pass today).
-
-### Real Gemma 4 (dense 12B) support + AVX2 K-quant kernels (2026-10-06)
-
-The previous `gemma4` path was built against synthetic models only and could not
-load Google's GGUFs (per-layer `head_count_kv` array read as 0, `(1+w)` norms,
-adjacent-pair RoPE, no K=V layers). Now golden-validated against llama.cpp
-`1a3011cc` on `unsloth/gemma-4-12b-it` Q4_K_M:
-
-- **Per-layer geometry** — `ModelConfig::layer_{n_kv_heads,head_dim,swa}`: SWA
-  layers 8×256 kv heads, global layers 1×512 with **K reused as V** (no `attn_v`);
-  buffers sized by the widest layer; array metadata no longer read as scalar 0.
-- **Gemma 4 block** — plain RMSNorm (no +1), weightless V-norm, attention scale
-  1.0, NeoX RoPE with dual base (1e6 global / 1e4 SWA) and **proportional RoPE**
-  from `rope_freqs.weight` on global layers, per-layer `layer_output_scale`,
-  window applied only to SWA layers.
-- **`gemma4` tokenizer** (`Tokenizer::Kind::SpmBpe`) — rank BPE over raw UTF-8,
-  `▁` escaping, newline-run splitting, `<0xNN>` fallback, literal special tokens.
-  60/60 identical to llama.cpp incl. its 46 upstream test vectors.
-- **Sliding-window ring KV** — `KVCache` now supports per-layer row widths and
-  window-sized rings: Gemma 4 KV at 4k ctx is ~805 MB instead of ~3.2 GB and
-  grows only with the 8 global layers beyond 1k tokens. Bitwise-identical to a
-  full cache (test). Session files store per-layer rows (also fixes an
-  over-read when saving a Q8_0 KV cache); `--reuse` refuses unsafe rewinds.
-- **REPL append-only turns** — interactive chat feeds only the new turn on top of
-  the model's exact tokens when the template re-renders prefix-stably; Gemma 4
-  chat template (`<|turn>`/`<turn|>`, empty thought channel).
-- **AVX2 Q4_K/Q5_K/Q6_K × Q8_K kernels** (`src/kquant_avx2.cpp`, opt-in
-  `--fast`) — llama.cpp's scheme: the activation is quantized once per row to
-  Q8_K and dotted against the packed weight blocks. Q4_K matmul 3.5–4.1× faster
-  than the fp32-dequant path; Gemma 4 12B decode 1.8 → 4.8 tok/s (8 threads,
-  i7-12700H). On AVX2+FMA hosts `linear()` routes Q4_K/Q5_K/Q6_K here ahead of
-  the wave-12 int8 kernels (measured faster on x86, and it covers Q5_K plus a
-  batched prefill kernel); ARM keeps the SDOT kernels.
-- **Golden harness** — `LLAMA_DUMP_EXACT=1` (f32 KV, no flash-attn) and
-  `LLAMA_DUMP_CTX`; `dump_logits --fast --ctx --threads`.
-- **Registry** — removed dead `gemma4:9b` / `kimi` and fixed `deepseek-r1` /
-  `phi4` URLs; added `gemma4:12b[:q8_0]`, `qwen2.5-coder:{3b,7b,14b}`. The
-  `sipllm` wrapper no longer uses bash-only `set -o pipefail` under `/bin/sh`.
 
 ### Architecture — data-driven BlockSpec unification (PR #49 merged)
 
