@@ -1,0 +1,122 @@
+{
+  "meta": {
+    "date": "2026-10-24",
+    "model": "gemma-4-12b-it-Q4_K_M.gguf",
+    "prompts": "first 400 bytes of the first 12 src/*.cpp files",
+    "decoding": "greedy"
+  },
+  "rows": [
+    {
+      "label": "cpu-fast",
+      "batch": 1,
+      "jobs": 12,
+      "max_new": 48,
+      "args": "--threads 6 --ram-budget 20G --fast",
+      "cpus": "0,2,4,6,8,10",
+      "decode_tokens": 564,
+      "decode_s": 111.3,
+      "decode_tok_s": 5.07,
+      "peak_rss_mb": 7158.7,
+      "start_temp_c": 68.0,
+      "identical_to_batch1": "12/12"
+    },
+    {
+      "label": "cpu-fast",
+      "batch": 4,
+      "jobs": 12,
+      "max_new": 48,
+      "args": "--threads 6 --ram-budget 20G --fast",
+      "cpus": "0,2,4,6,8,10",
+      "decode_tokens": 564,
+      "decode_s": 42.0,
+      "decode_tok_s": 13.44,
+      "peak_rss_mb": 7664.6,
+      "start_temp_c": 64.0,
+      "identical_to_batch1": "12/12"
+    },
+    {
+      "label": "cpu-fast",
+      "batch": 8,
+      "jobs": 12,
+      "max_new": 48,
+      "args": "--threads 6 --ram-budget 20G --fast",
+      "cpus": "0,2,4,6,8,10",
+      "decode_tokens": 564,
+      "decode_s": 39.1,
+      "decode_tok_s": 14.44,
+      "peak_rss_mb": 8338.7,
+      "start_temp_c": 64.0,
+      "identical_to_batch1": "12/12"
+    },
+    {
+      "label": "cpu-fast",
+      "batch": 12,
+      "jobs": 12,
+      "max_new": 48,
+      "args": "--threads 6 --ram-budget 20G --fast",
+      "cpus": "0,2,4,6,8,10",
+      "decode_tokens": 564,
+      "decode_s": 40.7,
+      "decode_tok_s": 13.84,
+      "peak_rss_mb": 9015.3,
+      "start_temp_c": 69.0,
+      "identical_to_batch1": "12/12"
+    },
+    {
+      "label": "gpu-max-fast",
+      "batch": 1,
+      "jobs": 12,
+      "max_new": 48,
+      "args": "--threads 6 --ram-budget 20G --fast --gpu-layers max",
+      "cpus": "0,2,4,6,8,10",
+      "decode_tokens": 564,
+      "decode_s": 73.6,
+      "decode_tok_s": 7.67,
+      "peak_rss_mb": 4141.0,
+      "start_temp_c": 64.0,
+      "identical_to_batch1": "12/12"
+    },
+    {
+      "label": "gpu-max-fast",
+      "batch": 4,
+      "jobs": 12,
+      "max_new": 48,
+      "args": "--threads 6 --ram-budget 20G --fast --gpu-layers max",
+      "cpus": "0,2,4,6,8,10",
+      "decode_tokens": 564,
+      "decode_s": 32.5,
+      "decode_tok_s": 17.34,
+      "peak_rss_mb": 4646.7,
+      "start_temp_c": 68.0,
+      "identical_to_batch1": "12/12"
+    },
+    {
+      "label": "gpu-max-fast",
+      "batch": 8,
+      "jobs": 12,
+      "max_new": 48,
+      "args": "--threads 6 --ram-budget 20G --fast --gpu-layers max",
+      "cpus": "0,2,4,6,8,10",
+      "decode_tokens": 564,
+      "decode_s": 30.8,
+      "decode_tok_s": 18.29,
+      "peak_rss_mb": 5320.7,
+      "start_temp_c": 68.0,
+      "identical_to_batch1": "12/12"
+    },
+    {
+      "label": "gpu-max-fast",
+      "batch": 12,
+      "jobs": 12,
+      "max_new": 48,
+      "args": "--threads 6 --ram-budget 20G --fast --gpu-layers max",
+      "cpus": "0,2,4,6,8,10",
+      "decode_tokens": 564,
+      "decode_s": 30.4,
+      "decode_tok_s": 18.53,
+      "peak_rss_mb": 5997.1,
+      "start_temp_c": 68.0,
+      "identical_to_batch1": "12/12"
+    }
+  ]
+}

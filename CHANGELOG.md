@@ -195,6 +195,31 @@ byte-identical greedy output for 24 tokens).
 
 ## [Unreleased]
 
+### Batched multi-sequence decode (`sip_batch`) + query-tiled prefill attention (2026-10-24)
+
+- **`Transformer::forward_multi`** — one decode step for *n* independent
+  sequences (per-row position and KV cache); each layer's weights are read once
+  for all rows. On CPU, row *i* is bit-identical to `forward()` on its own cache.
+- **`tools/sip_batch`** — continuous batching over a length-prefixed pipe
+  protocol, shared-prefix KV reuse, `--max-active-tokens` KV cap.
+- **Query-tiled prefill attention** (default on, `SIPLLM_TILED_ATTN=0` off) —
+  each K/V row loaded once per tile of queries; bit-identical to per-token
+  attention (same span-only chunks, softmax order and merge).
+- **`ThreadPool::parallel_for(total, fn, chunk)`** — per-call chunk size;
+  attention passes 1 so decode attention is no longer serialised by the
+  Adaptive policy's 16-item minimum chunk. Bit-identical.
+
+Measured (i7-12700H 6 P-cores, Gemma 4 12B Q4_K_M, `--fast`, 12 jobs × 48 new
+tokens, greedy; `scripts/bench_sip_batch.py`,
+`bench/results/x86-i7-12700H-2026-10-24-batch.json`):
+
+```
+aggregate decode tok/s   B=1    B=4    B=8    B=12   peak RSS (B=1 -> B=12)
+CPU only                 5.07  13.44  14.44  13.84   7159 -> 9015 MB
+--gpu-layers max         7.67  17.34  18.29  18.53   4141 -> 5997 MB (+3.4 GB VRAM)
+every job's output byte-identical to B=1 (12/12 in all 8 runs)
+```
+
 ### NVIDIA GPU offload: `--gpu-layers N|max` (2026-10-24)
 
 Optional, dependency-free CUDA path: `libcuda.so.1` is `dlopen`ed at runtime and
