@@ -49,7 +49,12 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
 
     // 1. Ledger fixed costs
     MemLedger fixed;
-    fixed.base = 24 * 1024 * 1024; // 24 MB process slop
+    // Process slop: what is already resident at plan time (model metadata +
+    // tokenizer, measured by the caller) plus 16 MB for allocator, stacks and
+    // prefill chunks. Never below the 24 MB constant this replaced, which was
+    // calibrated on 32k-vocab models (~8 MB at plan time); a 152k-vocab model
+    // is ~37 MB there and overshot its budget by 8-14 MB.
+    fixed.base = std::max<size_t>(24 * 1024 * 1024, req.measured_base + 16 * 1024 * 1024);
     fixed.scratch = (size_t)(cfg.dim * 8 + cfg.ffn_dim * 2 + cfg.q_dim() + 2 * cfg.kv_dim()) * sizeof(float);
     fixed.logits = (size_t)cfg.vocab_size * sizeof(float);
 

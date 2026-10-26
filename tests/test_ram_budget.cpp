@@ -304,6 +304,38 @@ TEST(available_ram_bytes_reports_something_on_this_host) {
     CHECK_MSG(avail <= get_hardware_info().ram_bytes, "available RAM cannot exceed total RAM");
 }
 
+// The ledger's base was a fixed 24 MB, calibrated on 32k-vocab models whose
+// open model + tokenizer cost ~8 MB of RSS. A 152k-vocab model (Qwen2.5) costs
+// ~37 MB, so its runs overshot the budget by 8-14 MB. The planner now prices
+// the base from the RSS measured at plan time (plus the same 16 MB of runtime
+// slop the 24 MB constant held), never below the old constant.
+TEST(planner_base_tracks_measured_rss) {
+    ToyConfig tc; tc.n_layers = 8; tc.dim = 64; tc.n_heads = 4; tc.n_kv_heads = 2;
+    tc.ffn_dim = 128; tc.vocab_size = 48; tc.seed = 99; tc.ctx_len = 1024;
+    std::string path = scratch("toy_rb_base.llmw");
+    write_toy_model(path, tc);
+    ModelFile f(path, false);
+    ModelConfig cfg = ModelConfig::from_source(f);
+    const size_t MiB = 1024 * 1024;
+
+    BudgetRequest req;
+    req.budget_bytes = 1024 * MiB;
+    req.ctx_req = 512; req.ctx_explicit = true;
+
+    // Unknown (0) or small measured RSS keeps the old constant: prior plans unchanged.
+    MemoryPlan p0 = plan_memory(f, cfg, req);
+    CHECK_MSG(p0.ledger.base == 24 * MiB, "unknown measured RSS keeps the 24 MB base");
+    req.measured_base = 8 * MiB;
+    MemoryPlan p8 = plan_memory(f, cfg, req);
+    CHECK_MSG(p8.ledger.base == 24 * MiB, "a 32k-vocab-sized base reproduces the old constant");
+
+    // A large-vocab model's measured RSS raises the base and the planned total.
+    req.measured_base = 37 * MiB;
+    MemoryPlan p37 = plan_memory(f, cfg, req);
+    CHECK_MSG(p37.ledger.base == 53 * MiB, "base = measured RSS + 16 MB runtime slop");
+    CHECK_MSG(p37.ledger.total() <= req.budget_bytes, "still plans under the budget");
+}
+
 int main() {
     printf("== test_ram_budget ==\n");
     return llmtest::run_all();

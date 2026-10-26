@@ -71,6 +71,11 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     // Attention keeps one max_ctx score buffer per pool worker (see Transformer).
     req.n_threads = threads > 0 ? threads : std::max(1, (int)std::thread::hardware_concurrency());
 
+    // The tokenizer is built before planning so the RSS it costs (large for
+    // 150k-vocab models) is measured into the ledger's base, not guessed.
+    tok_ = Tokenizer::from_source(*src_);
+    req.measured_base = current_rss_bytes();
+
     MemoryPlan plan = plan_memory(*src_, plan_cfg, req);
 
     if (ram_budget_total > 0) {
@@ -107,7 +112,6 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     budget_forced_ = force_budget;
     if (budgeted_) kv_->reserve_full();
     tf_ = std::make_unique<Transformer>(loader_.get(), kv_.get(), pool_.get());
-    tok_ = Tokenizer::from_source(*src_);
 }
 
 void Runtime::enable_semantic_cache(size_t max_bytes) {

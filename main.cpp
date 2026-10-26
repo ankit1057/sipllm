@@ -439,7 +439,7 @@ int main(int argc, char** argv) {
         if (!save_path.empty() && !rt.save_session(save_path))
             fprintf(stderr, "warning: could not save session '%s'\n", save_path.c_str());
 
-        size_t rss = current_rss_bytes();
+        size_t rss = peak_rss_bytes();   // kernel high-water mark, not the RSS at exit
         char budget_note[64] = "";
         if (ram_budget) snprintf(budget_note, sizeof(budget_note), "   (budget %.0f MB)", ram_budget / 1e6);
         char fast_note[96] = "on";
