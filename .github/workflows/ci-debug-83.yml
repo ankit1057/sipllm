@@ -2,8 +2,8 @@ name: CI debug (x86 unit-test hang, #83)
 
 # Throwaway: hunts the x86_64 `make test` hang seen on PR #83. Each test binary
 # runs under a 120 s watchdog; on a hang the job prints the line-buffered output
-# so far and every thread's backtrace. 03f1d79 is the commit before the spin
-# handoff in the thread pool (8ad2e31); fa509da is the PR head.
+# so far and every thread's backtrace. 7fefb1c is the loader fix (three runs per
+# compiler, to land on more CPU models); fa509da, the unfixed PR head, is the control.
 
 on:
   push:
@@ -18,11 +18,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        label: [before-spin-03f1d79, pr-head-fa509da]
+        label: [fix-7fefb1c-a, fix-7fefb1c-b, fix-7fefb1c-c, control-fa509da]
         cc: [g++, clang++]
         include:
-          - { label: before-spin-03f1d79, ref: 03f1d797bf7e98d23bb4c7c98e7449874681b8ae }
-          - { label: pr-head-fa509da,     ref: fa509da04341d760b910555e84322a8ed4cc4980 }
+          - { label: fix-7fefb1c-a,   ref: 7fefb1c17970e19acc79bf13ee018b705a2ff26f }
+          - { label: fix-7fefb1c-b,   ref: 7fefb1c17970e19acc79bf13ee018b705a2ff26f }
+          - { label: fix-7fefb1c-c,   ref: 7fefb1c17970e19acc79bf13ee018b705a2ff26f }
+          - { label: control-fa509da, ref: fa509da04341d760b910555e84322a8ed4cc4980 }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,7 +73,7 @@ jobs:
             done
             echo "full suite pass $pass ok"
           done
-          for t in build/test_prefill build/test_ram_budget; do
+          for t in build/test_prefill build/test_ram_budget build/test_e2e; do
             for i in $(seq 1 30); do
               run_one "$t" "$t repeat $i" || { bad=1; break; }
             done
