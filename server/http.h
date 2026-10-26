@@ -90,7 +90,9 @@ private:
 class Server {
 public:
     using Handler = std::function<void(Request&, Response&)>;
-    explicit Server(int port) : port_(port) { signal(SIGPIPE, SIG_IGN); }
+    // Binds `host` (default loopback: the API can run tools and has no auth).
+    explicit Server(int port, std::string host = "127.0.0.1")
+        : port_(port), host_(std::move(host)) { signal(SIGPIPE, SIG_IGN); }
 
     void route(const std::string& method, const std::string& path, Handler h) {
         routes_[method + " " + path] = std::move(h);
@@ -102,10 +104,16 @@ public:
         int s = ::socket(AF_INET, SOCK_STREAM, 0);
         int one = 1; ::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
         sockaddr_in addr{}; addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port_);
+        addr.sin_port = htons(port_);
+        if (::inet_pton(AF_INET, host_.c_str(), &addr.sin_addr) != 1) {
+            fprintf(stderr, "invalid --host '%s' (IPv4 address expected)\n", host_.c_str());
+            return 1;
+        }
         if (::bind(s, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); return 1; }
         if (::listen(s, 16) < 0) { perror("listen"); return 1; }
-        printf("listening on http://127.0.0.1:%d\n", port_);
+        printf("listening on http://%s:%d\n", host_.c_str(), port_);
+        if (host_ != "127.0.0.1")
+            printf("warning: reachable from other machines; the API has no authentication\n");
         fflush(stdout);
         for (;;) {
             int c = ::accept(s, nullptr, nullptr);
@@ -184,6 +192,7 @@ private:
     }
 
     int port_;
+    std::string host_;
     std::map<std::string, Handler> routes_;
 };
 

@@ -98,17 +98,37 @@ TEST(qwen2_config_discovery) {
 }
 
 TEST(qwen2_zero_bias_equals_llama) {
-    // Qwen2 with zero q/k/v biases must reproduce the bias-free Llama forward
-    // over identical weights — proves the bias plumbing is a clean no-op at 0.
+    // Qwen2 with zero q/k/v biases must reproduce the bias-free Llama forward —
+    // proves the bias plumbing is a clean no-op at 0. Qwen2 GGUFs keep HF's q/k
+    // row order (rotate-half RoPE); the Llama reference gets the converter's q/k
+    // permutation, under which adjacent-pair RoPE is the same rotation.
     ToyGgufConfig cl; cl.arch = "llama";
     cl.n_layers = 3; cl.dim = 32; cl.n_heads = 4; cl.n_kv_heads = 2;
     cl.ffn_dim = 64; cl.vocab_size = 48; cl.seed = 21;
     ToyGgufConfig cq = cl; cq.arch = "qwen2"; cq.attn_qkv_bias = true; cq.zero_bias = true;
+    cl.permute_qk = true;
     std::string pl = scratch("q_llama.gguf"), pq = scratch("q_zero.gguf");
     write_toy_gguf(pl, cl); write_toy_gguf(pq, cq);
     std::vector<int64_t> toks = {3, 1, 4, 1, 5};
     auto a = forward_gguf(pl, toks), b = forward_gguf(pq, toks);
-    for (size_t i = 0; i < a.size(); ++i) APPROX(a[i], b[i], 0);
+    CHECK(a.size() == b.size() && !a.empty());
+    for (size_t i = 0; i < a.size(); ++i) APPROX(a[i], b[i], 1e-5);   // dot order differs
+}
+
+TEST(qwen2_unpermuted_differs_from_llama) {
+    // Without the permutation the two pair layouts are different rotations; if
+    // Qwen2 ever falls back to adjacent pairs this catches it.
+    ToyGgufConfig cl; cl.arch = "llama";
+    cl.n_layers = 3; cl.dim = 32; cl.n_heads = 4; cl.n_kv_heads = 2;
+    cl.ffn_dim = 64; cl.vocab_size = 48; cl.seed = 21;
+    ToyGgufConfig cq = cl; cq.arch = "qwen2"; cq.attn_qkv_bias = true; cq.zero_bias = true;
+    std::string pl = scratch("q_llama_np.gguf"), pq = scratch("q_zero_np.gguf");
+    write_toy_gguf(pl, cl); write_toy_gguf(pq, cq);
+    std::vector<int64_t> toks = {3, 1, 4, 1, 5};
+    auto a = forward_gguf(pl, toks), b = forward_gguf(pq, toks);
+    float maxdiff = 0.f;
+    for (size_t i = 0; i < a.size(); ++i) maxdiff = std::max(maxdiff, std::fabs(a[i] - b[i]));
+    CHECK(maxdiff > 1e-4f);
 }
 
 TEST(qwen2_bias_changes_output) {
@@ -140,7 +160,7 @@ TEST(gemma2_config_discovery) {
     std::string p = scratch("gemma2_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::Gemma2 && cfg.block_spec.norm == NormKind::RMSNormGemma);
+    CHECK(cfg.arch_kind == Arch::Gemma2 && cfg.block_spec.norm == NormKind::RMSNorm && cfg.block_spec.ffn == FfnKind::GeGLU);
     APPROX(cfg.embedding_scale, std::sqrt(32.0), 1e-4);
     APPROX(cfg.attn_logit_softcap, 50.0, 1e-4);
     APPROX(cfg.final_logit_softcap, 30.0, 1e-4);
@@ -174,12 +194,28 @@ TEST(gemma3_config_discovery) {
     std::string p = scratch("gemma3_cfg.gguf"); write_toy_gguf(p, c);
     GgufFile g(p);
     ModelConfig cfg = ModelConfig::from_source(g);
-    CHECK(cfg.arch_kind == Arch::Gemma3 && cfg.block_spec.norm == NormKind::RMSNormGemma);
+    CHECK(cfg.arch_kind == Arch::Gemma3 && cfg.block_spec.norm == NormKind::RMSNorm && cfg.block_spec.ffn == FfnKind::GeGLU);
     APPROX(cfg.embedding_scale, std::sqrt(32.0), 1e-4);
     APPROX(cfg.rope_theta_local, 10000.0, 1e-3);
     CHECK(cfg.sliding_window_pattern == 3);
     CHECK(g.find("blk.0.attn_q_norm.weight") != nullptr);
     CHECK(g.find("blk.0.attn_k_norm.weight") != nullptr);
+}
+
+TEST(gemma3_local_global_defaults_follow_llama_cpp) {
+    // Real Gemma 3 GGUFs carry sliding_window but no pattern or local RoPE base;
+    // llama.cpp then uses period 6 and base 10000 for the local layers.
+    ToyGgufConfig c; c.arch = "gemma3"; c.post_norms = true; c.qk_norm = true;
+    c.rope_theta = 1000000.f; c.sliding_window = 512;
+    c.n_layers = 6; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 2;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = 42;
+    std::string p = scratch("gemma3_swa_defaults.gguf"); write_toy_gguf(p, c);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    CHECK(cfg.sliding_window == 512);
+    CHECK(cfg.sliding_window_pattern == 6);
+    APPROX(cfg.rope_theta_local, 10000.0, 1e-3);
+    CHECK(cfg.block_spec.rope_dual_base);
 }
 
 static ToyGgufConfig gemma3_base(uint32_t seed) {
@@ -240,13 +276,15 @@ TEST(phi3_config_discovery) {
 }
 
 TEST(phi3_full_rotary_matches_llama) {
-    // Phi-3 with full rotary == Llama over the same weights: the fused
-    // attn_qkv / ffn_up tensors are filled in the same RNG order as the split
-    // tensors, and block_phi3 with rot=head_dim is exactly the Llama block.
+    // Phi-3 with full rotary == Llama: the fused attn_qkv / ffn_up tensors are
+    // filled in the same RNG order as the split tensors, and Phi-3 with
+    // rot=head_dim is the Llama block with rotate-half RoPE, so the reference
+    // Llama gets the converter's q/k permutation (see qwen2_zero_bias_equals_llama).
     ToyGgufConfig cl; cl.arch = "llama";
     cl.n_layers = 3; cl.dim = 32; cl.n_heads = 4; cl.n_kv_heads = 2;
     cl.ffn_dim = 64; cl.vocab_size = 48; cl.seed = 51;
     ToyGgufConfig cp = cl; cp.arch = "phi3"; cp.fused_qkv = true;   // full rotary (no rope_dim)
+    cl.permute_qk = true;
     std::string pl = scratch("phi_llama.gguf"), pp = scratch("phi_phi3.gguf");
     write_toy_gguf(pl, cl); write_toy_gguf(pp, cp);
     std::vector<int64_t> toks = {5, 2, 9, 1, 7};
@@ -364,6 +402,28 @@ TEST(phi2_forward_finite_and_deterministic) {
     for (float v : a) CHECK(std::isfinite(v));
 }
 
+TEST(phi2_prefill_matches_per_token_forward) {
+    // Batched prefill on the parallel-residual block: the FFN output buffer
+    // must hold bs rows (it held one, so a 5-token prefill wrote 4 rows past
+    // it; ASan heap-buffer-overflow). Logits must equal the per-token path.
+    ToyGgufConfig c; c.arch = "phi2"; c.fused_qkv = true; c.gelu_ffn = true;
+    c.full_bias = true; c.rope_dim = 4;
+    c.n_layers = 2; c.dim = 32; c.n_heads = 4; c.n_kv_heads = 4;
+    c.ffn_dim = 64; c.vocab_size = 48; c.seed = 73;
+    std::string p = scratch("phi2_prefill.gguf"); write_toy_gguf(p, c);
+    std::vector<int64_t> toks = {5, 2, 9, 1, 7};
+    auto a = forward_gguf(p, toks);
+    GgufFile g(p);
+    ModelConfig cfg = ModelConfig::from_source(g);
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false; opt.n_buffers = 1;
+    LayerLoader loader(&g, cfg, opt);
+    KVCache kv(cfg.n_layers, cfg.kv_dim(), cfg.ctx_len);
+    ThreadPool pool(2);
+    Transformer tf(&loader, &kv, &pool);
+    const float* lg = tf.prefill(toks.data(), (int64_t)toks.size(), 0);
+    for (int64_t i = 0; i < cfg.vocab_size; ++i) APPROX(lg[i], a[i], 1e-4);
+}
+
 TEST(kimi_and_chinese_arch_discovery) {
     ToyGgufConfig ck; ck.arch = "kimi";
     ck.n_layers = 2; ck.dim = 32; ck.n_heads = 4; ck.n_kv_heads = 2;
@@ -389,7 +449,7 @@ TEST(gemma4_and_phi4_discovery) {
     std::string pg = scratch("gemma4_cfg.gguf"); write_toy_gguf(pg, cg);
     GgufFile gg(pg);
     ModelConfig cfgg = ModelConfig::from_source(gg);
-    CHECK(cfgg.arch_kind == Arch::Gemma4 && cfgg.block_spec.norm == NormKind::RMSNormGemma);
+    CHECK(cfgg.arch_kind == Arch::Gemma4 && cfgg.block_spec.norm == NormKind::RMSNorm && cfgg.block_spec.ffn == FfnKind::GeGLU);
 
     ToyGgufConfig cp; cp.arch = "phi4";
     cp.n_layers = 2; cp.dim = 32; cp.n_heads = 4; cp.n_kv_heads = 2;

@@ -21,7 +21,7 @@ Bounded-memory execution is measured, not claimed — on a 16&nbsp;GB Mac with ~
 
 <div class="stat-grid"><div class="stat"><div class="stat-value">317 MB</div><div class="stat-label">Llama-2-13B peak RSS</div><div class="stat-sub">7.87 GB Q4 &rarr; 25&times; smaller</div></div><div class="stat"><div class="stat-value">204 MB</div><div class="stat-label">Llama-3.1-8B peak RSS</div><div class="stat-sub">4.92 GB Q4 &rarr; 24&times; smaller</div></div><div class="stat"><div class="stat-value">2.1&times;</div><div class="stat-label">less RAM than llama.cpp</div><div class="stat-sub">at ~88% of its decode (TinyLlama Q8, resident)</div></div></div>
 
-And it is a real engine, not a demo: unmodified GGUF v2/v3 from Hugging Face, nine architectures (Llama, Mistral, Qwen2/2.5, Gemma&nbsp;2, Gemma&nbsp;3 text, Phi-3, Phi-2, GPT-2, Mixtral/MoE), numerically validated against llama.cpp layer-by-layer, with zero runtime dependencies. See [Benchmarks](benchmarks.html).
+And it is a real engine, not a demo: unmodified GGUF v2/v3 from Hugging Face, Llama-family, Qwen2, Gemma&nbsp;3 and Phi-2 output checked token for token against llama.cpp (more families implemented on synthetic weights), with zero runtime dependencies. See [Benchmarks](benchmarks.html).
 
 ## Where SipLLM is the wrong choice
 

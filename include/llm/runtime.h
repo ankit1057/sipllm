@@ -81,6 +81,8 @@ public:
     const ModelConfig& config() const { return cfg_; }
     const Tokenizer&   tokenizer() const { return tok_; }
     size_t weights_resident_bytes() const { return loader_->resident_bytes(); }
+    int interleaved_matrices() const { return loader_->interleaved_matrices(); }   // wave 15
+    int interleaved_q6k_matrices() const { return loader_->interleaved_q6k_matrices(); }   // wave 16
     size_t kv_bytes() const { return kv_->bytes(); }
     ThreadPool* thread_pool() { return pool_.get(); }
 
@@ -136,6 +138,22 @@ public:
     bool save_session(const std::string& path) const;
     bool load_session(const std::string& path);
 
+    // ---- Issue #70: LAN pooling ---------------------------------------------
+    // Layer range this runtime owns (LayerLoader::Options::layer_begin/end;
+    // default all layers). Plan, pinning and KV cover only these layers.
+    int layer_begin() const { return layer_begin_; }
+    int layer_end() const { return layer_end_; }
+    const WeightSource& source() const { return *src_; }
+    int64_t max_ctx() const { return kv_->max_ctx(); }
+    KVPrecision kv_precision() const { return kv_->precision(); }
+    Residency residency() const { return opt_.residency; }
+    // Coordinator: layers [layer_end(), n_layers) run on other machines.
+    // Refuses speculative decoding, the semantic cache, plugins and sessions.
+    void set_remote_segments(std::vector<RemoteSegment> segs);
+    bool has_remote_layers() const { return tf_->has_remote_segments(); }
+    // Worker: run exactly this runtime's layers over n residual rows.
+    void run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos);
+
 private:
     std::unique_ptr<WeightSource> src_;
     ModelConfig cfg_;
@@ -154,6 +172,9 @@ private:
     std::unique_ptr<class SemanticCache> semantic_cache_;
     std::unique_ptr<class SpecDecoder> spec_decoder_;
     int max_draft_len_ = 0;
+    int layer_begin_ = 0, layer_end_ = 0;   // #70: this node's layers
+    bool budgeted_ = false;        // #81: a --ram-budget plan governs this runtime
+    bool budget_forced_ = false;   // #81: ... and the operator forced it (--ram-budget-force)
 };
 
 } // namespace llm

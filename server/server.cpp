@@ -14,6 +14,8 @@
 //
 // One model, one generation at a time (guarded by a mutex).
 #include "llm/runtime.h"
+#include "llm/device_profile.h"
+#include "llm/mem_plan.h"
 #include "llm/neon.h"
 #include "llm/vulkan_backend.h"
 #include "llm/selftest.h"
@@ -59,21 +61,39 @@ static std::string read_file(const std::string& path) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <model> [--port N] [--residency fp32|quant] "
-                        "[--mmap] [--threads N] [--ctx N]\n", argv[0]);
+        fprintf(stderr, "usage: %s <model> [--port N] [--host IP] [--allow-agent] "
+                        "[--residency fp32|quant] [--mmap] [--threads N] [--ctx N] [--ram-budget BYTES]\n"
+                        "  --ram-budget   peak-RSS ceiling (default: half of available RAM; 0 streams every layer)\n"
+                        "  --host IP      address to bind (default 127.0.0.1, this machine only)\n"
+                        "  --allow-agent  let requests with \"agent\": true run the system\n"
+                        "                 tools (shell, file write) in the working directory\n",
+                argv[0]);
         return 2;
     }
     std::string model = argv[1];
     int port = 8080, threads = 0, ctx = 0;
+    std::string host = "127.0.0.1";
+    bool allow_agent = false;
+    size_t ram_budget = 0;
+    bool ram_budget_given = false;   // #78: no flag -> automatic budget
     LayerLoader::Options opt; opt.residency = Residency::Quantized;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto nx = [&]{ return (i + 1 < argc) ? argv[++i] : "0"; };
         if (a == "--port") port = std::stoi(nx());
+        else if (a == "--host") host = nx();
+        else if (a == "--allow-agent") allow_agent = true;
         else if (a == "--residency") opt.residency = std::string(nx()) == "fp32" ? Residency::FP32 : Residency::Quantized;
         else if (a == "--mmap") opt.use_mmap = true;
         else if (a == "--threads") threads = std::stoi(nx());
         else if (a == "--ctx") ctx = std::stoi(nx());
+        else if (a == "--ram-budget") { ram_budget = parse_bytes(nx()); ram_budget_given = true; }
+    }
+    // #78: same default as the CLI: half of the available RAM, best effort.
+    bool force_budget = false;
+    if (!ram_budget_given) {
+        ram_budget = auto_ram_budget(available_ram_bytes());
+        force_budget = ram_budget > 0;
     }
 
     std::unique_ptr<Runtime> rt;
@@ -81,7 +101,7 @@ int main(int argc, char** argv) {
     std::string model_err;
     try {
         auto src = open_model(model, opt.use_mmap);
-        rt = std::make_unique<Runtime>(std::move(src), opt, ctx, threads);
+        rt = std::make_unique<Runtime>(std::move(src), opt, ctx, threads, ram_budget, force_budget);
         sched = std::make_unique<Scheduler>(rt.get(), 64);
         printf("loaded %s\n  %s\n", model.c_str(), rt->config().summary().c_str());
     } catch (const std::exception& e) {
@@ -94,7 +114,7 @@ int main(int argc, char** argv) {
                              "<p>This server provides an OpenAI-compatible API at <code>/v1/chat/completions</code>.</p>"
                              "<p><i>(Place an <code>index.html</code> in this directory to serve a custom Web UI here).</i></p>";
 
-    http::Server srv(port);
+    http::Server srv(port, host);
 
     srv.get("/", [&](http::Request&, http::Response& res) {
         res.send(200, "text/html; charset=utf-8", html);
@@ -212,6 +232,14 @@ int main(int argc, char** argv) {
             res.send(400, "application/json",
                      "{\"error\":{\"message\":\"" + json_escape(err) +
                      "\",\"type\":\"invalid_request_error\"}}");
+            return;
+        }
+        // Agent mode runs shell and file-write tools on this host; it is off
+        // unless the operator started the server with --allow-agent.
+        if (cr.agent && !allow_agent) {
+            res.send(403, "application/json",
+                     "{\"error\":{\"message\":\"agent mode is disabled; start the server "
+                     "with --allow-agent to enable it\",\"type\":\"permission_error\"}}");
             return;
         }
 

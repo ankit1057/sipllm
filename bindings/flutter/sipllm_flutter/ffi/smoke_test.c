@@ -36,6 +36,11 @@ int main(int argc, char** argv) {
 
   sipllm_params p;
   sipllm_params_default(&p);
+  /* #78: the default asks for the automatic budget (half of available RAM). */
+  if (p.ram_budget_bytes != SIPLLM_RAM_BUDGET_AUTO) {
+    fprintf(stderr, "FAIL: sipllm_params_default must set SIPLLM_RAM_BUDGET_AUTO\n");
+    return 1;
+  }
   p.ram_budget_bytes = 0; /* unlimited streaming */
   p.threads = 0;          /* hardware_concurrency */
 

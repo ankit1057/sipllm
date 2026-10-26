@@ -42,11 +42,11 @@ Llama and Mixtral share one attention sublayer, `attention_llama()`: RMSNorm →
 
 ### RoPE is adjacent-pair, not rotate_half
 
-`apply_rope()` rotates **adjacent element pairs** `(p[2i], p[2i+1])` — this is ggml's `rope_norm`. It reproduces HF's `rotate_half` *only because GGUF Llama weights are permuted at conversion time*; the engine relies on that permutation and never rotates halves itself. Two variants extend the pristine hot loop:
+`apply_rope()` rotates **adjacent element pairs** `(p[2i], p[2i+1])` — this is ggml's `rope_norm`. It reproduces HF's `rotate_half` *only because GGUF Llama weights are permuted at conversion time*. Qwen2, Gemma and Phi GGUFs are not permuted, so for them (`BlockSpec::rope_neox`) `apply_rope_neox()` rotates pairs `(p[i], p[i + n_rot/2])`, ggml's `rope_neox`. Variants of the pristine hot loop:
 
 - **llama3 frequency scaling** (`llama3_scale_freq`, issue #9): when `use_llama3_rope()` holds, each wavelength is stretched — high frequencies pass through, low frequencies are divided by `factor`, the band between interpolates. Off by default; identical codegen to plain RoPE on every pre-Llama3 model.
 - **partial-rotary** (`rope_rot`): rotate only the first `rope_dim` dims per head, pass the rest through (Phi-2/Phi-3). `rope_dim == head_dim` is full RoPE.
-- **per-layer base** (Gemma 3): local (sliding) layers use `rope_theta_local`; every Nth layer (`sliding_window_pattern`) uses the global `rope_theta`.
+- **per-layer base** (Gemma 3): local (sliding) layers use `rope_theta_local`; every Nth layer (`sliding_window_pattern`) uses the global `rope_theta`. When the GGUF carries no pattern or local base, the defaults are llama.cpp's: period 6 and base 10000 (Gemma 2: period 2, one base).
 
 ### Single-pass prefill
 
@@ -67,8 +67,8 @@ Llama and Mixtral share one attention sublayer, `attention_llama()`: RMSNorm →
 ## Tradeoffs
 
 - **Optional weight roles drive behavior, not `if (arch==…)`.** Gemma 3's QK-norm, post-attention/post-FFN norms, and all biases are applied only when the corresponding `Role` resolves to a valid ref, so one code path serves several architectures. The cost is that shape correctness depends on the loader's role→tensor mapping being right.
-- **Sliding-window attention is NOT modeled.** Mistral and Gemma 3 attend the full causal range `[0, pos]`; Gemma 3 only varies the RoPE base per layer, it does not mask a window. This is a known deviation from the reference models, not a bug in the loop.
-- **No chat template.** The engine runs raw text; BOS is added only on a fresh sequence. Conversation formatting is the caller's job (the [Flutter runtime](flutter-runtime.html)'s `PromptTemplate`).
+- **Sliding-window attention is per layer.** A model that declares `attention.sliding_window` attends at most that many positions back; with a local/global pattern (Gemma 2/3) only the local layers are windowed and every Nth layer sees the full causal range. The KV cache still keeps every position (no eviction).
+- **No chat template in the engine.** `generate()` runs raw text; BOS is added on a fresh sequence when the model asks for it. The CLI `--chat`, the server and the agent loop format conversations with `render_chat`, choosing the style from the GGUF's `tokenizer.chat_template`; the [Flutter runtime](flutter-runtime.html) uses its own `PromptTemplate`.
 - **`"nemo"` / Mistral-Nemo is not a recognized arch string** → it falls through `arch_from_name` to `Unknown` → `block_llama`. That happens to work because Nemo is Llama-like and `head_dim` is read explicitly rather than assumed to be `dim / n_heads`.
 
 ## Source files
@@ -84,6 +84,6 @@ Llama and Mixtral share one attention sublayer, `attention_llama()`: RMSNorm →
 
 ## Future work
 
-- **Model sliding-window attention** for Mistral and Gemma 3 (mask the causal range to the trained window) so long-context behavior matches the reference exactly.
+- **Evict KV outside the window** on sliding-window layers, so the cache for local layers stops growing past the window.
 - **Recognize `"nemo"` / more arch strings** explicitly instead of leaning on the Unknown→Llama fallback.
 - **Batched decode** — the prefill machinery already sweeps P positions through a resident block; extending it to speculative/parallel decode is the throughput lever in the exceeds-RAM regime.

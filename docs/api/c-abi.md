@@ -1,6 +1,6 @@
 # C ABI reference
 
-`bindings/flutter/sipllm_flutter/ffi/sipllm_ffi.h` is the stable C ABI over the C++ streaming engine — the *only* surface Dart (or any other language) talks to. The engine's headers use `std::string`, `std::function`, and `std::unique_ptr`, none of which is FFI-safe; this header flattens them into opaque handles, plain-old-data structs, and C function-pointer callbacks. It is intentionally **additive** over the engine: it adds no math and changes no defaults — a zero-initialized `sipllm_params` reproduces the CLI's behavior.
+`bindings/flutter/sipllm_flutter/ffi/sipllm_ffi.h` is the stable C ABI over the C++ streaming engine — the *only* surface Dart (or any other language) talks to. The engine's headers use `std::string`, `std::function`, and `std::unique_ptr`, none of which is FFI-safe; this header flattens them into opaque handles, plain-old-data structs, and C function-pointer callbacks. It is intentionally **additive** over the engine: it adds no math. Start from `sipllm_params_default()`: a zero-initialized `sipllm_params` is **not** the CLI's configuration (it selects the static scheduler, zero stream buffers and no async prefetch).
 
 > [!NOTE] Reference
 > Signatures below are copied verbatim from `sipllm_ffi.h`. Every exported function is annotated `SIPLLM_API` (`__attribute__((visibility("default")))`, or `__declspec(dllexport)` on Windows). The higher-level [Dart wrapper](api-dart.html) mirrors these one-to-one; the underlying math lives in the [C++ engine](api-cpp.html).
@@ -17,7 +17,8 @@ The header states the contract explicitly:
 
 ```c
 /* ThreadPool schedule policy (octa-core work distribution). Mirrors
- * llm::ThreadPool::SchedulePolicy. Proportional2 is the engine's CLI default. */
+ * llm::ThreadPool::SchedulePolicy. Fixed16 is the engine default (CLI and
+ * sipllm_params_default); a zero-initialized sipllm_params selects STATIC (0). */
 enum {
   SIPLLM_SCHED_STATIC = 0,
   SIPLLM_SCHED_FIXED8 = 1,
@@ -35,7 +36,7 @@ enum {
 };
 ```
 
-The scheduler enum mirrors `llm::ThreadPool::SchedulePolicy` (see the [C++ engine](api-cpp.html#threadpool-thread-pool-h) reference). `SIPLLM_SCHED_PROPORTIONAL2` is the CLI default. Note the [auto-tuner](auto-tuning.html) only benchmarks four of these seven policies.
+The scheduler enum mirrors `llm::ThreadPool::SchedulePolicy` (see the [C++ engine](api-cpp.html#threadpool-thread-pool-h) reference). `SIPLLM_SCHED_FIXED16` is the default (CLI and `sipllm_params_default`). Note the [auto-tuner](auto-tuning.html) only benchmarks four of these seven policies.
 
 ## Opaque handle
 
@@ -49,7 +50,7 @@ Wraps a `llm::Runtime`. Created by `sipllm_open`, destroyed by `sipllm_close`.
 
 ### `sipllm_params` — open-time knobs
 
-Zero-initialize then override; `sipllm_params_default()` fills the recommended edge defaults. All bool-ish fields are `0`/non-`0`.
+Call `sipllm_params_default()` first, then override fields; it fills the recommended edge defaults (a zero-initialized struct does not). All bool-ish fields are `0`/non-`0`.
 
 ```c
 typedef struct {
@@ -146,7 +147,7 @@ All 18 exported functions, grouped as the header groups them.
 ```c
 SIPLLM_API void sipllm_params_default(sipllm_params* out);
 ```
-Fill `out` with recommended edge defaults (streaming, quantized residency, hw threads, Proportional2, async prefetch, repeat_penalty 1.1).
+Fill `out` with recommended edge defaults (streaming, quantized residency, hw threads, Fixed16, async prefetch, repeat_penalty 1.1).
 
 ```c
 SIPLLM_API void sipllm_sampler_default(sipllm_sampler* out);

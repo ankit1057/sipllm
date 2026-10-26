@@ -71,6 +71,11 @@ public:
 
     virtual uint64_t file_size() const = 0;
 
+    // RSS that opening this source added (metadata, tensor directory), measured
+    // by open_model(); 0 when constructed directly. The memory planner counts it
+    // as part of SipLLM's own share of a --ram-budget.
+    size_t open_rss_bytes = 0;
+
     // ---- typed metadata --------------------------------------------------
     virtual bool has_meta(const std::string& key) const = 0;
     virtual const MetaValue* meta(const std::string& key) const = 0;
