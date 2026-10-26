@@ -44,7 +44,8 @@ public:
     bool    is_eog(int64_t id) const;             // end-of-generation?
 
 private:
-    std::vector<int64_t> encode_spm(const std::string& text) const;
+    std::vector<int64_t> encode_spm(const std::string& text, bool space_prefix) const;
+    std::vector<int64_t> encode_fragment(const std::string& text) const;
     std::vector<int64_t> encode_bpe(const std::string& text) const;
     std::vector<int64_t> encode_spm_bpe(const std::string& text) const;
     void spm_bpe_chunk(const std::string& chunk, std::vector<int64_t>& out) const;
@@ -61,6 +62,9 @@ private:
     std::vector<std::string> specials_;           // SpmBpe: literal special tokens, longest first
     int64_t bos_ = -1, eos_ = -1;
     std::vector<int64_t> eog_ids_;
+    std::vector<int64_t> special_ids_;   // control / user-defined / unknown, longest text first
+    bool add_bos_ = true;                // model wants BOS (tokenizer.ggml.add_bos_token)
+    bool add_space_prefix_ = true;       // SPM dummy prefix (tokenizer.ggml.add_space_prefix)
 };
 
 } // namespace llm

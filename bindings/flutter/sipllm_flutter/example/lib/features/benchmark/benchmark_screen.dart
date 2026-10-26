@@ -229,7 +229,7 @@ class _ContextBlock extends StatelessWidget {
   Widget build(BuildContext context) {
     final budget = result.ramBudgetBytes == 0
         ? 'unlimited (stream)'
-        : _mib(result.ramBudgetBytes);
+        : (result.ramBudgetBytes < 0 ? 'auto (half of free RAM)' : _mib(result.ramBudgetBytes));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

@@ -102,7 +102,7 @@ Two things fall straight out, both exactly what theory predicts:
 1. **F16 is numerically identical to llama.cpp** (cosine `1.000000`) — the compute graph is correct; every residual difference in the quantized rows is pure quantization error.
 2. **Error grows monotonically as quantization coarsens** (F16 ≪ Q8_0 < Q5_K_M < Q4_K_M). A bug would produce erratic, layer-localized divergence; this smooth accumulation is the signature of a faithful implementation.
 
-The golden matrix currently covers the Llama path; newer architectures are unit-tested and validated against llama.cpp as models are added. See [Quantization](quantization.html) and the [LM-head journal](j-lm-head.html).
+The golden matrix covers the Llama path. For v0.6.0, Qwen2.5-0.5B, Gemma-3-270M and Phi-2 were also checked by comparing greedy output token for token with llama.cpp on the same GGUF (see the README's model-architecture table); other families are unit-tested on synthetic weights only. See [Quantization](quantization.html) and the [LM-head journal](j-lm-head.html).
 
 ## RAM-budget sweep
 
