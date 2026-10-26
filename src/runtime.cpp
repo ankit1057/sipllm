@@ -19,15 +19,25 @@
 
 namespace llm {
 
+// RSS growth since `before`, clamped at 0 (another thread may free memory).
+static size_t rss_growth(size_t before) {
+    const size_t now = current_rss_bytes();
+    return now > before ? now - before : 0;
+}
+
 std::unique_ptr<WeightSource> open_model(const std::string& path, bool use_mmap) {
     // Sniff the first 4 bytes.
     FileBacking probe(path, false);
     uint32_t magic = 0;
     probe.pread_exact(0, &magic, 4);
-    if (magic == kGGUFMagic) return std::make_unique<GgufFile>(path, use_mmap);
-    if (magic == kLLMWMagic) return std::make_unique<ModelFile>(path, use_mmap);
-    if (magic == kSipIRMagic) return std::make_unique<SipIRReader>(path, use_mmap);
-    throw Error("open_model: unrecognized file magic in " + path);
+    const size_t rss0 = current_rss_bytes();
+    std::unique_ptr<WeightSource> src;
+    if (magic == kGGUFMagic) src = std::make_unique<GgufFile>(path, use_mmap);
+    else if (magic == kLLMWMagic) src = std::make_unique<ModelFile>(path, use_mmap);
+    else if (magic == kSipIRMagic) src = std::make_unique<SipIRReader>(path, use_mmap);
+    else throw Error("open_model: unrecognized file magic in " + path);
+    src->open_rss_bytes = rss_growth(rss0);
+    return src;
 }
 
 // #37: conservative RAM allowance for everything that is NOT streamed weights or
@@ -72,9 +82,11 @@ Runtime::Runtime(std::unique_ptr<WeightSource> src, LayerLoader::Options opt,
     req.n_threads = threads > 0 ? threads : std::max(1, (int)std::thread::hardware_concurrency());
 
     // The tokenizer is built before planning so the RSS it costs (large for
-    // 150k-vocab models) is measured into the ledger's base, not guessed.
+    // 150k-vocab models) is measured into the ledger's base, not guessed. Only
+    // what SipLLM adds counts: an embedding app's own memory is not the budget's.
+    const size_t rss_before_tok = current_rss_bytes();
     tok_ = Tokenizer::from_source(*src_);
-    req.measured_base = current_rss_bytes();
+    req.measured_base = src_->open_rss_bytes + rss_growth(rss_before_tok);
 
     MemoryPlan plan = plan_memory(*src_, plan_cfg, req);
 

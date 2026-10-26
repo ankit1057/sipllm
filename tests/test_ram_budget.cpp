@@ -287,6 +287,24 @@ TEST(ram_budget_refuses_unpriced_semantic_cache) {
     CHECK_MSG(!threw_unbudgeted, "no budget: semantic cache allowed as before");
 }
 
+// The budget is SipLLM's own share. Memory the host process already holds (an
+// app embedding the runtime through the C ABI) must not count against it, so
+// the measured base is what opening the model and building the tokenizer add.
+#include <cstring>
+
+TEST(ram_budget_ignores_host_memory) {
+    const std::string path = make_toy_kv81();
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false;
+    std::vector<uint8_t> host(200u << 20);
+    std::memset(host.data(), 1, host.size());   // resident, not just reserved
+    bool threw = false;
+    try {
+        Runtime rt(open_model(path), opt, 1024, 1, 64u << 20);
+    } catch (const std::exception&) { threw = true; }
+    CHECK_MSG(!threw, "a 64 MB budget still fits beside 200 MB of host memory");
+    CHECK(host[host.size() / 2] == 1);
+}
+
 // Issue #78: with no --ram-budget the CLI used to stream every layer on every
 // token even when the model fit in RAM. The default is now half of the RAM the
 // OS reports as available; an explicit --ram-budget 0 still streams everything.

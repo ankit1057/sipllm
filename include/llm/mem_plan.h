@@ -69,7 +69,7 @@ struct BudgetRequest {
     bool        stream_head_req = false;  // user forced --stream-lm-head
     bool        force           = false;  // --ram-budget-force: run even if impossible
     KVPrecision kv_precision    = KVPrecision::FP32;
-    size_t      measured_base   = 0;      // process RSS at plan time (model open + tokenizer); 0 = unknown
+    size_t      measured_base   = 0;      // RSS SipLLM added by plan time (model open + tokenizer); 0 = unknown
 };
 
 // Itemized ledger (bytes). Every line is a real contributor to peak RSS; the sum
