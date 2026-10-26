@@ -5,6 +5,15 @@ the end of every optimization wave from measured data (see [CLAUDE.md](CLAUDE.md
 Rule 1). Peak RSS is the authoritative cross-runtime number from `/usr/bin/time -l`.
 
 ```
+Unreleased (2026-10-26, Dimensity 900 phone, 4 threads, warm cache; partial refresh, n=1 for the 8B rows):
+  8B on the phone: Llama-3.1-8B Q4_K_M (4.92 GB) in 205 MB VmHWM (`--ram-budget 0 --stream-lm-head --no-async`)
+  at 0.13 tok/s, flash-bound (78 GB read for 31 tokens). llama.cpp on the same phone: 2.5 tok/s at 4.7 GB VmHWM,
+  with the phone's MemAvailable down to 0.16 GB. SipLLM left 3.4 GB available.
+  Ceiling: Qwen2.5-1.5B Q8_0 at 300M/768M/1200M and Llama-3.1-8B at 1500M exceeded the budget by 0.7-3.0% (VmHWM)
+  before the measured-base fix; after it every tested budget holds on the M3 and the phone
+  (bench/results/phone-budget-sweep-2026-10-26.json).
+  Speed (SmolLM2-135M Q8_0, ~1000-token prompt): prefill 130 tok/s, decode 25.1 (47 / 9.7 before #80).
+
 v0.6.0 (2026-10-23): the numbers below are wave 16's and were not re-measured for the
 release. The Llama-family hot path is unchanged (greedy output byte-identical to the
 pre-release tree for TinyLlama, Llama-3.2-1B and SmolLM2, with and without --fast). The
@@ -71,7 +80,7 @@ Confidence:            High: phone numbers are medians of 3 interleaved reps wit
 - **#77: the CLI auto-tuner is now opt-in (`--autotune`).** Without `--threads` or `--schedule`, v0.6.0 applied the tuner's result over the defaults. On a 2+6-core phone it picked 2 threads and `Proportional2`. With no writable `$HOME`, as in an Android `adb shell`, it also re-ran on every launch. `--no-autotune` meanwhile forced 4 threads. Now, unless `--autotune` or `--recalibrate` is given, the CLI uses every core and `fixed16`, as the C ABI and Dart SDK already did. `--no-autotune` is still accepted.
 - **#79: `-t` is the sampling temperature, and the CLI now says so.** Most runtimes use `-t` for threads, so `-t 8` silently set temperature 8.0. `-t` still works but prints a warning. `--temp T` is the explicit flag, and threads are `--threads N`.
 - **#81: `--ram-budget` keeps its ceiling for the KV cache and refuses the unpriced semantic cache.** The planner prices the KV cache at the full chosen context. Growing it by doubling could briefly hold more resident rows than that whenever the context is not a doubling step. Under a budget, the KV cache is now allocated once at the planned context. Peak memory under a budget therefore includes the full planned KV from the start, which is what the planner reports. Pass a smaller `--ctx` to lower it. `--semantic-cache-budget` with `--ram-budget` is refused unless `--ram-budget-force` is given, because the planner does not count the semantic cache. No budget means no change: the KV cache still grows on demand.
-- **`--ram-budget` now prices the tokenizer and model metadata it measures, so large-vocabulary models stay under their ceiling.** The ledger assumed a fixed 24 MB of process overhead. A 32k-vocab model costs about 8 MB at plan time. Qwen2.5 (152k vocab) costs about 37 MB (Apple M3), so Qwen2.5-1.5B Q8_0 at `--ram-budget 300M`, `768M` and `1200M` peaked 7.8, 14 and 9.7 MB above the budget (`/usr/bin/time -l`). The tokenizer is now built before planning. The ledger's base is the RSS measured at that point plus 16 MB, and never less than the old 24 MB, so 32k-vocab plans are unchanged. After the fix, the same three runs peak at 272, 754 and 1218 MB, 40–52 MB under. The cost is one fewer pinned layer at each budget. The output is byte-identical.
+- **`--ram-budget` now prices the tokenizer and model metadata it measures, so large-vocabulary models stay under their ceiling.** The ledger assumed a fixed 24 MB of process overhead. A 32k-vocab model costs about 8 MB at plan time. Qwen2.5 (152k vocab) costs about 37 MB (Apple M3), so Qwen2.5-1.5B Q8_0 at `--ram-budget 300M`, `768M` and `1200M` peaked 7.8, 14 and 9.7 MB above the budget (`/usr/bin/time -l`). The tokenizer is now built before planning. The ledger's base is the RSS measured at that point plus 16 MB, and never less than the old 24 MB. TinyLlama's plans are unchanged on macOS (same pinned layers at 300M, 600M and 1G). After the fix, the same three runs peak at 272, 754 and 1218 MB, 40–52 MB under. The cost is one fewer pinned layer at each budget. The output is byte-identical.
 - **The CLI's `peak rss` line now reports the kernel high-water mark** (`VmHWM` on Linux and Android, `resident_size_max` on macOS). It used to print the RSS at exit, which under-reported the peak: 277 MB was printed for a run whose true peak was 322 MB.
 
 ## [0.6.0] — Correct output beyond Llama, merged waves 12–16, LAN pooling (2026-10-23)
