@@ -183,11 +183,14 @@ private:
     struct Slot {
         int   layer = -1;
         enum class State { Empty, Loading, Ready } state = State::Empty;
+        // Bumped by every claim (see claim()); a job owns the slot iff its
+        // ticket still matches, so an older job queued for the slot is stale.
+        uint64_t ticket = 0;
         // One resident buffer per role.
         std::vector<uint8_t> buf[(int)Role::COUNT];
         WeightRef            ref[(int)Role::COUNT];
     };
-    struct Job { int slot = -1; int layer = -1; };
+    struct Job { int slot = -1; int layer = -1; uint64_t ticket = 0; };
 
     void   plan_and_pin_layers();            // #37: pin hot layers under budget
     size_t estimate_layer_bytes(int layer) const; // predicted resident bytes
@@ -196,6 +199,7 @@ private:
     int    other_slot(int s) const { return (s + 1) % (int)slots_.size(); }
     void   worker_loop();
     void   enqueue(int slot, int layer);     // caller holds mutex_
+    void   claim(int slot, int layer, bool front); // caller holds mutex_
 
     std::string role_name(int layer, Role r) const;
 

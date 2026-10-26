@@ -322,7 +322,7 @@ void LayerLoader::fill_slot(Slot& s, int layer) {
              by0 = stats_.bytes_read.load();
     for (int r = 0; r < (int)Role::COUNT; ++r)
         load_weight_into(s, (Role)r, layer);
-    // NB: s.layer is assigned by the CALLER — under mutex_ in worker_loop/loadLayer,
+    // NB: s.layer is assigned by the CALLER — under mutex_ in claim(),
     // or single-threaded in the sync path / plan_and_pin — never here. Writing it
     // in this unlocked helper raced loadLayer's cv_ready_ predicate (TSan).
     if (layer >= 0 && layer < (int)layer_stats_.size()) {
@@ -342,25 +342,39 @@ void LayerLoader::worker_loop() {
             if (stop_) return;
             job = jobs_.front();
             jobs_.pop_front();
-            slots_[job.slot].state = Slot::State::Loading;
-            slots_[job.slot].layer = job.layer;
+            // A later claim re-targeted the slot: skip the stale job before it
+            // touches the buffers, which the slot's new owner may be reading.
+            if (slots_[job.slot].ticket != job.ticket) continue;
         }
         fill_slot(slots_[job.slot], job.layer);   // I/O + dequant, unlocked
         {
             std::lock_guard<std::mutex> lk(mutex_);
-            slots_[job.slot].state = Slot::State::Ready;
+            // Re-claimed mid-fill: the newer job refills the slot, so only the
+            // current owner may mark it Ready.
+            if (slots_[job.slot].ticket == job.ticket)
+                slots_[job.slot].state = Slot::State::Ready;
             stats_.layers_loaded += 1;
         }
         cv_ready_.notify_all();
     }
 }
 
-void LayerLoader::enqueue(int slot, int layer) {
-    // caller holds mutex_
-    for (const auto& j : jobs_) if (j.slot == slot && j.layer == layer) return;
-    if (slots_[slot].state == Slot::State::Loading && slots_[slot].layer == layer) return;
-    jobs_.push_back({slot, layer});
+void LayerLoader::claim(int slot, int layer, bool front) {
+    // caller holds mutex_. The label and state change here, never in the
+    // worker, so a slot's label is always its latest claim.
+    Slot& s = slots_[slot];
+    s.layer  = layer;
+    s.state  = Slot::State::Loading;
+    s.ticket += 1;
+    if (front) jobs_.push_front({slot, layer, s.ticket});
+    else       jobs_.push_back({slot, layer, s.ticket});
     cv_job_.notify_one();
+}
+
+void LayerLoader::enqueue(int slot, int layer) {
+    // caller holds mutex_. Already claimed for `layer` (Loading or Ready): done.
+    if (slots_[slot].layer == layer && slots_[slot].state != Slot::State::Empty) return;
+    claim(slot, layer, /*front=*/false);
 }
 
 // ---- public API -----------------------------------------------------------
@@ -403,14 +417,13 @@ bool LayerLoader::loadLayer(int layer) {
         s = (current_ >= 0) ? other_slot(current_) : 0;
         // don't clobber a slot still being consumed
         if (s == current_) s = other_slot(s);
-        jobs_.push_front({s, layer});
-        slots_[s].state = Slot::State::Loading;
-        slots_[s].layer = layer;
-        cv_job_.notify_one();
+        claim(s, layer, /*front=*/true);
     }
-    // Wait until that slot holds `layer` and is Ready.
+    // Wait for this claim's own load. Only this thread claims, so the ticket
+    // cannot move while we wait, and a stale job can never satisfy it.
+    const uint64_t ticket = slots_[s].ticket;
     cv_ready_.wait(lk, [&] {
-        return slots_[s].layer == layer && slots_[s].state == Slot::State::Ready;
+        return slots_[s].ticket == ticket && slots_[s].state == Slot::State::Ready;
     });
     current_ = s;
     active_ = &slots_[current_];
