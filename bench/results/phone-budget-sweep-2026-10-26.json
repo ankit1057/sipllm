@@ -483,5 +483,37 @@
    "pre_avail_kb": 3704564,
    "minavail_kb": 3519796
   }
- ]
+ ],
+ "binaries": {
+  "llm_fix5": "7820982",
+  "llm_fix6": "4ad688c (code)",
+  "llm_fix7": "a622a76 (code): budget = SipLLM's own share"
+ },
+ "fix7_verification": [
+  {
+   "tag": "sw7_sip_300M",
+   "budget_bytes": 314572800,
+   "vmhwm_bytes": 273743872,
+   "dec_tps": 1.88
+  },
+  {
+   "tag": "sw7_sip_768M",
+   "budget_bytes": 805306368,
+   "vmhwm_bytes": 769122304,
+   "dec_tps": 2.54
+  },
+  {
+   "tag": "sw7_sip_1200M",
+   "budget_bytes": 1258291200,
+   "vmhwm_bytes": 1216954368,
+   "dec_tps": 3.26
+  },
+  {
+   "tag": "b8_sip7_1500M",
+   "budget_bytes": 1572864000,
+   "vmhwm_bytes": 1483423744,
+   "dec_tps": 0.22
+  }
+ ],
+ "fix7_output_identical_to_fix5_fix6": true
 }
