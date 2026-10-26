@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # bench.sh — SipLLM reproducible benchmark harness (wave 2, v0.2 baseline).
 #
+# Every SipLLM run passes --ram-budget 0 (stream every layer): since #78 a run
+# without the flag holds the model resident, which would break this harness's
+# bounded-RSS series and its comparability with earlier results.
+#
 # Runs median-of-N generation benchmarks for every cached model plus a set of
 # toy models of IDENTICAL geometry at increasing depth (4/16/32 layers) to prove
 # the core "bounded peak RSS" thesis: peak resident memory stays ~flat as depth
@@ -161,7 +165,7 @@ for idx in "${!REAL_MODELS[@]}"; do
   m="${REAL_MODELS[$idx]}"; q="${REAL_QUANT[$idx]}"
   log "SipLLM: $(basename "$m") x$N (pread)"
   record "real" "$m" "$q" "pread" "0" "sipllm" "$NGEN" "$THREADS" \
-    ./build/llm "$m" -p "$PROMPT" -n "$NGEN" --threads "$THREADS" --greedy
+    ./build/llm "$m" -p "$PROMPT" -n "$NGEN" --threads "$THREADS" --greedy --ram-budget 0
 done
 
 # --- SipLLM: toy scaling (identical geometry, increasing depth) -------------
@@ -184,7 +188,7 @@ for C in 64 512; do
     ./build/make_toy_model "$toy" --gguf --q8 --layers "$L" --ctx "$C" "${TOY_GEOM[@]}" >/dev/null
     log "SipLLM toy: ${L} layers ctx=${C} x$N"
     record "toy" "$toy" "Q8_0" "pread" "$L" "sipllm" "$NGEN" "$THREADS" \
-      ./build/llm "$toy" -p "a b c" -n "$NGEN" --threads "$THREADS" --seed 1
+      ./build/llm "$toy" -p "a b c" -n "$NGEN" --threads "$THREADS" --seed 1 --ram-budget 0
   done
 done
 
@@ -197,7 +201,7 @@ if [ "$SWEEP" = "1" ] && [ -f "$SWEEP_MODEL" ]; then
   for T in 1 2 4 8; do
     log "SipLLM thread sweep: smollm2 t=$T x$N"
     record "sweep" "$SWEEP_MODEL" "Q8_0" "pread" "0" "sipllm" "$NGEN" "$T" \
-      ./build/llm "$SWEEP_MODEL" -p "$PROMPT" -n "$NGEN" --threads "$T" --greedy
+      ./build/llm "$SWEEP_MODEL" -p "$PROMPT" -n "$NGEN" --threads "$T" --greedy --ram-budget 0
   done
 fi
 

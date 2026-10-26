@@ -81,4 +81,29 @@ TEST(rope_llama3_disabled_equals_plain) {
     for (int64_t i = 0; i < HD; ++i) APPROX(a[i], b[i], 0);
 }
 
+TEST(neox_rotates_half_offset_pairs) {
+    // Rotate-half pairs element i with element i + HD/2 (not 2i with 2i+1).
+    // Put 1 in each first-half slot: pair i ends as (cos a_i, sin a_i) at
+    // (i, i + HD/2), with the plain-RoPE frequencies.
+    const int64_t pos = 3;
+    std::vector<float> v(HD, 0.f);
+    for (int64_t i = 0; i < HD / 2; ++i) v[i] = 1.f;
+    Transformer::apply_rope_neox(v.data(), 1, HD, HD, pos, THETA);
+    for (int64_t i = 0; i < HD / 2; ++i) {
+        const double a = pos * std::pow((double)THETA, -2.0 * i / HD);
+        APPROX(v[i], (float)std::cos(a), 1e-6);
+        APPROX(v[i + HD / 2], (float)std::sin(a), 1e-6);
+    }
+}
+
+TEST(neox_partial_leaves_tail_untouched) {
+    // rot_dim < head_dim: dims [rot_dim, head_dim) pass through (Phi-2).
+    std::vector<float> v(HD);
+    for (int64_t i = 0; i < HD; ++i) v[i] = 0.5f + (float)i;
+    const std::vector<float> before = v;
+    Transformer::apply_rope_neox(v.data(), 1, HD, /*rot_dim=*/4, /*pos=*/7, THETA);
+    for (int64_t i = 4; i < HD; ++i) APPROX(v[i], before[i], 0);
+    CHECK(v[0] != before[0]);
+}
+
 int main() { return llmtest::run_all(); }

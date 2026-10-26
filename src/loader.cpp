@@ -1,5 +1,6 @@
 // loader.cpp — streaming LayerLoader implementation (see loader.h).
 #include "llm/loader.h"
+#include "llm/neon.h"
 #include "llm/common.h"
 #include "llm/quant.h"
 #include "llm/linear.h"
@@ -92,6 +93,13 @@ static bool is_optional(Role r) {
 }
 LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     : src_(src), cfg_(cfg), opt_(opt), n_layers_(cfg.n_layers) {
+    if (opt_.layer_end < 0) opt_.layer_end = (int)n_layers_;
+    LLM_CHECK(opt_.layer_begin >= 0 && opt_.layer_begin < opt_.layer_end &&
+              opt_.layer_end <= (int)n_layers_, "loader: invalid layer range");
+    const bool full_range = opt_.layer_begin == 0 && opt_.layer_end == (int)n_layers_;
+    if (!opt_.prefetch_policy && !full_range) {
+        opt_.prefetch_policy = std::make_shared<RangeWrapPolicy>(opt_.layer_begin, opt_.layer_end);
+    }
     if (!opt_.prefetch_policy) {
         opt_.prefetch_policy = std::make_shared<SequentialWrapPolicy>();
     }
@@ -164,12 +172,12 @@ LayerLoader::LayerLoader(WeightSource* src, ModelConfig cfg, Options opt)
     // device refs); the RAM-budget pinning then continues after them.
     if (opt_.gpu_layers != 0 && n_layers_ > 0)
         place_gpu_layers();
-    if (opt_.ram_budget_bytes > 0 && n_layers_ > n_gpu_)
+    if (opt_.ram_budget_bytes > 0 && opt_.layer_end - opt_.layer_begin > n_gpu_)
         plan_and_pin_layers();
 
     // Start the prefetch worker only if cold layers remain to stream; with every
     // layer pinned there is nothing left to prefetch.
-    if (opt_.async && opt_.n_buffers > 1 && n_gpu_ + n_pinned_ < n_layers_)
+    if (opt_.async && opt_.n_buffers > 1 && n_gpu_ + n_pinned_ < opt_.layer_end - opt_.layer_begin)
         worker_ = std::thread([this] { worker_loop(); });
 }
 
@@ -200,13 +208,15 @@ size_t LayerLoader::estimate_layer_bytes(int layer) const {
 void LayerLoader::plan_and_pin_layers() {
     const size_t budget  = opt_.ram_budget_bytes;
     const size_t globals = out_norm_.size() + out_weight_.size() + embd_resident_.size();
-    // Size by the largest layer: heterogeneous stacks (Gemma 4's wider global
-    // layers) must not under-reserve. Identical to layer 0 for uniform stacks.
-    // Layers [0, n_gpu_) are already placed on the GPU; pin from there on.
-    const size_t first = (size_t)n_gpu_;
-    const size_t avail = (size_t)n_layers_ - first;
+    const int    lb = opt_.layer_begin;                      // #70: pin inside this
+    const int    le = opt_.layer_end;                        // node's layer range
+    // Layers [lb, lb + n_gpu_) are already placed on the GPU; pin from there on.
+    const size_t first = (size_t)(lb + n_gpu_);
+    const size_t avail = (size_t)le - first;
+    // Size by the largest layer in range: heterogeneous stacks (Gemma 4's wider
+    // global layers) must not under-reserve. Identical to layer lb for uniform stacks.
     size_t per_layer = 0;
-    for (int l = (int)first; l < n_layers_; ++l) per_layer = std::max(per_layer, estimate_layer_bytes(l));
+    for (int l = (int)first; l < le; ++l) per_layer = std::max(per_layer, estimate_layer_bytes(l));
     if (per_layer == 0) return;
 
     const size_t all_weights = globals + pinned_bytes_ + avail * per_layer;
@@ -235,6 +245,7 @@ void LayerLoader::plan_and_pin_layers() {
             pinned_[l].layer = -1;
             break;
         }
+        if (opt_.interleave_q4k || opt_.interleave_q6k) interleave_slot(pinned_[l]);   // waves 15-16, same size
         pinned_[l].state = Slot::State::Ready;
         pinned_mask_[l]  = 1;
         pinned_bytes_   += sb;
@@ -253,14 +264,15 @@ void LayerLoader::place_gpu_layers() {
                 cuda::unavailable_reason().c_str());
         return;
     }
-    const int want = opt_.gpu_layers < 0 ? (int)n_layers_
-                                         : std::min<int>(opt_.gpu_layers, (int)n_layers_);
+    // #70: a node places the leading layers of its own range [layer_begin, layer_end).
+    const int lb = opt_.layer_begin, n_local = opt_.layer_end - opt_.layer_begin;
+    const int want = opt_.gpu_layers < 0 ? n_local : std::min<int>(opt_.gpu_layers, n_local);
     const size_t headroom = opt_.gpu_headroom_bytes;
     gpu_ref_.assign((size_t)n_layers_ * (int)Role::COUNT, WeightRef{});
     pinned_.resize(n_layers_);
 
     std::vector<uint8_t> raw;
-    for (int l = 0; l < want; ++l) {
+    for (int l = lb; l < lb + want; ++l) {
         // Device bytes this layer needs (supported 2-D projections only).
         size_t need = 0;
         for (int r = 0; r < (int)Role::COUNT; ++r) {
@@ -345,9 +357,34 @@ void LayerLoader::place_gpu_layers() {
     size_t fr = 0, tot = 0;
     cuda::mem_info(&fr, &tot);
     fprintf(stderr, "[gpu] %s: placed %d/%d layers%s on GPU (%.0f MB weights, %.0f MB VRAM free)\n",
-            cuda::device_name().c_str(), n_gpu_, (int)n_layers_,
+            cuda::device_name().c_str(), n_gpu_, n_local,
             out_gpu_.on_gpu() ? " + output head" : "",
             gpu_bytes_ / 1048576.0, fr / 1048576.0);
+}
+
+// Wave 15: repack the dense Q4_K (wave 16: and Q6_K) matrices of a resident slot into the 4-row
+// interleaved layout, in the slot's own buffers (never an mmap of the file:
+// quantized slots always hold a copy, see load_weight_into). MoE expert tensors
+// are sliced by row offset in the FFN block and stay native.
+void LayerLoader::interleave_slot(Slot& s) {
+    static const Role kDense[] = {Role::AttnQ, Role::AttnK, Role::AttnV, Role::AttnOut, Role::AttnQKV,
+                                  Role::FfnGate, Role::FfnUp, Role::FfnDown};
+    for (Role r : kDense) {
+        WeightRef& w = s.ref[(int)r];
+        if (!w.valid() || w.layout != kLayoutNative) continue;
+        if (w.n_out % 4 != 0 || w.n_in % 256 != 0) continue;
+        if (w.dtype == DType::Q4_K && opt_.interleave_q4k) {
+            repack_q4_K_il4_inplace(s.buf[(int)r].data(), w.n_out, w.n_in);
+            w.layout = kLayoutQ4K_IL4;
+        } else if (w.dtype == DType::Q6_K && opt_.interleave_q6k) {   // wave 16
+            repack_q6_K_il4_inplace(s.buf[(int)r].data(), w.n_out, w.n_in);
+            w.layout = kLayoutQ6K_IL4;
+            ++n_interleaved_q6k_;
+        } else {
+            continue;
+        }
+        ++n_interleaved_;
+    }
 }
 
 LayerLoader::~LayerLoader() {
@@ -375,7 +412,10 @@ void LayerLoader::load_weight_into(Slot& s, Role role, int layer) {
     if (ti == nullptr) {
         // Optional roles (e.g. Qwen2 q/k/v biases) are simply absent in most
         // architectures — leave an invalid ref and skip.
-        LLM_CHECK(is_optional(role), "missing tensor: " + name);
+        // The parallel-residual block (Phi-2) feeds attention and FFN from one
+        // shared norm, so its GGUFs carry no ffn_norm.
+        const bool unused_ffn_norm = role == Role::FfnNorm && cfg_.block_spec.parallel_residual;
+        LLM_CHECK(is_optional(role) || unused_ffn_norm, "missing tensor: " + name);
         s.buf[(int)role].clear();
         s.ref[(int)role] = WeightRef{};
         return;
@@ -423,7 +463,7 @@ void LayerLoader::fill_slot(Slot& s, int layer) {
              by0 = stats_.bytes_read.load();
     for (int r = 0; r < (int)Role::COUNT; ++r)
         load_weight_into(s, (Role)r, layer);
-    // NB: s.layer is assigned by the CALLER — under mutex_ in worker_loop/loadLayer,
+    // NB: s.layer is assigned by the CALLER — under mutex_ in claim(),
     // or single-threaded in the sync path / plan_and_pin — never here. Writing it
     // in this unlocked helper raced loadLayer's cv_ready_ predicate (TSan).
     if (layer >= 0 && layer < (int)layer_stats_.size()) {
@@ -443,25 +483,39 @@ void LayerLoader::worker_loop() {
             if (stop_) return;
             job = jobs_.front();
             jobs_.pop_front();
-            slots_[job.slot].state = Slot::State::Loading;
-            slots_[job.slot].layer = job.layer;
+            // A later claim re-targeted the slot: skip the stale job before it
+            // touches the buffers, which the slot's new owner may be reading.
+            if (slots_[job.slot].ticket != job.ticket) continue;
         }
         fill_slot(slots_[job.slot], job.layer);   // I/O + dequant, unlocked
         {
             std::lock_guard<std::mutex> lk(mutex_);
-            slots_[job.slot].state = Slot::State::Ready;
+            // Re-claimed mid-fill: the newer job refills the slot, so only the
+            // current owner may mark it Ready.
+            if (slots_[job.slot].ticket == job.ticket)
+                slots_[job.slot].state = Slot::State::Ready;
             stats_.layers_loaded += 1;
         }
         cv_ready_.notify_all();
     }
 }
 
-void LayerLoader::enqueue(int slot, int layer) {
-    // caller holds mutex_
-    for (const auto& j : jobs_) if (j.slot == slot && j.layer == layer) return;
-    if (slots_[slot].state == Slot::State::Loading && slots_[slot].layer == layer) return;
-    jobs_.push_back({slot, layer});
+void LayerLoader::claim(int slot, int layer, bool front) {
+    // caller holds mutex_. The label and state change here, never in the
+    // worker, so a slot's label is always its latest claim.
+    Slot& s = slots_[slot];
+    s.layer  = layer;
+    s.state  = Slot::State::Loading;
+    s.ticket += 1;
+    if (front) jobs_.push_front({slot, layer, s.ticket});
+    else       jobs_.push_back({slot, layer, s.ticket});
     cv_job_.notify_one();
+}
+
+void LayerLoader::enqueue(int slot, int layer) {
+    // caller holds mutex_. Already claimed for `layer` (Loading or Ready): done.
+    if (slots_[slot].layer == layer && slots_[slot].state != Slot::State::Empty) return;
+    claim(slot, layer, /*front=*/false);
 }
 
 // ---- public API -----------------------------------------------------------
@@ -504,14 +558,13 @@ bool LayerLoader::loadLayer(int layer) {
         s = (current_ >= 0) ? other_slot(current_) : 0;
         // don't clobber a slot still being consumed
         if (s == current_) s = other_slot(s);
-        jobs_.push_front({s, layer});
-        slots_[s].state = Slot::State::Loading;
-        slots_[s].layer = layer;
-        cv_job_.notify_one();
+        claim(s, layer, /*front=*/true);
     }
-    // Wait until that slot holds `layer` and is Ready.
+    // Wait for this claim's own load. Only this thread claims, so the ticket
+    // cannot move while we wait, and a stale job can never satisfy it.
+    const uint64_t ticket = slots_[s].ticket;
     cv_ready_.wait(lk, [&] {
-        return slots_[s].layer == layer && slots_[s].state == Slot::State::Ready;
+        return slots_[s].ticket == ticket && slots_[s].state == Slot::State::Ready;
     });
     current_ = s;
     active_ = &slots_[current_];

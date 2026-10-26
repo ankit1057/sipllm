@@ -53,6 +53,7 @@ struct SipBlockPlan {
     RopeKind rope = RopeKind::Full;
     int64_t  rope_dim = 0;               // rotary dims/head when rope == Partial
     bool     rope_dual_base = false;     // separate local/global RoPE base (Gemma3)
+    bool     rope_neox = false;          // rotate-half pair layout (see BlockSpec)
     bool     attn_softcap = false;       // cap attention logits before softmax (Gemma2)
     bool     post_attn_norm = false;     // norm the attn output before the residual (Gemma2)
     FfnKind  ffn = FfnKind::SwiGLU;

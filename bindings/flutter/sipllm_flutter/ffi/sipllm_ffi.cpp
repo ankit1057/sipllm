@@ -45,7 +45,7 @@ ThreadPool::SchedulePolicy to_policy(int32_t p) {
     case SIPLLM_SCHED_PROPORTIONAL2: return ThreadPool::SchedulePolicy::Proportional2;
     case SIPLLM_SCHED_PROPORTIONAL4: return ThreadPool::SchedulePolicy::Proportional4;
     case SIPLLM_SCHED_ADAPTIVE: return ThreadPool::SchedulePolicy::Adaptive;
-    default: return ThreadPool::SchedulePolicy::Proportional2;
+    default: return ThreadPool::SchedulePolicy::Fixed16;
   }
 }
 
@@ -76,7 +76,7 @@ extern "C" {
 void sipllm_params_default(sipllm_params* out) {
   if (!out) return;
   std::memset(out, 0, sizeof(*out));
-  out->ram_budget_bytes = 0;
+  out->ram_budget_bytes = SIPLLM_RAM_BUDGET_AUTO;   // #78: resident when it fits
   out->threads = 0;   // hardware_concurrency
   out->max_ctx = 0;   // engine default
   out->n_buffers = 2;
@@ -86,7 +86,7 @@ void sipllm_params_default(sipllm_params* out) {
   out->stream_lm_head = 0;
   out->residency_fp32 = 0;
   out->force_budget = 0;
-  out->schedule_policy = SIPLLM_SCHED_PROPORTIONAL2;
+  out->schedule_policy = SIPLLM_SCHED_FIXED16;
   out->spec_draft = 0;
 }
 
@@ -127,8 +127,16 @@ sipllm_ctx* sipllm_open(const char* model_path, const sipllm_params* p,
 
     auto src = open_model(model_path, opt.use_mmap);
     auto ctx = std::unique_ptr<sipllm_ctx>(new sipllm_ctx());
+    // #78: AUTO resolves to half of the available RAM, best effort (forced, so an
+    // infeasible plan falls back to the minimum configuration instead of failing).
+    size_t ram_budget = (size_t)params.ram_budget_bytes;
+    bool force_budget = params.force_budget != 0;
+    if (params.ram_budget_bytes == SIPLLM_RAM_BUDGET_AUTO) {
+      ram_budget = auto_ram_budget(available_ram_bytes());
+      force_budget = ram_budget > 0;
+    }
     ctx->rt = std::make_unique<Runtime>(std::move(src), opt, params.max_ctx, threads,
-                                        params.ram_budget_bytes, params.force_budget != 0);
+                                        ram_budget, force_budget);
     if (params.spec_draft > 0) ctx->rt->enable_speculative_decoding(params.spec_draft);
     if (ctx->rt->thread_pool()) {
       ctx->rt->thread_pool()->set_policy(
@@ -299,7 +307,7 @@ int32_t sipllm_embed(sipllm_ctx* ctx, const char* text, int32_t pooling,
   }
 }
 
-const char* sipllm_version(void) { return "0.4.0"; }
+const char* sipllm_version(void) { return "0.6.0"; }
 
 int32_t sipllm_vulkan_compiled(void) { return vulkan_compiled() ? 1 : 0; }
 int32_t sipllm_vulkan_available(void) { return vulkan_available() ? 1 : 0; }

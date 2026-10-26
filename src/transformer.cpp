@@ -22,7 +22,9 @@ Transformer::Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool)
     q_.assign(cfg_.q_dim(), 0.f);
     k_.assign(cfg_.kv_dim(), 0.f);
     v_.assign(cfg_.kv_dim(), 0.f);
-    att_.assign(kv_->max_ctx(), 0.f);
+    // One max_ctx score buffer per pool worker: attention runs one (token, head)
+    // item per work unit on the pool.
+    att_.assign((size_t)kv_->max_ctx() * (pool_ ? std::max(1, pool_->size()) : 1), 0.f);
     attn_out_.assign(cfg_.q_dim(), 0.f);
     proj_.assign(cfg_.dim, 0.f);
     hb_.assign(cfg_.ffn_dim, 0.f);
@@ -50,6 +52,22 @@ static inline float llama3_scale_freq(float freq, const Transformer::RopeScaling
     return (1.0f - smooth) * (freq / rs.factor) + smooth * freq;  // medium: interpolate
 }
 
+// #80: cos/sin depend on (pos, pair) only, so each RoPE call computes them once
+// and applies them to every head instead of once per head. Same expressions in
+// the same order, so the rotated values are bit-identical.
+namespace {
+struct RopeAngles {
+    static constexpr int64_t kStack = 256;
+    float c_stack[kStack], s_stack[kStack];
+    std::vector<float> c_heap, s_heap;
+    float* c = c_stack;
+    float* s = s_stack;
+    explicit RopeAngles(int64_t half) {
+        if (half > kStack) { c_heap.resize(half); s_heap.resize(half); c = c_heap.data(); s = s_heap.data(); }
+    }
+};
+} // namespace
+
 // Rotary embedding on adjacent element pairs (ggml "rope_norm"). GGUF Llama
 // weights are permuted at conversion time so that this adjacent-pair rotation
 // reproduces HF's rotate_half — so we apply exactly this to both q and k. This
@@ -58,12 +76,16 @@ static inline float llama3_scale_freq(float freq, const Transformer::RopeScaling
 void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                              int64_t pos, float theta_base) {
     const int64_t half = head_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -78,13 +100,17 @@ void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                              int64_t pos, float theta_base, const RopeScaling& rs) {
     if (!rs.llama3) { apply_rope(vec, n_heads, head_dim, pos, theta_base); return; }
     const int64_t half = head_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
+        freq = llama3_scale_freq(freq, rs);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
-            freq = llama3_scale_freq(freq, rs);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -105,12 +131,16 @@ static inline void add_bias(float* y, const WeightRef& b, int64_t n) {
 static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
                      int64_t rot_dim, int64_t pos, float theta) {
     const int64_t half = rot_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -147,6 +177,37 @@ static void rmsnorm_noweight(float* x, int64_t n, float eps) {
     for (int64_t i = 0; i < n; ++i) x[i] *= scale;
 }
 
+// The q/k and post-sublayer RMS norms follow the block's norm kind: (1+w) for
+// raw HF Gemma weights, plain w for GGUF (the converter bakes in the +1).
+static inline void rms_norm_kind(NormKind k, float* out, const float* x, const float* w,
+                                 int64_t n, float eps) {
+    if (k == NormKind::RMSNormGemma) rmsnorm_gemma(out, x, w, n, eps);
+    else rmsnorm(out, x, w, n, eps);
+}
+
+// Rotate-half RoPE (ggml "rope_neox"): pairs (i, i + rot_dim/2) over the first
+// `rot_dim` dims of each head; the rest pass through. For archs whose GGUF q/k
+// are not permuted at conversion (Qwen2, Gemma, Phi).
+void Transformer::apply_rope_neox(float* vec, int64_t n_heads, int64_t head_dim,
+                                  int64_t rot_dim, int64_t pos, float theta) {
+    const int64_t half = rot_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* p = vec + h * head_dim;
+        for (int64_t i = 0; i < half; ++i) {
+            const float c = a.c[i], s = a.s[i];
+            float x0 = p[i], x1 = p[i + half];
+            p[i]        = x0 * c - x1 * s;
+            p[i + half] = x0 * s + x1 * c;
+        }
+    }
+}
+
 // Single data-driven transformer block pipeline (Issue #44).
 // Conditionally applies all per-architecture features based on cfg_.block_spec.
 void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
@@ -168,12 +229,6 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
     const int64_t group = n_heads / n_kv;
     if (group > 64) throw std::runtime_error("attention: more than 64 query heads per KV head");
     const BlockSpec& b = cfg_.block_spec;
-    // Weighted RMSNorm for the post/qk norms: Gemma 2/3 store w with the +1
-    // offset applied at runtime; Gemma 4 GGUFs store the effective scale.
-    auto norm_w = [&](float* out, const float* in, const WeightRef& w, int64_t n) {
-        if (b.plain_norm_weights) rmsnorm(out, in, static_cast<const float*>(w.data), n, cfg_.rms_eps);
-        else rmsnorm_gemma(out, in, static_cast<const float*>(w.data), n, cfg_.rms_eps);
-    };
 
     // Ensure buffers are large enough for bs (sized by the widest layer).
     if (xb_.size() < (size_t)bs * dim) {
@@ -187,10 +242,9 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
         hb_.resize(bs * cfg_.ffn_dim);
         hb2_.resize(bs * cfg_.ffn_dim);
         fused_.resize(bs * std::max(q_max + 2 * kv_max, 2 * cfg_.ffn_dim));
-        if (b.n_experts > 0) {
-            router_.resize(bs * b.n_experts);
-            moe_.resize(bs * dim);
-        }
+        if (b.n_experts > 0) router_.resize(bs * b.n_experts);
+        // moe_ is also the parallel-residual FFN output (Phi-2), bs rows of dim.
+        if (b.n_experts > 0 || b.parallel_residual) moe_.resize(bs * dim);
     }
 
     // --- 1. Pre-Attention Norm ---
@@ -244,12 +298,12 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
             if (qn.valid())
                 for (int64_t h = 0; h < n_heads; ++h) {
                     float* qh = q_.data() + i * q_dim + h * hd;
-                    norm_w(qh, qh, qn, hd);
+                    rms_norm_kind(b.norm, qh, qh, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
                 }
             if (kn.valid())
                 for (int64_t h = 0; h < n_kv; ++h) {
                     float* kh = k_.data() + i * kv_dim + h * hd;
-                    norm_w(kh, kh, kn, hd);
+                    rms_norm_kind(b.norm, kh, kh, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
                 }
         }
     }
@@ -283,10 +337,17 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
             }
             switch (b.rope) {
                 case RopeKind::None: break;
-                case RopeKind::Partial:
-                    rope_rot(qi, n_heads, hd, b.rope_dim > 0 ? b.rope_dim : hd, pos_i, theta_base);
-                    rope_rot(ki, n_kv,    hd, b.rope_dim > 0 ? b.rope_dim : hd, pos_i, theta_base);
+                case RopeKind::Partial: {
+                    const int64_t rd = b.rope_dim > 0 ? b.rope_dim : hd;
+                    if (b.rope_neox) {
+                        apply_rope_neox(qi, n_heads, hd, rd, pos_i, theta_base);
+                        apply_rope_neox(ki, n_kv,    hd, rd, pos_i, theta_base);
+                    } else {
+                        rope_rot(qi, n_heads, hd, rd, pos_i, theta_base);
+                        rope_rot(ki, n_kv,    hd, rd, pos_i, theta_base);
+                    }
                     break;
+                }
                 case RopeKind::Llama3Scaled: {
                     RopeScaling rs;
                     rs.llama3 = true;
@@ -299,8 +360,13 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
                     break;
                 }
                 case RopeKind::Full:
-                    apply_rope(qi, n_heads, hd, pos_i, theta_base);
-                    apply_rope(ki, n_kv,    hd, pos_i, theta_base);
+                    if (b.rope_neox) {
+                        apply_rope_neox(qi, n_heads, hd, hd, pos_i, theta_base);
+                        apply_rope_neox(ki, n_kv,    hd, hd, pos_i, theta_base);
+                    } else {
+                        apply_rope(qi, n_heads, hd, pos_i, theta_base);
+                        apply_rope(ki, n_kv,    hd, pos_i, theta_base);
+                    }
                     break;
             }
         }
@@ -601,7 +667,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
         add_bias(proj_i, loader_->getWeight(Role::AttnOutBias), dim);
         if (b.post_attn_norm) {
             WeightRef apn = loader_->getWeight(Role::AttnPostNorm);
-            if (apn.valid()) norm_w(proj_i, proj_i, apn, dim);
+            if (apn.valid()) rms_norm_kind(b.norm, proj_i, proj_i, static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
         }
         vec_add_inplace(x_i, proj_i, dim);
     }
@@ -732,7 +798,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
         WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
         for (int64_t i = 0; i < bs; ++i) {
             float* ffn_out_i = ffn_out + i * dim;
-            if (fpn.valid()) norm_w(ffn_out_i, ffn_out_i, fpn, dim);
+            if (fpn.valid()) rms_norm_kind(b.norm, ffn_out_i, ffn_out_i, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
         }
     }
 
@@ -760,6 +826,13 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
     if (profiling_) { timings_.assign(cfg_.n_layers, LayerTiming{}); }
 
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        if (!remote_.empty()) {                    // #70: layers on another node
+            if (const RemoteSegment* r = remote_at(l)) {
+                r->exec->run(r->begin, r->end, x_.data(), 1, pos);
+                l = r->end - 1;
+                continue;
+            }
+        }
         if (profiling_) {
             double t0 = now_sec();
             loader_->loadLayer((int)l);        // may block awaiting prefetch
@@ -892,6 +965,13 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
     // causal history each position needs is already in the KV cache).
     const int64_t C = prefill_batch_; // batched GEMM size
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        if (!remote_.empty()) {                    // #70: layers on another node
+            if (const RemoteSegment* r = remote_at(l)) {
+                r->exec->run(r->begin, r->end, resid_.data(), n, start_pos);
+                l = r->end - 1;
+                continue;
+            }
+        }
         loader_->loadLayer((int)l);
         for (int64_t i = 0; i < n; i += C) {
             int64_t bs = std::min(C, n - i);
@@ -928,6 +1008,7 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
 
 
 const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t start_pos) {
+    LLM_CHECK(remote_.empty(), "speculative decoding is not supported with remote layers (--nodes)");
     if (n <= 0) return logits_.data();
     LLM_CHECK(start_pos + n - 1 < kv_->max_ctx(),
               "spec_forward: position exceeds context window");
@@ -985,4 +1066,31 @@ const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t
     
     return spec_logits_.data();
 }
+void Transformer::set_remote_segments(std::vector<RemoteSegment> segs) {
+    int64_t prev_end = 0;
+    for (const RemoteSegment& r : segs) {
+        LLM_CHECK(r.exec != nullptr, "remote segment without an executor");
+        LLM_CHECK(r.begin >= prev_end && r.begin < r.end && r.end <= cfg_.n_layers,
+                  "remote segments must be sorted, non-overlapping and inside the model");
+        prev_end = r.end;
+    }
+    remote_ = std::move(segs);
+}
+
+void Transformer::run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos) {
+    LLM_CHECK(begin >= 0 && begin < end && end <= cfg_.n_layers, "run_layers: bad layer range");
+    LLM_CHECK(n > 0 && start_pos + n - 1 < kv_->max_ctx(), "run_layers: positions exceed context window");
+    const int64_t dim = cfg_.dim;
+    const int64_t C = 32;   // same chunking as prefill(): identical arithmetic
+    for (int64_t l = begin; l < end; ++l) {
+        loader_->loadLayer((int)l);
+        for (int64_t i = 0; i < n; i += C) {
+            const int64_t bs = std::min(C, n - i);
+            block(l, start_pos + i, bs, resid + (size_t)i * dim);
+        }
+        loader_->unloadLayer();
+    }
+    kv_->set_seq_len(start_pos + n);
+}
+
 } // namespace llm

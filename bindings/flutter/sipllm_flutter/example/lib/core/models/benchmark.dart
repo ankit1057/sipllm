@@ -69,7 +69,9 @@ class BenchmarkResult {
   String toMarkdown() {
     String mib(int b) => '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
     final budget =
-        ramBudgetBytes == 0 ? 'unlimited (stream)' : mib(ramBudgetBytes);
+        ramBudgetBytes == 0
+            ? 'unlimited (stream)'
+            : (ramBudgetBytes < 0 ? 'auto (half of free RAM)' : mib(ramBudgetBytes));
     return '''
 ## SipLLM mobile benchmark — $modelName ($quant)
 

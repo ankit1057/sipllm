@@ -231,6 +231,129 @@ TEST(ram_budget_planner) {
     CHECK_MSG(p6.n_pinned_est == 8 && p6.n_buffers == 1, "all-pinned still wins when it fits");
 }
 
+// Issue #81: the planner prices the KV cache once, at the full chosen context.
+// Growing it by doubling allocates the new buffers while the old ones are still
+// live, so the peak is old+new (1.5-1.85x the priced KV). In budget mode the KV
+// must therefore be allocated once, at the planned context, and never grow.
+#include "llm/runtime.h"
+
+static std::string make_toy_kv81() {
+    ToyConfig tc; tc.n_layers = 2; tc.dim = 32; tc.n_heads = 4; tc.n_kv_heads = 2;
+    tc.ffn_dim = 64; tc.vocab_size = 256; tc.ctx_len = 1024; tc.seed = 81;
+    std::string path = scratch("toy_rb_kv81.llmw");
+    write_toy_model(path, tc);
+    return path;
+}
+
+TEST(ram_budget_kv_allocated_once_at_planned_ctx) {
+    const std::string path = make_toy_kv81();
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false;
+    Runtime rt(open_model(path), opt, 1024, 1, /*ram_budget_total=*/64u << 20);
+    const size_t full = 2ull * 2 /*layers*/ * 1024 * rt.config().kv_dim() * sizeof(float);
+    CHECK_MSG(rt.kv_bytes() == full, "budget mode allocates the full planned KV up front: got " +
+                                     std::to_string(rt.kv_bytes()) + ", want " + std::to_string(full));
+    SamplerConfig scfg; scfg.temperature = 0.0f;
+    rt.generate("The capital of France is", 80, scfg, nullptr, nullptr);
+    CHECK_MSG(rt.kv_bytes() == full, "KV never grows (no old+new transient) in budget mode");
+}
+
+TEST(ram_budget_zero_keeps_lazy_kv_growth) {
+    // Rule 3: without a budget the KV still starts small and grows on demand.
+    const std::string path = make_toy_kv81();
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false;
+    Runtime rt(open_model(path), opt, 1024, 1);
+    const size_t full = 2ull * 2 * 1024 * rt.config().kv_dim() * sizeof(float);
+    CHECK_MSG(rt.kv_bytes() < full, "no budget: KV starts below the full context");
+}
+
+TEST(ram_budget_refuses_unpriced_semantic_cache) {
+    // The semantic cache is outside the planner's ledger, so a budgeted runtime
+    // must refuse it unless the budget was forced.
+    const std::string path = make_toy_kv81();
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false;
+    Runtime rt(open_model(path), opt, 1024, 1, 64u << 20);
+    bool threw = false;
+    try { rt.enable_semantic_cache(1u << 20); } catch (const std::exception&) { threw = true; }
+    CHECK_MSG(threw, "--semantic-cache-budget with --ram-budget is refused");
+
+    Runtime forced(open_model(path), opt, 1024, 1, 64u << 20, /*force_budget=*/true);
+    bool threw_forced = false;
+    try { forced.enable_semantic_cache(1u << 20); } catch (const std::exception&) { threw_forced = true; }
+    CHECK_MSG(!threw_forced, "--ram-budget-force allows it");
+
+    Runtime unbudgeted(open_model(path), opt, 1024, 1);
+    bool threw_unbudgeted = false;
+    try { unbudgeted.enable_semantic_cache(1u << 20); } catch (const std::exception&) { threw_unbudgeted = true; }
+    CHECK_MSG(!threw_unbudgeted, "no budget: semantic cache allowed as before");
+}
+
+// The budget is SipLLM's own share. Memory the host process already holds (an
+// app embedding the runtime through the C ABI) must not count against it, so
+// the measured base is what opening the model and building the tokenizer add.
+#include <cstring>
+
+TEST(ram_budget_ignores_host_memory) {
+    const std::string path = make_toy_kv81();
+    LayerLoader::Options opt; opt.residency = Residency::FP32; opt.async = false;
+    std::vector<uint8_t> host(200u << 20);
+    std::memset(host.data(), 1, host.size());   // resident, not just reserved
+    bool threw = false;
+    try {
+        Runtime rt(open_model(path), opt, 1024, 1, 64u << 20);
+    } catch (const std::exception&) { threw = true; }
+    CHECK_MSG(!threw, "a 64 MB budget still fits beside 200 MB of host memory");
+    CHECK(host[host.size() / 2] == 1);
+}
+
+// Issue #78: with no --ram-budget the CLI used to stream every layer on every
+// token even when the model fit in RAM. The default is now half of the RAM the
+// OS reports as available; an explicit --ram-budget 0 still streams everything.
+#include "llm/device_profile.h"
+
+TEST(auto_ram_budget_is_half_of_available) {
+    CHECK(auto_ram_budget(4096ull << 20) == (2048ull << 20));
+    CHECK(auto_ram_budget(1) == 0);
+    CHECK_MSG(auto_ram_budget(0) == 0, "unknown available RAM keeps the old streaming default");
+}
+
+TEST(available_ram_bytes_reports_something_on_this_host) {
+    const size_t avail = available_ram_bytes();
+    CHECK_MSG(avail > (64ull << 20), "available RAM read from the OS: " + std::to_string(avail));
+    CHECK_MSG(avail <= get_hardware_info().ram_bytes, "available RAM cannot exceed total RAM");
+}
+
+// The ledger's base was a fixed 24 MB, calibrated on 32k-vocab models whose
+// open model + tokenizer cost ~8 MB of RSS. A 152k-vocab model (Qwen2.5) costs
+// ~37 MB, so its runs overshot the budget by 8-14 MB. The planner now prices
+// the base from the RSS measured at plan time (plus the same 16 MB of runtime
+// slop the 24 MB constant held), never below the old constant.
+TEST(planner_base_tracks_measured_rss) {
+    ToyConfig tc; tc.n_layers = 8; tc.dim = 64; tc.n_heads = 4; tc.n_kv_heads = 2;
+    tc.ffn_dim = 128; tc.vocab_size = 48; tc.seed = 99; tc.ctx_len = 1024;
+    std::string path = scratch("toy_rb_base.llmw");
+    write_toy_model(path, tc);
+    ModelFile f(path, false);
+    ModelConfig cfg = ModelConfig::from_source(f);
+    const size_t MiB = 1024 * 1024;
+
+    BudgetRequest req;
+    req.budget_bytes = 1024 * MiB;
+    req.ctx_req = 512; req.ctx_explicit = true;
+
+    // Unknown (0) or small measured RSS keeps the old constant: prior plans unchanged.
+    MemoryPlan p0 = plan_memory(f, cfg, req);
+    CHECK_MSG(p0.ledger.base == 24 * MiB, "unknown measured RSS keeps the 24 MB base");
+    req.measured_base = 8 * MiB;
+    MemoryPlan p8 = plan_memory(f, cfg, req);
+    CHECK_MSG(p8.ledger.base == 24 * MiB, "a 32k-vocab-sized base reproduces the old constant");
+
+    // A large-vocab model's measured RSS raises the base and the planned total.
+    req.measured_base = 37 * MiB;
+    MemoryPlan p37 = plan_memory(f, cfg, req);
+    CHECK_MSG(p37.ledger.base == 53 * MiB, "base = measured RSS + 16 MB runtime slop");
+    CHECK_MSG(p37.ledger.total() <= req.budget_bytes, "still plans under the budget");
+}
+
 int main() {
     printf("== test_ram_budget ==\n");
     return llmtest::run_all();

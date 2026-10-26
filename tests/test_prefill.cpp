@@ -223,6 +223,41 @@ TEST(attention_bytes_independent_of_thread_count) {
                              "threads=" + std::to_string(threads));
 }
 
+// Attention runs on the thread pool (one work item per token x head). Every
+// item does exactly the arithmetic the serial loop did, so logits must be
+// bit-identical for any thread count, for prefill and decode, FP32 and Q8 KV.
+#include "llm/runtime.h"
+#include <cstring>
+
+static std::vector<float> run_threads(const std::string& path, int threads, KVPrecision kvp,
+                                      std::string* text) {
+    LayerLoader::Options opt; opt.residency = Residency::Quantized; opt.async = false;
+    Runtime rt(open_model(path), opt, 256, threads, 0, false, kvp);
+    SamplerConfig scfg; scfg.temperature = 0.0f;
+    // A long prompt makes prefill attention span many positions and heads.
+    std::string prompt;
+    for (int i = 0; i < 5; ++i) prompt += "the quick brown fox jumps over the lazy dog ";
+    *text = rt.generate(prompt, 24, scfg, nullptr, nullptr);
+    return rt.first_logits();
+}
+
+TEST(attention_threads_bit_identical) {
+    // head_dim 32: the Q8_0 KV path quantizes per head in blocks of 32.
+    ToyConfig tc; tc.n_layers = 3; tc.dim = 256; tc.n_heads = 8; tc.n_kv_heads = 2;
+    tc.ffn_dim = 256; tc.vocab_size = 256; tc.ctx_len = 256; tc.seed = 2026;
+    std::string path = scratch("toy_attn_threads.llmw");
+    write_toy_model(path, tc);
+    for (KVPrecision kvp : {KVPrecision::FP32, KVPrecision::Q8_0}) {
+        std::string t1, t4;
+        const std::vector<float> l1 = run_threads(path, 1, kvp, &t1);
+        const std::vector<float> l4 = run_threads(path, 4, kvp, &t4);
+        CHECK_MSG(l1.size() == l4.size() && !l1.empty(), "first logits present");
+        CHECK_MSG(std::memcmp(l1.data(), l4.data(), l1.size() * sizeof(float)) == 0,
+                  "prefill logits bit-identical across thread counts");
+        CHECK_MSG(t1 == t4, "greedy decode identical across thread counts");
+    }
+}
+
 int main() {
     printf("== test_prefill ==\n");
     return llmtest::run_all();

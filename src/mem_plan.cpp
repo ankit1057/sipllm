@@ -49,7 +49,13 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
 
     // 1. Ledger fixed costs
     MemLedger fixed;
-    fixed.base = 24 * 1024 * 1024; // 24 MB process slop
+    // Process slop: the RSS SipLLM itself added by plan time (model metadata +
+    // tokenizer, measured by the caller; not an embedding host's memory) plus
+    // 16 MB for the binary, allocator, stacks and prefill chunks. Never below
+    // the 24 MB constant this replaced, which was calibrated on 32k-vocab
+    // models (~7 MB added); a 152k-vocab model adds ~35 MB and overshot its
+    // budget by 8-14 MB.
+    fixed.base = std::max<size_t>(24 * 1024 * 1024, req.measured_base + 16 * 1024 * 1024);
     fixed.scratch = (size_t)(cfg.dim * 8 + cfg.ffn_dim * 2 + cfg.q_dim() + 2 * cfg.kv_dim()) * sizeof(float);
     fixed.logits = (size_t)cfg.vocab_size * sizeof(float);
 
@@ -138,7 +144,7 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
     bool found = false;
 
     for (int ctx : ctx_candidates) {
-        size_t attn = (size_t)ctx * sizeof(float);
+        size_t attn = (size_t)ctx * sizeof(float) * (size_t)std::max(1, req.n_threads);
         size_t resid = (size_t)ctx * cfg.dim * sizeof(float);
         
         size_t kv = cfg.kv_cache_bytes(ctx, req.kv_precision == KVPrecision::Q8_0);
@@ -184,7 +190,7 @@ MemoryPlan plan_memory(const WeightSource& src, const ModelConfig& cfg,
     if (!found) {
         // Impossible to fit even the minimum configuration.
         int min_ctx = ctx_candidates.back();
-        size_t min_attn = (size_t)min_ctx * sizeof(float);
+        size_t min_attn = (size_t)min_ctx * sizeof(float) * (size_t)std::max(1, req.n_threads);
         size_t min_resid = (size_t)min_ctx * cfg.dim * sizeof(float);
         size_t min_kv = cfg.kv_cache_bytes(min_ctx, false);
         size_t min_head = tied ? 0 : out_streamed_size;
