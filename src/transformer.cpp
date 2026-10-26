@@ -355,7 +355,20 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             const int64_t window_len = pos_i - start_t + 1;
             const float* qh = q_.data() + i * q_dim + h * hd;
             const int64_t kvh = h / group;
-            for (int64_t t = start_t; t <= pos_i; ++t) {
+            int64_t t = start_t;
+            if (!q8 && hd % 16 == 0) {
+                // Four keys per pass; each score is exactly dot_f32's result.
+                float d4[4];
+                for (; t + 3 <= pos_i; t += 4) {
+                    dot4_f32(qh, (const float*)kvc->k_ptr(layer, t) + kvh * hd,
+                             (const float*)kvc->k_ptr(layer, t + 1) + kvh * hd,
+                             (const float*)kvc->k_ptr(layer, t + 2) + kvh * hd,
+                             (const float*)kvc->k_ptr(layer, t + 3) + kvh * hd, hd, d4);
+                    att[t] = d4[0] * scale; att[t + 1] = d4[1] * scale;
+                    att[t + 2] = d4[2] * scale; att[t + 3] = d4[3] * scale;
+                }
+            }
+            for (; t <= pos_i; ++t) {
                 if (q8) {
                     const uint8_t* k8 = (const uint8_t*)kvc->k_ptr(layer, t) + kvh * q8_bytes;
                     dequantize_row(DType::Q8_0, k8, hs, hd);
@@ -367,6 +380,15 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             if (b.attn_softcap) softcap_inplace(att + start_t, window_len, cfg_.attn_logit_softcap);
             softmax(att + start_t, window_len);
             float* out = attn_out_.data() + i * q_dim + h * hd;
+            if (!q8 && hd % 64 == 0) {
+                // Output kept in registers, 64 dims at a time; per element the
+                // same fused multiply-adds in the same t order as axpy_f32.
+                for (int64_t d0 = 0; d0 < hd; d0 += 64)
+                    weighted_sum64_f32(out + d0, att, start_t, pos_i, [&](int64_t tt) {
+                        return (const float*)kvc->v_ptr(layer, tt) + kvh * hd + d0;
+                    });
+                continue;
+            }
             for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
             for (int64_t t = start_t; t <= pos_i; ++t) {
                 if (q8) {
