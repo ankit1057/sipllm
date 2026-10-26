@@ -1,0 +1,453 @@
+{
+ "meta": {
+  "benchmark": "wave 15: Q4_K weights interleaved 4 rows (IL4), opt-in SIPLLM_FAST_LAYOUT=il4",
+  "date": "2026-10-19",
+  "branch": "wave15-interleave",
+  "model": "tinyllama-1.1b Q4_K_M",
+  "prompt": "prompt128 (135 tokens)",
+  "settings": "--fast --greedy -n 32, ctx 512, 4 threads, fully resident (all layers pinned, 134 Q4_K matrices interleaved)",
+  "format": "IL4 block = exactly 4 GGUF Q4_K blocks (576 B), repacked in place in pinned slots; streamed layers unchanged",
+  "hardware": "OnePlus IV2201 / Dimensity 900 (big cores 1.14-1.3 GHz during runs) and Apple M3 (load1m 2.2-2.4)"
+ },
+ "kernel_level_phone_bs32_and_bs1": {
+  "q/o": {
+   "bs32_x": 1.97,
+   "bs1_x": 1.3
+  },
+  "gate/up": {
+   "bs32_x": 2.06,
+   "bs1_x": 1.38
+  },
+  "down_q4k": {
+   "bs32_x": 1.96,
+   "bs1_x": 1.41
+  },
+  "repack_ms": {
+   "2.4MB": 1.26,
+   "6.5MB": 2.3
+  },
+  "note": "throwaway il4c spike, same-size format with byte-interleaved scales"
+ },
+ "phone_e2e": [
+  {
+   "rep": 1,
+   "layout": "native",
+   "decode_tok_s": 8.51,
+   "prefill_tok_s": 13.04,
+   "ttft_s": 10.35,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1300000.0
+  },
+  {
+   "rep": 1,
+   "layout": "il4",
+   "decode_tok_s": 9.2,
+   "prefill_tok_s": 19.29,
+   "ttft_s": 6.999,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1300000.0
+  },
+  {
+   "rep": 2,
+   "layout": "native",
+   "decode_tok_s": 8.64,
+   "prefill_tok_s": 13.04,
+   "ttft_s": 10.35,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1300000.0
+  },
+  {
+   "rep": 2,
+   "layout": "il4",
+   "decode_tok_s": 9.86,
+   "prefill_tok_s": 19.42,
+   "ttft_s": 6.951,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1300000.0
+  },
+  {
+   "rep": 3,
+   "layout": "native",
+   "decode_tok_s": 7.57,
+   "prefill_tok_s": 12.73,
+   "ttft_s": 10.603,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1300000.0
+  },
+  {
+   "rep": 3,
+   "layout": "il4",
+   "decode_tok_s": 8.57,
+   "prefill_tok_s": 16.82,
+   "ttft_s": 8.025,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1140000.0
+  }
+ ],
+ "m3_e2e": [
+  {
+   "rep": 1,
+   "layout": "native",
+   "load1m": 2.15,
+   "decode_tok_s": 57.93,
+   "prefill_tok_s": 100.04,
+   "ttft_s": 1.349,
+   "peak_rss_mb": 666.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 1,
+   "layout": "il4",
+   "load1m": 2.38,
+   "decode_tok_s": 62.88,
+   "prefill_tok_s": 162.6,
+   "ttft_s": 0.83,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 2,
+   "layout": "native",
+   "load1m": 2.38,
+   "decode_tok_s": 57.61,
+   "prefill_tok_s": 96.76,
+   "ttft_s": 1.395,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 2,
+   "layout": "il4",
+   "load1m": 2.38,
+   "decode_tok_s": 66.38,
+   "prefill_tok_s": 157.61,
+   "ttft_s": 0.857,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 3,
+   "layout": "native",
+   "load1m": 2.27,
+   "decode_tok_s": 50.86,
+   "prefill_tok_s": 94.69,
+   "ttft_s": 1.426,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 3,
+   "layout": "il4",
+   "load1m": 2.27,
+   "decode_tok_s": 66.37,
+   "prefill_tok_s": 157.4,
+   "ttft_s": 0.858,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  }
+ ],
+ "pre_registered": {
+  "prefill_phone_expected_tok_s": "23-29",
+  "decode_phone_expected": "+15-30%",
+  "accuracy_bar": "KL vs exact <= 1.1x native --fast, top-1 within 0.5 pt (tinyllama, smollm2-135m)"
+ },
+ "accuracy": {
+  "pre_registered_sample_256_builtin": {
+   "native": {
+    "kl_mean": 0.000529,
+    "top1": 99.61
+   },
+   "il4": {
+    "kl_mean": 0.000644,
+    "top1": 98.05
+   },
+   "result": "FAIL (1.22x, -1.56 pt)"
+  },
+  "follow_up_README_1024": {
+   "native": {
+    "kl_mean": 0.00057,
+    "top1": 99.12
+   },
+   "il4": {
+    "kl_mean": 0.00055,
+    "top1": 98.63
+   }
+  },
+  "follow_up_CHANGELOG_1024": {
+   "native": {
+    "kl_mean": 0.000662,
+    "top1": 98.63
+   },
+   "il4": {
+    "kl_mean": 0.000733,
+    "top1": 98.05
+   }
+  },
+  "follow_up_combined_2048": {
+   "kl_ratio": 1.04,
+   "top1_gap_pt": -0.54,
+   "result": "KL pass, top-1 misses by 0.04 pt"
+  },
+  "smollm2-135m": "no Q4_K matrices (Q8_0 model): IL4 not applied, identical",
+  "il4_vs_native_fast_direct": {
+   "kl_mean": 0.00056,
+   "note": "same size as fast-vs-exact"
+  },
+  "mechanism": "per-matmul IL4 vs row-major differ ~1e-6 relative (float summation order only; verified on real tensors); residual difference stays ~2e-7 through layer 12, then jumps 70x at layer 13-14: an int8 activation rounding flip. Any reordering of the int8 path samples a different but equal-size quantization noise.",
+  "noise_control_2026-10-19": {
+   "method": "native --fast with its layer-0 residual scaled by (1+e), e in {+1e-7,-1e-7,+3e-7} (~1 ulp), vs exact; same 1024-token README/CHANGELOG samples; tools/fast_accuracy + hidden-hook nudge (throwaway)",
+   "rows": [
+    {
+     "text": "README",
+     "variant": "native",
+     "kl_mean": 0.00057,
+     "kl_p99": 0.004945,
+     "top1_pct": 99.12
+    },
+    {
+     "text": "README",
+     "variant": "nudge+",
+     "kl_mean": 0.000614,
+     "kl_p99": 0.003596,
+     "top1_pct": 98.93
+    },
+    {
+     "text": "README",
+     "variant": "nudge-",
+     "kl_mean": 0.000594,
+     "kl_p99": 0.004202,
+     "top1_pct": 98.93
+    },
+    {
+     "text": "README",
+     "variant": "nudge3",
+     "kl_mean": 0.00058,
+     "kl_p99": 0.005431,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "README",
+     "variant": "il4",
+     "kl_mean": 0.00055,
+     "kl_p99": 0.004711,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "native",
+     "kl_mean": 0.000662,
+     "kl_p99": 0.005882,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "nudge+",
+     "kl_mean": 0.000645,
+     "kl_p99": 0.006233,
+     "top1_pct": 98.34
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "nudge-",
+     "kl_mean": 0.000642,
+     "kl_p99": 0.005089,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "nudge3",
+     "kl_mean": 0.000645,
+     "kl_p99": 0.005338,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "il4",
+     "kl_mean": 0.000733,
+     "kl_p99": 0.007055,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "README",
+     "variant": "il4+",
+     "kl_mean": 0.00058,
+     "kl_p99": 0.004173,
+     "top1_pct": 99.41
+    },
+    {
+     "text": "README",
+     "variant": "il4-",
+     "kl_mean": 0.000557,
+     "kl_p99": 0.004191,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "README",
+     "variant": "il43",
+     "kl_mean": 0.000602,
+     "kl_p99": 0.004659,
+     "top1_pct": 98.54
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "il4+",
+     "kl_mean": 0.000692,
+     "kl_p99": 0.005868,
+     "top1_pct": 98.54
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "il4-",
+     "kl_mean": 0.000718,
+     "kl_p99": 0.006797,
+     "top1_pct": 98.73
+    },
+    {
+     "text": "CHANGELOG",
+     "variant": "il43",
+     "kl_mean": 0.000843,
+     "kl_p99": 0.007352,
+     "top1_pct": 98.44
+    }
+   ],
+   "reading": "With 4 nudged draws per family: top-1 ranges overlap (README native 98.83-99.12 vs IL4 98.54-99.41; CHANGELOG 98.34-98.83 vs 98.05-98.73); KL README IL4 slightly lower, CHANGELOG IL4 ~15% higher. Nudged draws share most of a trajectory, so they are correlated, not independent samples."
+  },
+  "sign_test_10_docs_512": {
+   "method": "native --fast vs IL4 vs exact on 10 independent repo docs (docs/**/*.md), 512 tokens each, one draw per variant",
+   "rows": [
+    {
+     "text": "cpp-engine",
+     "variant": "native",
+     "kl_mean": 0.000472,
+     "top1_pct": 99.41
+    },
+    {
+     "text": "cpp-engine",
+     "variant": "il4",
+     "kl_mean": 0.000483,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "dart",
+     "variant": "native",
+     "kl_mean": 0.00055,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "dart",
+     "variant": "il4",
+     "kl_mean": 0.00051,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "flutter-runtime",
+     "variant": "native",
+     "kl_mean": 0.00052,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "flutter-runtime",
+     "variant": "il4",
+     "kl_mean": 0.000532,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "benchmarks",
+     "variant": "native",
+     "kl_mean": 0.000524,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "benchmarks",
+     "variant": "il4",
+     "kl_mean": 0.000467,
+     "top1_pct": 98.24
+    },
+    {
+     "text": "performance-history",
+     "variant": "native",
+     "kl_mean": 0.000572,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "performance-history",
+     "variant": "il4",
+     "kl_mean": 0.000585,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "transformer",
+     "variant": "native",
+     "kl_mean": 0.000585,
+     "top1_pct": 98.24
+    },
+    {
+     "text": "transformer",
+     "variant": "il4",
+     "kl_mean": 0.000641,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "quantization",
+     "variant": "native",
+     "kl_mean": 0.000502,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "quantization",
+     "variant": "il4",
+     "kl_mean": 0.000545,
+     "top1_pct": 98.05
+    },
+    {
+     "text": "memory-planner",
+     "variant": "native",
+     "kl_mean": 0.000449,
+     "top1_pct": 98.24
+    },
+    {
+     "text": "memory-planner",
+     "variant": "il4",
+     "kl_mean": 0.000484,
+     "top1_pct": 98.63
+    },
+    {
+     "text": "faq",
+     "variant": "native",
+     "kl_mean": 0.000586,
+     "top1_pct": 97.85
+    },
+    {
+     "text": "faq",
+     "variant": "il4",
+     "kl_mean": 0.000534,
+     "top1_pct": 98.44
+    },
+    {
+     "text": "layer-residency",
+     "variant": "native",
+     "kl_mean": 0.000478,
+     "top1_pct": 98.83
+    },
+    {
+     "text": "layer-residency",
+     "variant": "il4",
+     "kl_mean": 0.000493,
+     "top1_pct": 98.83
+    }
+   ],
+   "result": {
+    "kl_ratio_mean": 1.007,
+    "kl_il4_lower": 3,
+    "kl_il4_higher": 7,
+    "kl_sign_test_p": 0.344,
+    "top1_gap_pt": -0.12,
+    "top1_il4_higher": 2,
+    "top1_il4_lower": 5,
+    "top1_ties": 3,
+    "top1_sign_test_p": 0.453
+   },
+   "conclusion": "No statistically detectable accuracy difference between IL4 and native --fast. The pre-registered 256-token single-passage test failed but was too noisy to resolve a 10% KL difference. This supersedes the 'likely small real deficit' statement in commit a7b62d2."
+  }
+ }
+}

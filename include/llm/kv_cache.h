@@ -41,13 +41,19 @@ enum class KVPrecision { FP32, Q8_0 };
 // kv_dim() reports the widest row (what a per-position buffer must hold).
 class KVCache {
 public:
-    KVCache(int64_t n_layers, int64_t kv_dim, int64_t max_ctx, KVPrecision precision = KVPrecision::FP32)
+    // `layer_base` (Issue #70): a node that runs only layers
+    // [layer_base, layer_base + n_layers) allocates KV for those alone; callers
+    // keep using global layer ids. 0 == today's layout, exactly.
+    KVCache(int64_t n_layers, int64_t kv_dim, int64_t max_ctx, KVPrecision precision = KVPrecision::FP32,
+            int64_t layer_base = 0)
         : KVCache(std::vector<int64_t>((size_t)n_layers, kv_dim),
-                  std::vector<int64_t>((size_t)n_layers, 0), max_ctx, precision) {}
+                  std::vector<int64_t>((size_t)n_layers, 0), max_ctx, precision, layer_base) {}
 
+    // Entry i of the per-layer vectors describes global layer layer_base + i.
     KVCache(const std::vector<int64_t>& layer_kv_dim, const std::vector<int64_t>& layer_window,
-            int64_t max_ctx, KVPrecision precision = KVPrecision::FP32)
-        : n_layers_((int64_t)layer_kv_dim.size()), max_ctx_(max_ctx), precision_(precision) {
+            int64_t max_ctx, KVPrecision precision = KVPrecision::FP32, int64_t layer_base = 0)
+        : n_layers_((int64_t)layer_kv_dim.size()), max_ctx_(max_ctx), precision_(precision),
+          layer_base_(layer_base) {
         // Start with a small capacity instead of the full max_ctx window. Most
         // sessions are far shorter than the trained context, and growth is
         // amortized O(1) via doubling. Never exceed max_ctx (the hard ceiling
@@ -72,11 +78,12 @@ public:
 
     int64_t max_ctx()  const { return max_ctx_; }
     int64_t kv_dim()   const { return kv_dim_; }
-    int64_t kv_dim(int64_t layer) const { return layers_[(size_t)layer].kv_dim; }
-    int64_t window(int64_t layer) const { return layers_[(size_t)layer].window; }
-    size_t  row_bytes(int64_t layer) const { return layers_[(size_t)layer].row_bytes; }
+    int64_t kv_dim(int64_t layer) const { return at(layer).kv_dim; }
+    int64_t window(int64_t layer) const { return at(layer).window; }
+    size_t  row_bytes(int64_t layer) const { return at(layer).row_bytes; }
     bool    has_ring() const { return has_ring_; }
-    int64_t n_layers() const { return n_layers_; }
+    int64_t n_layers() const { return n_layers_; }      // layers held (local count)
+    int64_t layer_base() const { return layer_base_; }
     int64_t seq_len()  const { return seq_len_; }
     int64_t capacity() const { return cap_; }   // currently-resident positions
     KVPrecision precision() const { return precision_; }
@@ -84,7 +91,7 @@ public:
     // Oldest position of `layer` still resident once `seq_len` positions have
     // been written (ring layers forget everything older than their window).
     int64_t first_valid(int64_t layer, int64_t seq_len) const {
-        const int64_t w = layers_[(size_t)layer].window;
+        const int64_t w = at(layer).window;
         return (w > 0 && seq_len > w) ? seq_len - w : 0;
     }
     // Can the sequence be rewound to `pos` (keeping [0,pos)) after `written`
@@ -108,33 +115,40 @@ public:
     }
     void clear() { seq_len_ = 0; }
 
+    // Issue #81: allocate the whole max_ctx window now. Under --ram-budget the
+    // planner prices the KV at full context; growing by doubling later would
+    // hold old+new buffers at once and overshoot that price.
+    void reserve_full() { grow_to(max_ctx_); }
+
     // Write/read accessors. The non-const overloads are the write path: they
     // grow the cache so `pos` is resident before handing back the pointer. The
     // const overloads are read-only and never grow (every position read has
     // already been written, hence is within cap_).
     void* k_ptr(int64_t layer, int64_t pos) {
         if (pos >= cap_) grow_to(pos + 1);
-        Layer& L = layers_[(size_t)layer];
+        Layer& L = at(layer);
         return (void*)(L.k.data() + slot(L, pos) * L.row_bytes);
     }
     void* v_ptr(int64_t layer, int64_t pos) {
         if (pos >= cap_) grow_to(pos + 1);
-        Layer& L = layers_[(size_t)layer];
+        Layer& L = at(layer);
         return (void*)(L.v.data() + slot(L, pos) * L.row_bytes);
     }
     const void* k_ptr(int64_t layer, int64_t pos) const {
-        const Layer& L = layers_[(size_t)layer];
+        const Layer& L = at(layer);
         return (const void*)(L.k.data() + slot(L, pos) * L.row_bytes);
     }
     const void* v_ptr(int64_t layer, int64_t pos) const {
-        const Layer& L = layers_[(size_t)layer];
+        const Layer& L = at(layer);
         return (const void*)(L.v.data() + slot(L, pos) * L.row_bytes);
     }
 
-    float* k(int64_t layer, int64_t pos) { return (float*)k_ptr(layer, pos); }
-    float* v(int64_t layer, int64_t pos) { return (float*)v_ptr(layer, pos); }
-    const float* k(int64_t layer, int64_t pos) const { return (const float*)k_ptr(layer, pos); }
-    const float* v(int64_t layer, int64_t pos) const { return (const float*)v_ptr(layer, pos); }
+    // Float views are valid only for an FP32 cache: a Q8_0 row is shorter
+    // than kv_dim floats. Byte-level users go through k_ptr()/row_bytes().
+    float* k(int64_t layer, int64_t pos) { check_fp32(); return (float*)k_ptr(layer, pos); }
+    float* v(int64_t layer, int64_t pos) { check_fp32(); return (float*)v_ptr(layer, pos); }
+    const float* k(int64_t layer, int64_t pos) const { check_fp32(); return (const float*)k_ptr(layer, pos); }
+    const float* v(int64_t layer, int64_t pos) const { check_fp32(); return (const float*)v_ptr(layer, pos); }
 
     size_t bytes() const {
         size_t b = 0;
@@ -150,6 +164,7 @@ public:
 
     // Inject contiguous float KV data into layer from pos=0 to num_positions
     void inject(int64_t layer, const float* k_src, const float* v_src, int64_t num_positions) {
+        check_fp32();
         if (num_positions > cap_) grow_to(num_positions);
         std::memcpy(k_ptr(layer, 0), k_src, num_positions * kv_dim_ * sizeof(float));
         std::memcpy(v_ptr(layer, 0), v_src, num_positions * kv_dim_ * sizeof(float));
@@ -164,6 +179,14 @@ private:
         size_t row_bytes = 0;
         std::vector<uint8_t> k, v;
     };
+
+    // Callers pass global layer ids; this node holds [layer_base_, +n_layers_).
+    Layer&       at(int64_t layer)       { return layers_[(size_t)(layer - layer_base_)]; }
+    const Layer& at(int64_t layer) const { return layers_[(size_t)(layer - layer_base_)]; }
+
+    void check_fp32() const {
+        LLM_CHECK(precision_ == KVPrecision::FP32, "KVCache: float access to a Q8_0 cache");
+    }
 
     static int64_t eff_cap(const Layer& L, int64_t cap) {
         return L.window > 0 ? std::min(cap, L.window) : cap;
@@ -193,6 +216,7 @@ private:
     int64_t n_layers_, max_ctx_;
     int64_t kv_dim_ = 0;
     KVPrecision precision_;
+    int64_t layer_base_ = 0;
     bool has_ring_ = false;
     int64_t cap_ = 0;
     int64_t seq_len_ = 0;

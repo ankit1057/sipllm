@@ -36,10 +36,30 @@
 
 namespace llm {
 
+// Parse a byte count with an optional K/M/G (or KB/MB/GB) suffix: "512M", "1.5G",
+// "268435456", "0". Used by --ram-budget (#37) in the CLI and the server (#78).
+inline size_t parse_bytes(const std::string& in) {
+    if (in.empty()) return 0;
+    std::string t = in;
+    if (t.size() >= 2 && (t.back() == 'B' || t.back() == 'b')) t.pop_back();
+    size_t mult = 1;
+    if (!t.empty()) {
+        switch (t.back()) {
+            case 'K': case 'k': mult = 1024ull; t.pop_back(); break;
+            case 'M': case 'm': mult = 1024ull * 1024; t.pop_back(); break;
+            case 'G': case 'g': mult = 1024ull * 1024 * 1024; t.pop_back(); break;
+            default: break;
+        }
+    }
+    if (t.empty()) return 0;
+    return (size_t)(std::stod(t) * (double)mult);
+}
+
 // What the user asked for. budget_bytes == 0 means "unlimited" — the planner is
 // not consulted and the legacy path runs byte-for-byte unchanged.
 struct BudgetRequest {
     size_t      budget_bytes    = 0;      // total peak-RSS target (0 = unlimited)
+    int         n_threads       = 1;      // pool workers: one attention score buffer each
     int         ctx_req         = 0;      // requested --ctx (0 => model/default)
     bool        ctx_explicit    = false;  // true iff the user passed --ctx
     int         default_ctx_cap = 4096;   // edge-friendly clamp for a defaulted ctx
@@ -49,6 +69,7 @@ struct BudgetRequest {
     bool        stream_head_req = false;  // user forced --stream-lm-head
     bool        force           = false;  // --ram-budget-force: run even if impossible
     KVPrecision kv_precision    = KVPrecision::FP32;
+    size_t      measured_base   = 0;      // RSS SipLLM added by plan time (model open + tokenizer); 0 = unknown
 };
 
 // Itemized ledger (bytes). Every line is a real contributor to peak RSS; the sum

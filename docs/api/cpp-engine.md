@@ -203,7 +203,7 @@ size_t peak_rss() const;
 ```
 
 > [!NOTE] RoPE convention
-> `apply_rope` is adjacent-pair (ggml `rope_norm`), not HF `rotate_half`; it relies on GGUF weights being permuted at conversion. Sliding-window attention is **not** modeled for Mistral/Gemma3 (they attend the full causal range).
+> `apply_rope` is adjacent-pair (ggml `rope_norm`), not HF `rotate_half`; it relies on GGUF Llama weights being permuted at conversion. Qwen2, Gemma and Phi GGUFs are not permuted and use `apply_rope_neox` (pairs `i`, `i + n_rot/2`). Sliding-window attention applies per layer (local layers only for Gemma 2/3).
 
 ## ModelConfig — `model.h`
 

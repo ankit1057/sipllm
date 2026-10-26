@@ -29,7 +29,8 @@ extern "C" {
 #endif
 
 /* ThreadPool schedule policy (octa-core work distribution). Mirrors
- * llm::ThreadPool::SchedulePolicy. Proportional2 is the engine's CLI default. */
+ * llm::ThreadPool::SchedulePolicy. Fixed16 is the engine default (CLI and
+ * sipllm_params_default); a zero-initialized sipllm_params selects STATIC (0). */
 enum {
   SIPLLM_SCHED_STATIC = 0,
   SIPLLM_SCHED_FIXED8 = 1,
@@ -48,10 +49,15 @@ enum {
 
 typedef struct sipllm_ctx sipllm_ctx; /* opaque runtime handle */
 
+/* #78: ram_budget_bytes value meaning "pick for me": half of the RAM the OS
+ * reports as available, best effort (an infeasible plan falls back to the
+ * minimum configuration). sipllm_params_default() uses it. */
+#define SIPLLM_RAM_BUDGET_AUTO UINT64_MAX
+
 /* Open-time knobs. Zero-initialize then override; sipllm_params_default() fills
  * the recommended edge defaults. All bool-ish fields are 0/non-0. */
 typedef struct {
-  uint64_t ram_budget_bytes; /* 0 = unlimited streaming; else hard peak-RSS ceiling (--ram-budget) */
+  uint64_t ram_budget_bytes; /* SIPLLM_RAM_BUDGET_AUTO (default) = half of available RAM; 0 = stream every layer; else hard peak-RSS ceiling */
   int32_t threads;           /* >0 fixed; 0 = hardware_concurrency; -1 = auto-tune+cache profile   */
   int32_t max_ctx;           /* 0 = engine default (4096)                                          */
   int32_t n_buffers;         /* async prefetch ring buffers (>=1)                                  */
@@ -121,7 +127,7 @@ typedef int32_t (*sipllm_token_cb)(const char* piece, int64_t token_id, void* us
 /* ---- lifecycle ---------------------------------------------------------- */
 
 /* Fill `out` with recommended edge defaults (streaming, quantized residency,
- * hw threads, Proportional2, async prefetch, repeat_penalty 1.1). */
+ * hw threads, Fixed16, async prefetch, repeat_penalty 1.1). */
 SIPLLM_API void sipllm_params_default(sipllm_params* out);
 SIPLLM_API void sipllm_sampler_default(sipllm_sampler* out);
 

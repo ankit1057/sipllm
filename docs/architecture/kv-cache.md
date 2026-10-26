@@ -46,7 +46,7 @@ Growth is driven by the accessors, split write vs read:
 ## Tradeoffs
 
 - **Re-layout cost vs steady state.** Each doubling memcpys the whole live cache once. Across a sequence that is ≤ log₂(ctx) copies total — negligible against per-token attention — and decode throughput/TTFT are unchanged (measured identical; only the allocation strategy differs).
-- **Still fp32, still full history.** This does not shrink the cache below one fp32 K+V per position per layer, and no window is dropped — consistent with the transformer attending the full causal range (no sliding-window attention).
+- **Still fp32, still full history.** This does not shrink the cache below one fp32 K+V per position per layer, and no window is dropped — even on sliding-window layers, which read only the last `sliding_window` positions.
 - **`max_ctx` is a hard ceiling** the runtime enforces before every `forward`; `grow_to` never exceeds it.
 - **`embed()` clears KV state** — embeddings must use a dedicated runtime, not one mid-conversation.
 
@@ -72,5 +72,5 @@ The KV term collapses from the dominant contributor to a rounding error, and wit
 ## Future work
 
 - **Quantized or paged KV** for very long contexts, if the dense-fp32 store ever becomes the ceiling again.
-- **Windowed eviction** to pair with real sliding-window attention once the [transformer](transformer.html) models it.
+- **Windowed eviction** on sliding-window layers, which the [transformer](transformer.html) now masks but whose old rows the cache still keeps.
 - **Sequence reuse across turns** so a growing chat need not re-`clear()` when the runtime can prove the prefix is unchanged.

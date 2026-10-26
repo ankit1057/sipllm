@@ -7,12 +7,12 @@
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 **A bounded-memory LLM runtime: models larger than available RAM run under a hard, configurable peak-RSS ceiling, CPU-first, with zero dependencies.**
-SipLLM *sips* weights off storage — one transformer layer at a time — so peak RAM tracks a single resident layer, not the whole model: measured at 122 MB vs 1323 MB for llama.cpp on the same TinyLlama Q4_K_M file (10.8× less), and the gap widens with model size. Numerically validated across all standard quantization formats and 16 model architectures.
+SipLLM *sips* weights off storage — one transformer layer at a time — so peak RAM tracks a single resident layer, not the whole model: measured at 122 MB vs 1323 MB for llama.cpp on the same TinyLlama Q4_K_M file (10.8× less), and the gap widens with model size. Output is checked token for token against llama.cpp on Llama-family, Qwen2, Gemma 3 and Phi-2 models; see [Model architectures](#model-architectures) for what is and is not validated.
 
 > ### Status
-> **Latest tagged release: v0.5.0.** `main` is the 1.0 candidate and carries everything
-> below (REPL, tools, agent server, `--spec`, memory planner); the one-line installer
-> builds it from source until the next release is cut. Every number in this README is a
+> **Latest tagged release: v0.6.0** (see [`CHANGELOG.md`](CHANGELOG.md) for what changed
+> and the known issues). The one-line installer fetches its prebuilt bundle where one
+> exists for your platform and builds from source otherwise. Every number in this README is a
 > measurement with its date, hardware and source file named; the authoritative,
 > per-wave-refreshed figures are the **North Star scorecard** at the top of
 > [`CHANGELOG.md`](CHANGELOG.md). Memory safety: the uninitialized-read class is
@@ -242,28 +242,22 @@ For advanced profiling, benchmark scripting, and low-level tuning:
 
 ---
 
-## Supported Model Architectures (16 Families)
+## Model architectures
 
-SipLLM features native, zero-dependency decoder implementations dispatched directly from GGUF `general.architecture`. It faithfully implements all architectural quirks, normalization schemes, and rotary formulas:
+SipLLM reads `general.architecture` from the GGUF and runs one data-driven
+transformer block. "Checked against llama.cpp" means greedy output from the same
+GGUF file compared token for token on Apple M3 at v0.6.0; anything else is stated as
+what it is.
 
-| # | Architecture | Typical Models | Key Technical Characteristics |
-|---|:-------------|:---------------|:------------------------------|
-| 1 | **Llama** | Llama 2, 3, 3.1, 3.2, 3.3 | RMSNorm, RoPE with llama3 frequency scaling, Grouped-Query Attention (GQA), SwiGLU FFN. |
-| 2 | **Mistral** | Mistral 7B, Mistral-Nemo | Causal attention, standard RMSNorm, SwiGLU FFN, Grouped-Query Attention. |
-| 3 | **Qwen2** | Qwen 2, Qwen 2.5 | Q/K/V attention bias projections, RMSNorm, SwiGLU FFN. |
-| 4 | **Gemma 2** | Gemma 2 (2B, 9B, 27B) | GeGLU activation, pre/post `(1+w)` RMSNorm scaling, embedding scale, logit soft-capping. |
-| 5 | **Gemma 3** | Gemma 3 text | Per-layer local/global sliding RoPE, QK-normalization, Gemma-style RMSNorm. |
-| 6 | **Gemma 4** | Gemma 4 9B | Modernized Gemma architecture with adaptive scaling and normalized embeddings. |
-| 7 | **Phi-3** | Phi-3 Mini / Medium | Fused QKV projections, fused gate/up FFN, partial-rotary RoPE embeddings. |
-| 8 | **Phi-4** | Phi-4 14B | High-capacity reasoning model with fused projections and extended rotary embeddings. |
-| 9 | **Phi-2** | Phi-2 2.7B | Parallel attention and MLP blocks, LayerNorm, partial-rotary RoPE, non-gated GELU MLP. |
-| 10 | **Mixtral / MoE** | Mixtral 8x7B | Sparse Mixture-of-Experts: router gating + top-k expert streaming off disk per layer. |
-| 11 | **GPT-2** | GPT-2 (124M, 355M, 774M, 1.5B) | Standard LayerNorm, learned positional embeddings, non-gated GELU MLP. |
-| 12 | **StarCoder 2** | StarCoder 2 (3B, 7B, 15B) | Code-generation architecture with multi-query/grouped attention and LayerNorm. |
-| 13 | **DeepSeek** | DeepSeek V2, V3, R1 Distill | Multi-Head Latent Attention (MLA) / SwiGLU reasoning architectures. |
-| 14 | **Kimi** | Kimi K1.5 7B (Moonshot) | Long-context GQA SwiGLU architecture with ChatML formatting. |
-| 15 | **Yi** | 01.AI Yi-6B, Yi-1.5 | High-efficiency SwiGLU decoder with specialized RoPE scaling. |
-| 16 | **Baichuan / GLM** | Baichuan 2, GLM-4, InternLM 2.5 | Custom QKV tensor layouts and specialized attention scaling formulas. |
+| Architecture (GGUF name) | Status | Evidence |
+|:--|:--|:--|
+| **Llama** (`llama`): Llama 2 / 3.x, TinyLlama, SmolLM2, Mistral 7B | Checked against llama.cpp | Golden matrix (TinyLlama Q4_K_M, Q5_K_M, Q8_0, F16); Llama-3.2-1B and SmolLM2 output and chat-template token ids |
+| **Qwen2** (`qwen2`): Qwen 2 / 2.5 | Checked against llama.cpp | Qwen2.5-0.5B-Instruct Q4_K_M with `--fast`: 32 identical tokens on one prompt; on another the first digit differs (logit margin 0.79) and the rest of the sentence matches in structure |
+| **Gemma 3** (`gemma3`) | Checked against llama.cpp | Gemma-3-270M-it Q8_0 with `--fast`: 24 identical tokens on each of three prompts |
+| **Phi-2** (`phi2`) | Checked against llama.cpp | Phi-2 Q4_K_M, exact and `--fast`: two of three prompts identical over llama.cpp's output; the third identical through its first sentence, then different |
+| **Gemma 2**, **Gemma 4**, **Phi-3 / Phi-4**, **Mixtral** (MoE), **GPT-2** | Implemented; synthetic weights only | Unit tests on toy models; not yet run on real weights |
+| **DeepSeek**, **Kimi**, **Yi**, **Baichuan**, **InternLM2**, **GLM-4** | Name recognized; runs the Llama block | Works only where the model really is Llama-shaped. Multi-head latent attention (DeepSeek V2/V3), ALiBi and fused-QKV layouts are not implemented |
+| **StarCoder 2** | Not supported | No implementation |
 
 **Context Window Management.** SipLLM defaults to an edge-optimized 4096-token window so KV caches remain compact on constrained devices. The context window can be expanded up to model limits with `--ctx <tokens>`.
 
@@ -316,14 +310,14 @@ RTK manages memory bounds, tensor execution, and hardware threads:
 ### 4. Nishachar: Autonomous Execution Agent
 Nishachar is SipLLM's reference goal-driven autonomous agent runtime (`goal -> plan -> act -> verify`):
 - **Path A (CLI Foundation)**: Standalone autonomous executor (`nishachar_demo`) equipped with real tools (shell commands, filesystem exploration, ripgrep/search, calculator).
-- **Path B (Server-Side Integration)**: First-class support via OpenAI-compatible `POST /v1/chat/completions` with `"agent": true` for client-directed tool orchestration.
+- **Path B (Server-Side Integration)**: OpenAI-compatible `POST /v1/chat/completions` with `"agent": true` for client-directed tool orchestration. Agent requests run shell and file tools on the server host, so they are refused unless `llm_server` is started with `--allow-agent`; the server binds 127.0.0.1 unless `--host` is given.
 - **Zero-Dependency JSON Parser**: Hand-crafted JSON state machine (`ToolParser`, `ToolRegistry`) requiring zero third-party JSON libraries, providing robust structured-output tool dispatch.
 
 ### 5. Cross-Platform Edge Performance
 Built specifically for edge and resource-constrained environments:
 - **ARM64 NEON Kernels**: int8 `sdot` dot-product kernels for Q8_0, Q4_K and Q6_K (`--fast`), NEON-assisted fp32 dequantization for the exact path, NEON fp16→fp32 conversion.
 - **x86_64 AVX2 / FMA Vector Paths**: Optimized vector dot products with automatic CPU runtime detection and portable scalar fallbacks.
-- **Hardware-Calibrated Auto-Tuning**: `AutoTuner` and `DeviceProfile` automatically benchmark the host hardware on first launch, selecting the optimal thread count and scheduling policy.
+- **Hardware-Calibrated Auto-Tuning (opt-in)**: `--autotune` runs `AutoTuner` micro-benchmarks to pick a thread count and scheduling policy, then caches the result. It is off by default because on big.LITTLE phones it picked slower settings than the defaults (every core, `fixed16`).
 - **Mobile & Embedded**: builds on Android (NDK, static libc++), Termux, Apple Silicon and Linux SBCs. First phone numbers (Dimensity 900, 2026-10-19) are in the demo above and in `bench/results/device-*.json`; the harness is `scripts/device/`.
 
 ## Validated against llama.cpp
@@ -367,7 +361,7 @@ See [`golden/README.md`](golden/README.md) for the full methodology.
 ## Features
 
 - **Production-Grade GGUF & Safetensors Loading** — Loads unmodified GGUF v2/v3 and Hugging Face Safetensors natively without external conversion.
-- **16 Model Architectures** — Native execution for Llama (2/3/3.1/3.2/3.3), Mistral, Qwen2/2.5, Gemma 2/3/4, Phi-2/3/4, Mixtral MoE, GPT-2, StarCoder 2, DeepSeek, Kimi, Yi, and Baichuan families.
+- **Model families** — Llama-family, Qwen2, Gemma 3 and Phi-2 checked against llama.cpp; Gemma 2/4, Phi-3/4, Mixtral MoE and GPT-2 implemented and unit-tested on synthetic weights. See [Model architectures](#model-architectures).
 - **Complete Quantization Matrix** — Full support for `F32`, `F16`, `BF16`, `Q4_0/1`, `Q5_0/1`, `Q8_0`, and all K-quants (`Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, plus `IQ4_NL`).
 - **SIMD Vector Acceleration** — int8 kernels for Q8_0 / Q4_K / Q6_K on ARM64 NEON `sdot` and x86_64 AVX2 (`--fast`; AVX2 untested on hardware), plus fp32 NEON / AVX2+FMA vector paths.
 - **Bounded-Memory Layer Streaming** — Synchronous `pread`, double-buffered async prefetcher, and zero-copy `mmap` options keeping peak resident memory pinned to a single layer.
@@ -418,9 +412,9 @@ must keep the golden validation matrix green. Please adhere to the [Code of Cond
 
 ## Roadmap
 
-### Shipped on `main` (1.0 candidate; latest tag v0.5.0)
+### Shipped (latest tag v0.6.0)
 - [x] Bounded-memory transformer layer streaming with `--ram-budget` peak-RSS ceiling.
-- [x] Full support for 16 model architectures across Global and Asian model families.
+- [x] Llama-family, Qwen2, Gemma 3 and Phi-2 checked against llama.cpp; more families implemented on synthetic weights (see [Model architectures](#model-architectures)).
 - [x] Int8 `--fast` kernels for Q8_0, Q4_K and Q6_K: ARM64 NEON `sdot` (verified), x86_64 AVX2 (cross-compiled only).
 - [x] Sip IR stable intermediate representation, binary format (`SIPR`), and inspection tools (`ir_dump`).
 - [x] Kosh context reuse (`--reuse`) and persistent SIPS v1 session serialization.

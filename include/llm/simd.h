@@ -79,6 +79,35 @@ inline float dot_f32(const float* a, const float* b, int64_t n) {
 #endif
 }
 
+// #80 attention kernels. dot4_f32 scores four keys against one query and
+// returns, for each key, exactly what dot_f32(q, k, n) returns: same four
+// accumulators over 16-float chunks and the same reduction order. Valid when
+// n % 16 == 0 (no 4-chunk or scalar tail); callers fall back to dot_f32
+// otherwise. It loads each query chunk once for the four keys.
+inline void dot4_f32(const float* q, const float* k0, const float* k1, const float* k2,
+                     const float* k3, int64_t n, float* out) {
+#if LLM_HAVE_NEON
+    float32x4_t a0[4], a1[4], a2[4], a3[4];
+    for (int j = 0; j < 4; ++j) { a0[j] = a1[j] = a2[j] = a3[j] = vdupq_n_f32(0.f); }
+    const float* k[4] = {k0, k1, k2, k3};
+    for (int64_t i = 0; i + 16 <= n; i += 16) {
+        const float32x4_t q0 = vld1q_f32(q + i), q1 = vld1q_f32(q + i + 4);
+        const float32x4_t q2 = vld1q_f32(q + i + 8), q3 = vld1q_f32(q + i + 12);
+        for (int j = 0; j < 4; ++j) {
+            a0[j] = vfmaq_f32(a0[j], q0, vld1q_f32(k[j] + i +  0));
+            a1[j] = vfmaq_f32(a1[j], q1, vld1q_f32(k[j] + i +  4));
+            a2[j] = vfmaq_f32(a2[j], q2, vld1q_f32(k[j] + i +  8));
+            a3[j] = vfmaq_f32(a3[j], q3, vld1q_f32(k[j] + i + 12));
+        }
+    }
+    for (int j = 0; j < 4; ++j)
+        out[j] = vaddvq_f32(vaddq_f32(vaddq_f32(a0[j], a1[j]), vaddq_f32(a2[j], a3[j])));
+#else
+    out[0] = dot_f32(q, k0, n); out[1] = dot_f32(q, k1, n);
+    out[2] = dot_f32(q, k2, n); out[3] = dot_f32(q, k3, n);
+#endif
+}
+
 // y += alpha * x
 inline void axpy_f32(float* y, const float* x, float alpha, int64_t n) {
 #if LLM_HAVE_NEON
@@ -95,6 +124,27 @@ inline void axpy_f32(float* y, const float* x, float alpha, int64_t n) {
     for (; i < n; ++i) y[i] += alpha * x[i];
 #else
     for (int64_t i = 0; i < n; ++i) y[i] += alpha * x[i];
+#endif
+}
+
+// #80: out[0..64) = sum over t of w[t] * v_t, accumulated in registers in
+// increasing t. Per element this is exactly the sequence of fused multiply-adds
+// that zeroing out and calling axpy_f32(out, v_t, w[t], 64) for each t performs.
+// vrow(t) returns the 64 floats of row t.
+template <class RowFn>
+inline void weighted_sum64_f32(float* out, const float* w, int64_t t0, int64_t t1, RowFn vrow) {
+#if LLM_HAVE_NEON
+    float32x4_t o[16];
+    for (int j = 0; j < 16; ++j) o[j] = vdupq_n_f32(0.f);
+    for (int64_t t = t0; t <= t1; ++t) {
+        const float* v = vrow(t);
+        const float32x4_t a = vdupq_n_f32(w[t]);
+        for (int j = 0; j < 16; ++j) o[j] = vfmaq_f32(o[j], a, vld1q_f32(v + 4 * j));
+    }
+    for (int j = 0; j < 16; ++j) vst1q_f32(out + 4 * j, o[j]);
+#else
+    for (int d = 0; d < 64; ++d) out[d] = 0.f;
+    for (int64_t t = t0; t <= t1; ++t) axpy_f32(out, vrow(t), w[t], 64);
 #endif
 }
 

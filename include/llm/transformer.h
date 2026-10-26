@@ -17,6 +17,21 @@
 
 namespace llm {
 
+// Issue #70 (LAN pooling): runs a contiguous range of layers somewhere else
+// (another machine). Declared here so the transformer stays free of socket
+// code; implemented in lan.cpp.
+struct LayerExecutor {
+    virtual ~LayerExecutor() = default;
+    // Run layers [begin, end) over n residual rows (n*dim floats, updated in
+    // place) at positions start_pos .. start_pos+n-1. Throws on failure.
+    virtual void run(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos) = 0;
+};
+
+struct RemoteSegment {
+    int64_t begin = 0, end = 0;     // layers [begin, end) run by `exec`
+    LayerExecutor* exec = nullptr;  // not owned
+};
+
 class Transformer {
 public:
     Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool = nullptr);
@@ -63,6 +78,8 @@ public:
                            int64_t pos, float theta_base);
     static void apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                            int64_t pos, float theta_base, const RopeScaling& rs);
+    static void apply_rope_neox(float* vec, int64_t n_heads, int64_t head_dim,
+                                int64_t rot_dim, int64_t pos, float theta);
 
     const ModelConfig& config() const { return cfg_; }
 
@@ -80,6 +97,18 @@ public:
     void enable_profiling(bool on) { profiling_ = on; }
     const std::vector<LayerTiming>& last_timings() const { return timings_; }
     size_t peak_rss() const { return peak_rss_; }
+
+    // Issue #70: layers handed to other machines. Empty (the default) means
+    // every layer runs here and forward()/prefill() are unchanged. Segments
+    // must be sorted, non-overlapping and inside [0, n_layers). spec_forward()
+    // refuses to run while any are set.
+    void set_remote_segments(std::vector<RemoteSegment> segs);
+    bool has_remote_segments() const { return !remote_.empty(); }
+
+    // Issue #70, worker side: run layers [begin, end) here over n residual rows
+    // at positions start_pos.. (same chunking and kernels as prefill(), so the
+    // result is bit-identical to running those layers inside one process).
+    void run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos);
 
     // Golden-test hook: invoked with the residual stream after each block, so a
     // harness can checksum/compare hidden states layer-by-layer with llama.cpp.
@@ -121,6 +150,11 @@ private:
     std::vector<LayerTiming> timings_;
     size_t peak_rss_ = 0;
     HiddenHook hidden_hook_;
+    std::vector<RemoteSegment> remote_;   // #70; empty = all layers local
+    const RemoteSegment* remote_at(int64_t layer) const {
+        for (const RemoteSegment& r : remote_) if (r.begin == layer) return &r;
+        return nullptr;
+    }
 };
 
 } // namespace llm

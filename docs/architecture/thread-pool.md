@@ -36,8 +36,8 @@ Below the threshold the body runs inline on the calling thread.
 
 ### Defaults
 
-- **CLI default: `Proportional2`** (`main.cpp`; the C FFI default too — `SIPLLM_SCHED_PROPORTIONAL2`).
-- **Pool default: `Proportional4`** (`ThreadPool::policy` initializer) — the value a freshly constructed pool carries before anyone calls `set_policy`.
+- **Default everywhere: `Fixed16`** since wave 16: the CLI (`main.cpp`), the C FFI (`sipllm_params_default`, `SIPLLM_SCHED_FIXED16`), the Dart API, and the `ThreadPool::policy` initializer (the value a freshly constructed pool carries before anyone calls `set_policy`). A zero-initialized `sipllm_params` still selects `Static` (enum value 0).
+- **Why:** on a 2+6-core big.LITTLE phone, `Proportional2` (the previous CLI/FFI default) decoded TinyLlama Q4_K_M at 5.7–5.8 tok/s with 4–8 threads, against 13.5–14.3 with `Fixed16` (3 reps each; equal at 2 threads). Large proportional chunks leave the fast cores waiting for a slow core's last chunk. On an Apple M3 all dynamic policies were within 2.5%. Output tokens are identical across policies (rows are computed independently).
 
 ## Alternatives considered
 

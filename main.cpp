@@ -5,9 +5,12 @@
 //       [--ctx N] [--threads N] [--seed S] [--greedy]
 //
 // Streams tokens to stdout as they are produced and prints a stats block.
+#include "llm/lan.h"
+#include "llm/neon.h"
 #include "llm/runtime.h"
 #include "llm/cuda_backend.h"
 #include "llm/device_profile.h"
+#include "llm/mem_plan.h"
 #include "llm/auto_tuner.h"
 #include "llm/plugin.h"
 #include "llm/kosh.h"
@@ -34,15 +37,19 @@ using namespace llm;
 
 static void print_usage(const char* prog) {
     fprintf(stderr,
-        "usage: %s <model> [prompt] [-p prompt] [-n tokens] [-t temp]\n"
+        "usage: %s <model> [prompt] [-p prompt] [-n tokens] [--temp T]\n"
         "          [--top-k K] [--top-p P] [--repeat-penalty R] [--repeat-last-n N]\n"
         "          [--residency fp32|quant] [--mmap] [--no-async] [--stream-lm-head]\n"
         "          [--buffers N] [--ctx N] [--threads N] [--seed S] [--greedy] [--schedule P]\n"
-        "          [--ram-budget BYTES|N{K,M,G}] [--fast] [--spec N] [--gpu-layers N|max]\n"
+        "          [--autotune] [--recalibrate]      (opt-in thread/schedule micro-benchmarks)\n"
+        "          [--ram-budget BYTES|N{K,M,G}] [--fast] [--spec N] [--semantic-cache-budget BYTES]\n"
+        "          [--gpu-layers N|max]\n"
         "          [--kosh] [--kosh-max-run N] [--rtk] [--reuse]\n"
         "          [--save-session F] [--load-session F]\n"
+        "          [--nodes host:port:A-B,...]          (LAN: coordinator owns layers [0,A))\n"
+        "       %s <model> --worker --layers A:B --listen IP:PORT   (LAN worker; token in SIPLLM_LAN_TOKEN)\n"
         "          [--chat | -i]\n",
-        prog);
+        prog, prog);
 }
 
 static std::string trim(const std::string& s) {
@@ -50,25 +57,6 @@ static std::string trim(const std::string& s) {
     if (start == std::string::npos) return "";
     size_t end = s.find_last_not_of(" \t\r\n");
     return s.substr(start, end - start + 1);
-}
-
-// Parse a byte count with an optional K/M/G (or KB/MB/GB) suffix: "512M", "1.5G",
-// "268435456", "0". Used by --ram-budget (#37).
-static size_t parse_bytes(const std::string& in) {
-    if (in.empty()) return 0;
-    std::string t = in;
-    if (t.size() >= 2 && (t.back() == 'B' || t.back() == 'b')) t.pop_back();
-    size_t mult = 1;
-    if (!t.empty()) {
-        switch (std::toupper((unsigned char)t.back())) {
-            case 'K': mult = 1024ull; t.pop_back(); break;
-            case 'M': mult = 1024ull * 1024; t.pop_back(); break;
-            case 'G': mult = 1024ull * 1024 * 1024; t.pop_back(); break;
-            default: break;
-        }
-    }
-    if (t.empty()) return 0;
-    return (size_t)(std::stod(t) * (double)mult);
 }
 
 int main(int argc, char** argv) {
@@ -89,17 +77,25 @@ int main(int argc, char** argv) {
     int max_new = 64, threads = 0, buffers = 2, ctx = 0;
     size_t ram_budget = 0;   // #37: total peak-RSS target (0 = unlimited)
     bool force_budget = false;
+    bool ram_budget_given = false;   // #78: no flag -> automatic budget
     bool kv_q8 = false;
     AutoTunerOptions tuner_opt;
+    bool autotune_requested = false;   // #77: the micro-benchmark tuner is opt-in
     bool schedule_overridden = false;
     bool threads_overridden = false;
-    ThreadPool::SchedulePolicy schedule_policy = ThreadPool::SchedulePolicy::Proportional2;
+    // fixed16: small dynamic chunks; robust on big.LITTLE (wave 16 measurement:
+    // Proportional2 decoded at 40% of fixed16 on a 2+6-core phone at 4-8 threads).
+    ThreadPool::SchedulePolicy schedule_policy = ThreadPool::SchedulePolicy::Fixed16;
     SamplerConfig scfg;
     LayerLoader::Options opt;
     bool use_kosh = false, use_rtk = false;
     int  kosh_max_run = 8;
     bool use_reuse = false;
     int  spec_draft = 0;   // --spec N: prompt-lookup speculative decoding, N draft tokens (0 = off)
+    size_t semantic_cache_budget = 0;   // #53: prefix KV cache across turns (0 = off)
+    // Issue #70 (LAN pooling)
+    bool worker_mode = false;
+    std::string worker_layers, worker_listen, nodes_arg;
     std::string save_path, load_path;
 
     for (int i = 2; i < argc; ++i) {
@@ -115,7 +111,15 @@ int main(int argc, char** argv) {
         else if (a == "--chat" || a == "-i") force_interactive = true;
         else if (a == "-h" || a == "--help") { print_usage(argv[0]); return 0; }
         else if (a == "-n") { max_new = std::stoi(next("64")); max_new_specified = true; }
-        else if (a == "-t") scfg.temperature = std::stof(next("0.8"));
+        else if (a == "--temp") scfg.temperature = std::stof(next("0.8"));
+        else if (a == "-t") {
+            // #79: -t is the sampling temperature here, but most runtimes use it
+            // for threads. Keep it working; say so, since -t 8 is a likely mistake.
+            scfg.temperature = std::stof(next("0.8"));
+            fprintf(stderr, "warning: -t sets the sampling temperature (now %.2f), not threads. "
+                            "Use --temp T for temperature and --threads N for threads.\n",
+                    scfg.temperature);
+        }
         else if (a == "--top-k") scfg.top_k = std::stoi(next("40"));
         else if (a == "--top-p") scfg.top_p = std::stof(next("0.95"));
         else if (a == "--repeat-penalty") scfg.repeat_penalty = std::stof(next("1.1"));
@@ -127,7 +131,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-async") { opt.async = false; opt.n_buffers = 1; }
         else if (a == "--stream-lm-head") opt.stream_lm_head = true;
         else if (a == "--buffers") buffers = std::stoi(next("2"));
-        else if (a == "--ram-budget") ram_budget = parse_bytes(next("0"));
+        else if (a == "--ram-budget") { ram_budget = parse_bytes(next("0")); ram_budget_given = true; }
         else if (a == "--ram-budget-force") force_budget = true;
         else if (a == "--kv-q8") kv_q8 = true;
         else if (a == "--fast") opt.fast_quant = true;
@@ -152,13 +156,19 @@ int main(int argc, char** argv) {
                 threads_overridden = true;
             }
         }
-        else if (a == "--recalibrate") tuner_opt.force_recalibrate = true;
+        else if (a == "--recalibrate") { tuner_opt.force_recalibrate = true; autotune_requested = true; }
+        else if (a == "--autotune") autotune_requested = true;
         else if (a == "--no-autotune") tuner_opt.disable_autotune = true;
         else if (a == "--kosh") use_kosh = true;
         else if (a == "--kosh-max-run") kosh_max_run = std::stoi(next("8"));
         else if (a == "--rtk") use_rtk = true;
         else if (a == "--reuse") use_reuse = true;
         else if (a == "--spec") spec_draft = std::stoi(next("3"));
+        else if (a == "--semantic-cache-budget") semantic_cache_budget = parse_bytes(next("0"));
+        else if (a == "--worker") worker_mode = true;
+        else if (a == "--layers") worker_layers = next("");
+        else if (a == "--listen") worker_listen = next("");
+        else if (a == "--nodes") nodes_arg = next("");
         else if (a == "--save-session") { save_path = next(""); use_reuse = true; }
         else if (a == "--load-session") { load_path = next(""); use_reuse = true; }
         else if (a == "--profile-info") {
@@ -213,14 +223,69 @@ int main(int argc, char** argv) {
         double t0 = now_sec();
         
         HardwareInfo hw = get_hardware_info();
-        RuntimeProfile rp = tune_if_needed(hw, tuner_opt);
+        RuntimeProfile rp = cli_runtime_profile(hw, autotune_requested, tuner_opt);
         if (!threads_overridden && rp.threads > 0) threads = rp.threads;
         if (!schedule_overridden && rp.schedule_policy >= 0) schedule_policy = (ThreadPool::SchedulePolicy)rp.schedule_policy;
+
+        // #78: with no --ram-budget, use half of the available RAM so a model that
+        // fits is held resident instead of re-read from storage every token. This
+        // is best-effort sizing, not an operator contract, so an infeasible plan
+        // falls back to the minimum configuration (as --ram-budget-force does).
+        // An explicit --ram-budget 0 still streams every layer.
+        if (!ram_budget_given) {
+            const size_t avail = available_ram_bytes();
+            ram_budget = auto_ram_budget(avail);
+            if (ram_budget) {
+                force_budget = true;
+                fprintf(stderr, "[info] no --ram-budget given: using %.0f MB, half of the %.0f MB "
+                                "available (--ram-budget 0 streams every layer)\n",
+                        ram_budget / 1e6, avail / 1e6);
+            }
+        }
         
         auto src = open_model(model, opt.use_mmap);
         KVPrecision kv_precision = kv_q8 ? KVPrecision::Q8_0 : KVPrecision::FP32;
+
+        // ---- Issue #70: LAN worker -------------------------------------------
+        if (worker_mode) {
+            const size_t sep = worker_layers.find_first_of(":-");
+            const size_t colon = worker_listen.rfind(':');
+            if (sep == std::string::npos || colon == std::string::npos) {
+                fprintf(stderr, "--worker needs --layers A:B and --listen IP:PORT\n");
+                return 2;
+            }
+            opt.layer_begin = std::stoi(worker_layers.substr(0, sep));
+            opt.layer_end = std::stoi(worker_layers.substr(sep + 1));
+            lan::WorkerConfig wc;
+            wc.bind_ip = worker_listen.substr(0, colon);
+            wc.port = std::stoi(worker_listen.substr(colon + 1));
+            wc.token = lan::token_from_env();
+            Runtime wrt(std::move(src), opt, ctx, threads, ram_budget, force_budget, kv_precision);
+            if (wrt.thread_pool()) wrt.thread_pool()->set_policy(schedule_policy);
+            lan::serve_worker(wrt, wc);
+            return 0;
+        }
+        std::vector<lan::NodeSpec> nodes;
+        if (!nodes_arg.empty()) {
+            nodes = lan::parse_nodes(nodes_arg);
+            opt.layer_end = nodes.front().begin;   // coordinator owns [0, a)
+        }
+
         Runtime rt(std::move(src), opt, ctx, threads, ram_budget, force_budget, kv_precision);
         if (rt.thread_pool()) rt.thread_pool()->set_policy(schedule_policy);
+
+        std::vector<std::unique_ptr<lan::RemoteExecutor>> remotes;
+        if (!nodes.empty()) {
+            const std::string token = lan::token_from_env();
+            const lan::Fingerprint fp = lan::fingerprint(rt);
+            std::vector<RemoteSegment> segs;
+            for (const lan::NodeSpec& n : nodes) {
+                remotes.push_back(std::make_unique<lan::RemoteExecutor>(n, token, fp));
+                segs.push_back(RemoteSegment{n.begin, n.end, remotes.back().get()});
+            }
+            rt.set_remote_segments(std::move(segs));
+            fprintf(stderr, "coordinator: local layers [0, %d), %zu worker(s)\n", rt.layer_end(), remotes.size());
+        }
         double load_s = now_sec() - t0;
 
         // Optional plugin seam: Kosh (context) + RTK (runtime/KV). Default OFF
@@ -231,6 +296,7 @@ int main(int argc, char** argv) {
         if (use_kosh || use_rtk) rt.set_plugins(&plugins);
         if (use_reuse) rt.set_context_reuse(true);
         if (spec_draft > 0) rt.enable_speculative_decoding(spec_draft);
+        if (semantic_cache_budget > 0) rt.enable_semantic_cache(semantic_cache_budget);
         if (!load_path.empty() && !rt.load_session(load_path))
             fprintf(stderr, "warning: could not load session '%s'\n", load_path.c_str());
 
@@ -405,9 +471,16 @@ int main(int argc, char** argv) {
         if (!save_path.empty() && !rt.save_session(save_path))
             fprintf(stderr, "warning: could not save session '%s'\n", save_path.c_str());
 
-        size_t rss = current_rss_bytes();
+        size_t rss = peak_rss_bytes();   // kernel high-water mark, not the RSS at exit
         char budget_note[64] = "";
         if (ram_budget) snprintf(budget_note, sizeof(budget_note), "   (budget %.0f MB)", ram_budget / 1e6);
+        char fast_note[96] = "on";
+        if (!opt.fast_quant) snprintf(fast_note, sizeof(fast_note), "off");
+        else if (!fast_quant_enabled()) snprintf(fast_note, sizeof(fast_note), "off (no int8 kernel for this CPU)");
+        else if (rt.interleaved_matrices() > 0) {
+            const int q6 = rt.interleaved_q6k_matrices(), q4 = rt.interleaved_matrices() - q6;
+            snprintf(fast_note, sizeof(fast_note), "on, interleaved %d Q4_K + %d Q6_K (SIPLLM_FAST_LAYOUT)", q4, q6);
+        }
         fprintf(stderr,
             "\n\xE2\x94\x80\xE2\x94\x80 sipllm \xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\n"
             "peak rss:        %.0f MB\n"
@@ -429,10 +502,10 @@ int main(int argc, char** argv) {
             "sched idle:      %.2f ms\n"
             "sched barrier:   %.2f ms\n",
             rss / 1e6,
-            st.pinned_layers, (int)rt.config().n_layers, budget_note,
-            st.gpu_layers, (int)rt.config().n_layers, st.gpu_output ? " + output head" : "",
+            st.pinned_layers, rt.layer_end() - rt.layer_begin(), budget_note,   // local layers (#70)
+            st.gpu_layers, rt.layer_end() - rt.layer_begin(), st.gpu_output ? " + output head" : "",
             st.gpu_bytes / 1048576.0,
-            opt.fast_quant ? "on" : "off",
+            fast_note,
             st.decode_tok_s, st.prefill_tok_s, st.ttft_s,
             st.prompt_tokens, st.gen_tokens,
             st.weights_resident_bytes / 1e6, st.kv_bytes / 1e6,
@@ -449,7 +522,14 @@ int main(int argc, char** argv) {
                     (long long)st.spec_drafted, (long long)st.spec_accepted, acc,
                     (long long)st.spec_batches);
         }
-        if (st.kosh_active || st.rtk_active || st.reuse_active) {
+        for (const auto& r : remotes) {   // Issue #70: what the network cost
+            const int toks = st.prompt_tokens + st.gen_tokens;
+            fprintf(stderr, "lan worker:      %llu calls, %.2f MB sent, %.2f MB received (%.1f KB/token), "
+                            "%.0f ms waiting on worker\n",
+                    (unsigned long long)r->calls(), r->bytes_sent() / 1e6, r->bytes_received() / 1e6,
+                    toks > 0 ? (r->bytes_sent() + r->bytes_received()) / 1024.0 / toks : 0.0, r->wait_ms());
+        }
+        if (st.kosh_active || st.rtk_active || st.reuse_active || st.semantic_cache_hits > 0) {
             fprintf(stderr, "── plugins ───────────────\n");
             if (st.kosh_active) {
                 double pct = st.kosh_tokens_in > 0
@@ -467,6 +547,9 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "reuse:           %d reused / %d processed tokens\n",
                         st.reused_prefix_tokens, st.processed_tokens);
             }
+            if (st.semantic_cache_hits > 0)
+                fprintf(stderr, "semantic cache:  %llu prefix tokens reused\n",
+                        (unsigned long long)st.semantic_cache_hits);
         }
         return 0;
     } catch (const std::exception& e) {

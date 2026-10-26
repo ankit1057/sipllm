@@ -3,7 +3,7 @@
 // pass per ABI, via the shared ../src/CMakeLists.txt) and the Kotlin bridge that
 // exposes device profiling + the Wear OS Data Layer model transfer.
 group = "com.sipllm.flutter"
-version = "0.4.0"
+version = "0.6.0"
 
 buildscript {
     // AGP 8.5.x + Kotlin 1.9.24: a modern, stable combo compatible with the

@@ -11,6 +11,7 @@
 #include "llm/model.h"
 #include "llm/quant.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -150,6 +151,7 @@ struct ToyGgufConfig {
     bool qk_norm = false;             // emit Gemma3 per-head q/k norms
     float rope_local = 0.f;           // Gemma3 local (sliding) RoPE base (0 = none)
     int64_t swa_pattern = 0;          // Gemma3 global-layer period (0 = all global)
+    int64_t sliding_window = 0;       // attention.sliding_window (0 = not written)
     bool fused_qkv = false;           // Phi3: one attn_qkv + fused ffn_up (gate;up)
     int64_t rope_dim = 0;             // Phi3 partial rotary dims (0 = full head_dim)
     int64_t n_experts = 0;            // Mixtral expert count (0 = dense FFN)
@@ -157,6 +159,8 @@ struct ToyGgufConfig {
     bool gelu_ffn = false;            // GPT-2/Phi-2 non-gated GELU MLP (ffn_up/down only)
     bool full_bias = false;           // GPT-2/Phi-2 LayerNorm + projection biases
     bool pos_emb = false;             // GPT-2 learned position embeddings
+    bool permute_qk = false;          // reorder q/k rows as llama.cpp's HF->GGUF Llama
+                                      // converter does (adjacent-pair RoPE == rotate-half)
 };
 
 inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
@@ -181,12 +185,9 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
     if (c.final_softcap > 0.f) w.f32(a + "final_logit_softcapping", c.final_softcap);
     if (c.rope_local > 0.f)    w.f32(a + "rope.local_freq_base", c.rope_local);
     if (c.swa_pattern > 0)     w.u32(a + "attention.sliding_window_pattern", (uint32_t)c.swa_pattern);
-    if (c.fused_qkv) {
-        // Pin head_dim explicitly so rope.dimension_count (partial rotary) is
-        // not mistaken for it during config discovery.
-        w.u32(a + "attention.key_length", (uint32_t)head_dim);
-        if (c.rope_dim > 0) w.u32(a + "rope.dimension_count", (uint32_t)c.rope_dim);
-    }
+    if (c.sliding_window > 0)  w.u32(a + "attention.sliding_window", (uint32_t)c.sliding_window);
+    // Like real Phi GGUFs: rope.dimension_count only, no attention.key_length.
+    if (c.fused_qkv && c.rope_dim > 0) w.u32(a + "rope.dimension_count", (uint32_t)c.rope_dim);
     if (c.n_experts > 0) {
         w.u32(a + "expert_count", (uint32_t)c.n_experts);
         w.u32(a + "expert_used_count",
@@ -206,10 +207,24 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
         w.u32("tokenizer.ggml.eos_token_id", 2);
     }
 
-    auto emit = [&](const std::string& name, std::vector<int64_t> shape, bool quant) {
+    // permute_heads > 0: reorder rows within each head so row (h, 2i + j) takes
+    // row (h, j * half + i), the converter's permute(); values are unchanged.
+    auto emit = [&](const std::string& name, std::vector<int64_t> shape, bool quant,
+                    int64_t permute_heads = 0) {
         int64_t n = 1; for (auto d : shape) n *= d;
         std::vector<float> f(n);
         for (auto& v : f) v = nd(rng);
+        if (permute_heads > 0) {
+            const int64_t rows = shape[0], cols = n / shape[0];
+            const int64_t hd = rows / permute_heads, half = hd / 2;
+            std::vector<float> g(f);
+            for (int64_t h = 0; h < permute_heads; ++h)
+                for (int64_t i = 0; i < half; ++i)
+                    for (int64_t j = 0; j < 2; ++j)
+                        std::copy_n(&f[(h * hd + j * half + i) * cols], cols,
+                                    &g[(h * hd + 2 * i + j) * cols]);
+            f.swap(g);
+        }
         DType dt = quant ? c.weight_type : DType::F32;
         if (dt == DType::F32) {
             w.add_tensor(name, DType::F32, shape, f.data(), n * 4);
@@ -233,15 +248,16 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
             // separate q,k,v below, so the values are identical.
             emit(names::blk(i, "attn_qkv.weight"), {q_dim + 2 * kv_dim, c.dim}, true);
         } else {
-            emit(names::attn_q(i), {q_dim, c.dim}, true);
-            emit(names::attn_k(i), {kv_dim, c.dim}, true);
+            emit(names::attn_q(i), {q_dim, c.dim}, true, c.permute_qk ? c.n_heads : 0);
+            emit(names::attn_k(i), {kv_dim, c.dim}, true, c.permute_qk ? c.n_kv_heads : 0);
             emit(names::attn_v(i), {kv_dim, c.dim}, true);
         }
         emit(names::attn_out(i), {c.dim, q_dim}, true);
         if (c.qk_norm) { ones(names::blk(i, "attn_q_norm.weight"), head_dim);
                          ones(names::blk(i, "attn_k_norm.weight"), head_dim); }
         if (c.post_norms) ones(names::blk(i, "post_attention_norm.weight"), c.dim);
-        ones(names::ffn_norm(i), c.dim);
+        const bool parallel = c.arch == "phi2";   // one shared norm, no ffn_norm (as real Phi-2)
+        if (!parallel) ones(names::ffn_norm(i), c.dim);
         if (c.n_experts > 0) {
             // Packed 3D expert projections. Filled in the same RNG order and
             // total size as the dense gate/up/down, so a single-expert MoE has
@@ -278,7 +294,7 @@ inline void write_toy_gguf(const std::string& path, const ToyGgufConfig& c) {
         };
         for (int64_t i = 0; i < c.n_layers; ++i) {
             vecf(names::blk(i, "attn_norm.bias"), c.dim);
-            vecf(names::blk(i, "ffn_norm.bias"), c.dim);
+            if (c.arch != "phi2") vecf(names::blk(i, "ffn_norm.bias"), c.dim);
             vecf(names::blk(i, "attn_qkv.bias"), q_dim + 2 * kv_dim);
             vecf(names::blk(i, "attn_output.bias"), c.dim);
             vecf(names::blk(i, "ffn_up.bias"), c.ffn_dim);

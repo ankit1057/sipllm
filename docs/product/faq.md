@@ -28,7 +28,7 @@ Not really — treat it as CPU-only today. The Vulkan backend is **experimental 
 
 ## Which models and architectures are supported?
 
-The engine dispatches on `general.architecture` and implements **Llama, Mistral, Qwen2/2.5, Gemma&nbsp;2, Gemma&nbsp;3 text, Phi-3, Phi-2, GPT-2, and Mixtral/MoE**. A few caveats: sliding-window attention is **not** modeled for Mistral or Gemma3 (they attend the full causal range); "nemo"/Mistral-Nemo is not a recognized arch string and falls back through the Unknown→Llama path (which works because Nemo is Llama-like). The cross-engine golden matrix currently covers the Llama path.
+The engine dispatches on `general.architecture`. As of v0.6.0, greedy output from the same GGUF file has been compared token for token with llama.cpp for **Llama-family models (Llama 2/3.x, TinyLlama, SmolLM2), Qwen2/2.5, Gemma&nbsp;3 and Phi-2**. **Gemma&nbsp;2, Gemma&nbsp;4, Phi-3/4, Mixtral/MoE and GPT-2** are implemented and unit-tested on synthetic weights only. Other names (DeepSeek, Kimi, Yi, Baichuan, InternLM2, GLM-4) run the Llama block and work only where the model really is Llama-shaped; StarCoder&nbsp;2 is not supported. The README's model-architecture table has the evidence for each row. "nemo"/Mistral-Nemo is not a recognized arch string and falls back through the Unknown→Llama path (which works because Nemo is Llama-like). Sliding-window attention is applied per layer: on every layer for models that declare a window, and on the local layers only for Gemma&nbsp;2/3.
 
 ## Which quantization formats can it read?
 
@@ -48,7 +48,7 @@ There is a Flutter/FFI layer (Wave 8): a stable C ABI wrapping the C++ engine, a
 
 ## Does it apply a chat template?
 
-No. The engine runs inference over **raw text** and adds a BOS token only on a fresh sequence — it applies no chat/prompt template. The Flutter app formats conversations itself (chatml/llama3/zephyr/raw). If you use the raw engine, format the prompt yourself.
+The engine core (`Runtime::generate`, the C ABI and the Dart plugin) runs **raw text**: it applies no template, and adds a BOS token on a fresh sequence only when the model asks for one (`tokenizer.ggml.add_bos_token`). The CLI's `--chat` mode, the HTTP server and the agent loop do apply one, picked from the GGUF's own `tokenizer.chat_template` (ChatML, Llama-3, Gemma, Phi-3, Zephyr or `[INST]`), with the architecture as a fallback. Special tokens such as `<|im_start|>` are parsed as single tokens. The Flutter app formats conversations itself (chatml/llama3/zephyr/raw).
 
 ## Can I get embeddings?
 

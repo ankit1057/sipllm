@@ -138,6 +138,10 @@ RuntimeProfile tune_if_needed(const HardwareInfo& hw, const AutoTunerOptions& op
 
     if (opt.disable_autotune) {
         LOG_INFO("Auto-tuner disabled, using defaults");
+        // No tuned policy: -1 keeps the caller's default schedule. The struct
+        // default (0) is SchedulePolicy::Static, which callers would apply as
+        // if it had been measured (it is the slowest policy on big.LITTLE).
+        profile.schedule_policy = -1;
         return profile;
     }
 
@@ -148,6 +152,15 @@ RuntimeProfile tune_if_needed(const HardwareInfo& hw, const AutoTunerOptions& op
 
     profile = run_micro_benchmarks(hw);
     save_runtime_profile(hw_id, profile);
+    return profile;
+}
+
+RuntimeProfile cli_runtime_profile(const HardwareInfo& hw, bool autotune_requested,
+                                   const AutoTunerOptions& opt) {
+    if (autotune_requested && !opt.disable_autotune) return tune_if_needed(hw, opt);
+    RuntimeProfile profile;
+    profile.threads = 0;           // ThreadPool: every core
+    profile.schedule_policy = -1;  // keep the caller's default (fixed16)
     return profile;
 }
 
