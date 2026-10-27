@@ -148,7 +148,10 @@ std::string render_chat(const std::vector<ChatMessage>& messages,
                         bool add_gen_prompt);
 
 // ============================================================================
-// Production System Tools (read_file, write_file, list_dir, bash, grep_search)
+// Production System Tools (read_file, write_file, edit_file, list_dir, bash,
+// grep_search). All path arguments are confined to `workdir`: paths that
+// resolve outside it (".." escapes, foreign absolute paths, symlinks out) are
+// refused with an "error: ..." result string; handlers never throw.
 // ============================================================================
 
 ToolDef make_read_file_tool();
@@ -156,6 +159,11 @@ ToolHandler make_read_file_handler(const std::string& workdir = ".");
 
 ToolDef make_write_file_tool();
 ToolHandler make_write_file_handler(const std::string& workdir = ".");
+
+// edit_file: exact-match string replacement (path, old_string, new_string,
+// replace_all?). Errors report the match count + a numbered snippet.
+ToolDef make_edit_file_tool();
+ToolHandler make_edit_file_handler(const std::string& workdir = ".");
 
 ToolDef make_list_dir_tool();
 ToolHandler make_list_dir_handler(const std::string& workdir = ".");
@@ -166,8 +174,8 @@ ToolHandler make_bash_handler(const std::string& workdir = ".");
 ToolDef make_grep_search_tool();
 ToolHandler make_grep_search_handler(const std::string& workdir = ".");
 
-// Registers real production system tools (read_file, write_file, list_dir,
-// bash, grep_search) into a ToolRegistry and an associated handler map.
+// Registers real production system tools (read_file, write_file, edit_file,
+// list_dir, bash, grep_search) into a ToolRegistry and an associated handler map.
 void register_system_tools(ToolRegistry& reg,
                            std::unordered_map<std::string, ToolHandler>& handlers,
                            const std::string& workdir = ".");
@@ -175,5 +183,51 @@ void register_system_tools(ToolRegistry& reg,
 // Helper overload taking a registrar callback (e.g. for Nishachar::add_tool).
 void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
                            const std::string& workdir = ".");
+
+// ---- Agent harness options --------------------------------------------------
+// A syntax check run after every successful write_file/edit_file on a path
+// ending in `ext`; `cmd` is a shell command with {file} replaced by the file's
+// path, exit code 0 = the file parses (e.g. {".dart", "dart format -o none {file}"}).
+struct EditCheck {
+    std::string ext;
+    std::string cmd;
+    bool warn_only = false;   // true: never undo; append the checker's findings to the result
+};
+
+// ---- Diagnostics in tool output (checks, compilers, analyzers) ---------------
+struct Diagnostic {
+    std::string severity;   // "error" | "warning" | "info"
+    std::string file;       // as printed (may be absolute)
+    int line = 0;
+    std::string code;       // analyzer/lint code if any ("" for compiler-style lines)
+    std::string message;
+};
+// Recognises `flutter analyze` lines ("  error • msg • file:L:C • code"), `dart
+// analyze` lines ("error - file:L:C - msg - code"),
+// `dart analyze --format=machine` lines ("ERROR|TYPE|CODE|file|L|C|len|msg") and
+// compiler-style lines ("file:L:C: error: msg", also "Error:"). Order preserved,
+// exact duplicates dropped.
+std::vector<Diagnostic> parse_diagnostics(const std::string& output);
+// Drops package-manager chatter (pub "Resolving dependencies...", "x 1.0 (1.1
+// available)", "Got dependencies!", "Try `flutter pub outdated`...").
+std::string strip_check_noise(const std::string& output);
+
+struct SystemToolOptions {
+    size_t read_page_bytes = 5000;         // read_file per-call output cap
+    std::vector<EditCheck> edit_checks;    // post-edit syntax checks
+};
+
+// read_file with a custom per-call output cap (the default overload uses 5000).
+ToolHandler make_read_file_handler(const std::string& workdir, size_t max_out_bytes);
+
+// Wraps write_file/edit_file: after a successful change runs the matching
+// EditCheck. If the file parsed before and not after, the change is undone and
+// an "error: change rejected" result returned with the checker output; if it
+// did not parse before either (or is new), the change is kept and the output
+// appended as a warning, so repairs of an already-broken file go through.
+ToolHandler with_edit_checks(ToolHandler inner, const std::string& workdir, std::vector<EditCheck> checks);
+
+void register_system_tools(std::function<void(ToolDef, ToolHandler)> registrar,
+                           const std::string& workdir, const SystemToolOptions& opt);
 
 } // namespace llm

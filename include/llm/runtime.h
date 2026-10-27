@@ -103,6 +103,13 @@ public:
                          SamplerConfig scfg, const TokenCallback& on_token,
                          GenStats* stats);
 
+    // Optional logit filter, applied to a copy of the logits before every
+    // sampling decision (prefill's first token and each decode step). Used by
+    // agents to forbid tokens in some states (e.g. Gemma 4 thought markers
+    // after the first token of a step). Null (default) => byte-identical.
+    using LogitFilter = std::function<void(float* logits, int64_t vocab)>;
+    void set_logit_filter(LogitFilter f) { logit_filter_ = std::move(f); }
+
     // Per-token profiling sink: when set, each decode step reports its
     // per-layer timing breakdown and peak RSS (for the live visualization).
     using ProfileSink = std::function<void(int token_index,
@@ -180,6 +187,8 @@ private:
     std::unique_ptr<class SemanticCache> semantic_cache_;
     std::unique_ptr<class SpecDecoder> spec_decoder_;
     int max_draft_len_ = 0;
+    LogitFilter logit_filter_;           // optional, see set_logit_filter()
+    std::vector<float> filtered_logits_; // scratch copy the filter writes into
     int layer_begin_ = 0, layer_end_ = 0;   // #70: this node's layers
     bool budgeted_ = false;        // #81: a --ram-budget plan governs this runtime
     bool budget_forced_ = false;   // #81: ... and the operator forced it (--ram-budget-force)

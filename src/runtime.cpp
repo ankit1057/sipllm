@@ -293,6 +293,11 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
         committed_.insert(committed_.end(),
                           prompt_ids.begin() + reuse_r, prompt_ids.end());
         first_logits_.assign(logits, logits + vocab);
+        if (logit_filter_) {
+            filtered_logits_.assign(logits, logits + vocab);
+            logit_filter_(filtered_logits_.data(), vocab);
+            logits = filtered_logits_.data();
+        }
         next = sampler.sample(logits, vocab);
     }
     if (rtk) rtk->on_prefill(kv_view());
@@ -331,6 +336,11 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
             ++pos_;
             if (rtk) rtk->on_step(kv_view());
             if (profile_sink_) profile_sink_(n, tf_->last_timings(), tf_->peak_rss());
+            if (logit_filter_) {
+                filtered_logits_.assign(logits, logits + vocab);
+                logit_filter_(filtered_logits_.data(), vocab);
+                logits = filtered_logits_.data();
+            }
             next = sampler.sample(logits, vocab);
         } else {
             // One batched verify pass over [next, draft...] streams every layer
@@ -352,6 +362,11 @@ std::string Runtime::generate(const std::string& prompt, int max_new,
 
             for (int i = 0; i <= K; ++i) {
                 const float* step_logits = spec_logits + (size_t)i * vocab;
+                if (logit_filter_) {   // same filter as the plain path, per step
+                    filtered_logits_.assign(step_logits, step_logits + vocab);
+                    logit_filter_(filtered_logits_.data(), vocab);
+                    step_logits = filtered_logits_.data();
+                }
                 int64_t sampled = sampler.sample(step_logits, vocab);
                 ++pos_;   // batch[i] is now consumed at position pos_-1
 

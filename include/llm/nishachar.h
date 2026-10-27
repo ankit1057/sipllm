@@ -19,9 +19,11 @@
 
 #include "llm/tools.h"
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace llm {
@@ -42,6 +44,7 @@ enum class AgentStop {
     MaxSteps,   // hit AgentConfig::max_steps without a final answer
     ToolError,  // a handler failed and stop_on_tool_error was set
     Empty,      // generator returned empty text -> no progress possible
+    Loop,       // the same tool call was repeated past the loop guard
 };
 
 const char* agent_stop_name(AgentStop s);
@@ -55,6 +58,164 @@ struct AgentStep {
     std::string tool_args_json;  // the call's raw JSON (for the report)
     std::string tool_result;     // handler output, or the error text if !tool_ok
     bool        tool_ok = true;  // false if the handler failed
+    bool        malformed = false;  // model attempted a call that failed to parse
+                                    // (tool_result holds the error fed back)
+    bool        nudged = false;     // no-tool reply answered with a "use a tool"
+                                    // nudge (require_tool_before_done)
+    double      gen_s = -1.0;       // wall seconds in the generator (-1 = n/a)
+    double      tool_s = -1.0;      // wall seconds in the tool handler (-1 = n/a)
+};
+
+// Result of scanning one model output for a tool call (lenient, zero-dep).
+//   None      -> no attempted call: the output is a final answer.
+//   Call      -> a valid call to a registered tool (arguments normalized).
+//   Malformed -> a call was attempted (a <tool_call> / <|tool_call> marker is
+//                present) but could not be used; `error` says why.
+// Accepted variants: <tool_call>{json}</tool_call> (optionally ```json fenced),
+// "arguments" given as a JSON-encoded string, "parameters"/"args" aliases,
+// Gemma 4 native <|tool_call>call:NAME{key:<|"|>v<|"|>}<tool_call|>, and a bare
+// JSON object (no markers) naming a registered tool.
+struct AgentCallParse {
+    enum class Kind { None, Call, Malformed };
+    Kind        kind = Kind::None;
+    ToolCall    call;    // valid when kind == Call (raw_json = canonical JSON)
+    std::string error;   // reason when kind == Malformed
+};
+
+AgentCallParse parse_agent_tool_call(const std::string& text, const ToolRegistry& reg);
+
+// Counts tool failures over a whole run, keyed by tool name + the first line
+// of the error, so a model fixated on one broken call is caught even when it
+// interleaves other calls (re-reading, re-running analyze) between retries.
+// record() returns how many times this tool has now failed with this error
+// (1 on the first failure), or 0 when `result` is not an error.
+class FailedCallTracker {
+public:
+    int record(const std::string& tool, const std::string& result);
+private:
+    std::vector<std::pair<std::string, int>> fails_;
+};
+
+// Text appended to a repeated failure's tool result (n >= 2): tells the model
+// to change approach, with a tool-specific way out for edit_file.
+std::string repeat_failure_note(const std::string& tool, int n);
+
+// Degeneration ("rut") detector for streamed model output: returns the unit
+// that the tail of `text` repeats (e.g. "\x2d\x2e\x20", or Gemma 4's empty
+// "<|channel>thought\n<channel|>" emitted thousands of times), or "" if the
+// tail looks healthy. Units of 1-24 chars need >= 10 repeats (and >= 96 chars),
+// units of 25-160 chars need >= 6 repeats. A long run of one space, newline,
+// '-', '=' or '/' is treated as legitimate.
+std::string degenerate_tail_unit(const std::string& text);
+
+// ---- Gemma 4 native tool loop: step logic (pure, unit-tested) ----------------
+// What one generated step of the native loop amounts to.
+enum class NativeStepKind {
+    ToolCall,    // a complete <|tool_call>...<tool_call|>
+    CutInCall,   // a call was opened but not closed (token cap or full context)
+    Rut,         // the degeneration detector fired
+    CutNoCall,   // token cap or full context hit with no call and no end of turn
+    Final,       // the turn ended with real text and no call
+    JunkFinal,   // the turn ended with no call and only empty thought markers (or nothing)
+};
+
+struct NativeStep {
+    NativeStepKind kind = NativeStepKind::Final;
+    bool in_call = false;        // "<|tool_call>" appears in the output
+    std::string final_text;      // Final: the answer, thought markers stripped
+};
+
+// `out` = generated text; `call_closed` = "<tool_call|>" was seen; `rut` = the
+// detector's unit ("" if healthy); `hit_cap` = the step ended at --max-new or a
+// full context rather than at an end-of-turn token.
+NativeStep classify_native_step(const std::string& out, bool call_closed, const std::string& rut, bool hit_cap);
+
+// Harness-authored text fed back to the model must not contain Gemma control
+// tokens: the tokenizer matches "<|channel>", "<|tool_call>" ... literally, so
+// quoting them feeds real specials. "<|x>" -> "<x>", "<x|>" -> "<x>".
+std::string strip_control_tokens(std::string s);
+
+// Closes the model's turn and opens a user turn carrying `msg` (sanitised),
+// then the next model turn. generate() never feeds the end-of-turn token, so
+// this is the only "<turn|>" for the model's turn.
+std::string native_user_turn(const std::string& msg);
+
+struct LoopGuardConfig {
+    std::vector<std::string> check_patterns;  // a bash command containing one of these is a check; empty = any bash
+    int steps_left_warning = 3;               // note when this many steps remain (0 = off)
+    int max_junk_nudges = 2;                  // empty answers nudged before giving up
+};
+
+// Nudges for the native loop: no accepting empty "final answers", and one
+// reminder to run the checks when files changed after the last check.
+class LoopGuards {
+public:
+    explicit LoopGuards(LoopGuardConfig cfg = {}) : cfg_(std::move(cfg)) {}
+    // After every executed tool call (bash_command: the command for "bash", else "").
+    void on_tool(const std::string& tool, const std::string& bash_command, bool ok, const std::string& result);
+    // For a Final / JunkFinal / CutNoCall step: the message to feed instead of
+    // finishing, or "" to accept a Final. *give_up is set when empty answers
+    // exceeded the cap: stop as Empty, never as Done.
+    std::string on_no_call(const NativeStep& step, bool* give_up);
+    // " NOTE: N steps left ..." exactly when steps_left == the warning threshold, else "".
+    std::string steps_left_note(int steps_left) const;
+    bool edited_since_check() const { return edited_since_check_; }
+private:
+    LoopGuardConfig cfg_;
+    bool edited_since_check_ = false;
+    bool verify_nudged_ = false;
+    int junk_nudges_ = 0;
+};
+
+// Per-step sampler seed: a different, reproducible stream for every step.
+uint64_t native_step_seed(uint64_t base, int step);
+
+// Gemma 4 control tokens the native loop constrains (ids; -1 = not in vocab).
+struct ControlTokenIds {
+    int64_t channel_open = -1;     // "<|channel>"  (opens a thought block)
+    int64_t channel_close = -1;    // "<channel|>"
+    int64_t turn_open = -1;        // "<|turn>"     (the model must never open a turn)
+    int64_t tool_response = -1;    // "<|tool_response>" (only the harness writes these)
+};
+
+// Per-step sampling rules for the native loop (feed filter() to
+// Runtime::set_logit_filter, on_token() from the token callback):
+//  - "<|turn>" and "<|tool_response>" can never be sampled;
+//  - "<|channel>" only as the first token of a step, and only if the thought
+//    block was not prefilled (v6-r1 L3: 4096 empty markers in a row);
+//  - "<channel|>" only while a thought block is open;
+//  - with think_budget > 0, on_token() returns false once a thought block has
+//    run past the budget, so the caller can close it.
+class StepTokenGuard {
+public:
+    StepTokenGuard(ControlTokenIds ids, bool thought_prefilled, int think_budget)
+        : ids_(ids), thought_open_(thought_prefilled), prefilled_(thought_prefilled), budget_(think_budget) {}
+    void filter(float* logits, int64_t vocab) const;
+    bool on_token(int64_t id);
+    void force_close() { thought_open_ = false; }
+    bool thought_open() const { return thought_open_; }
+    int generated() const { return generated_; }
+private:
+    ControlTokenIds ids_;
+    bool thought_open_;
+    bool prefilled_;
+    int budget_;
+    int generated_ = 0;
+    int thought_tokens_ = 0;
+};
+
+// Removes thought blocks ("<|channel>...<channel|>", any content, and an
+// unclosed trailing one) from model output.
+std::string strip_thoughts(const std::string& out);
+
+// Tracks diagnostics across a run's checks and summarises what changed:
+// fixed / still failing / new, identity = file + code + message (lines move).
+class CheckDigest {
+public:
+    std::string update(const std::vector<Diagnostic>& diags);
+private:
+    std::vector<Diagnostic> prev_;
+    bool has_prev_ = false;
 };
 
 // Structured run report (a slice of the #58 "structured run report" deliverable).
@@ -66,6 +227,7 @@ struct AgentResult {
 
     int steps_taken() const { return static_cast<int>(steps.size()); }
     int tool_calls() const;      // number of steps that dispatched a tool
+    double total_s() const;      // sum of known gen_s + tool_s
     std::string report() const;  // human-readable structured summary
 };
 
@@ -79,11 +241,24 @@ struct AgentConfig {
         "You are Nishachar, an autonomous worker. Achieve the user's goal step "
         "by step. To use a tool, emit exactly one "
         "<tool_call>{\"name\":\"<tool>\",\"arguments\":{...}}</tool_call> and "
-        "stop. When the goal is complete, reply with the final answer and no "
+        "stop. The JSON must be valid: escape newlines as \\n and quotes as "
+        "\\\". When the goal is complete, reply with the final answer and no "
         "tool call.";
 
     ChatTemplateStyle style = ChatTemplateStyle::ChatML;
     bool stop_on_tool_error = false;  // false => feed the error back and continue
+
+    // When the model answers without ever having used a tool, nudge it once
+    // ("act with a tool call") instead of accepting the answer as final.
+    bool require_tool_before_done = false;
+
+    // Loop guard: the Nth consecutive identical call (name + args) is not run;
+    // an error is fed back instead. One more identical call stops with
+    // AgentStop::Loop. 0 disables.
+    int loop_repeat_limit = 3;
+
+    // Optional observer invoked after every recorded step (transcripts, UIs).
+    std::function<void(const AgentStep&)> on_step;
 };
 
 // The loop. Model-agnostic: register tools (advertised schema + C++ executor),
