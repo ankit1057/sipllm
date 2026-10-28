@@ -1,0 +1,151 @@
+{
+ "meta": {
+  "benchmark": "wave 14: batched int8 prefill kernels (bit-identical per token)",
+  "date": "2026-10-19",
+  "branch": "wave14-batched-prefill",
+  "base": "issue-68-cpu-dispatch @ 0af5b20",
+  "model": "tinyllama-1.1b Q4_K_M",
+  "prompt": "prompt128 (135 tokens)",
+  "settings": "--fast --greedy -n 32, ctx 512, 4 threads, fully resident",
+  "hardware": "Apple M3 (load1m 3.4-3.8, shared machine) and OnePlus IV2201 / Dimensity 900 (adb shell; big-core clock per run recorded)",
+  "peak_rss_source": "M3 /usr/bin/time -l; phone VmHWM",
+  "correctness": "test_neon: batched == per-token (memcmp) for Q8_0/Q4_K/Q6_K, bs 1..33, 1 and 4 threads, on M3 and phone; end-to-end output hash identical in every run below"
+ },
+ "m3": [
+  {
+   "rep": 1,
+   "build": "before",
+   "load1m": 3.38,
+   "prompt_tokens": 135,
+   "decode_tok_s": 57.66,
+   "prefill_tok_s": 72.07,
+   "ttft_s": 1.873,
+   "peak_rss_mb": 665.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 1,
+   "build": "batched",
+   "load1m": 3.38,
+   "prompt_tokens": 135,
+   "decode_tok_s": 53.74,
+   "prefill_tok_s": 97.93,
+   "ttft_s": 1.379,
+   "peak_rss_mb": 668.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 2,
+   "build": "before",
+   "load1m": 3.59,
+   "prompt_tokens": 135,
+   "decode_tok_s": 53.14,
+   "prefill_tok_s": 76.33,
+   "ttft_s": 1.769,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 2,
+   "build": "batched",
+   "load1m": 3.59,
+   "prompt_tokens": 135,
+   "decode_tok_s": 56.91,
+   "prefill_tok_s": 95.97,
+   "ttft_s": 1.407,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 3,
+   "build": "before",
+   "load1m": 3.79,
+   "prompt_tokens": 135,
+   "decode_tok_s": 57.28,
+   "prefill_tok_s": 74.58,
+   "ttft_s": 1.81,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  },
+  {
+   "rep": 3,
+   "build": "batched",
+   "load1m": 3.79,
+   "prompt_tokens": 135,
+   "decode_tok_s": 57.6,
+   "prefill_tok_s": 93.74,
+   "ttft_s": 1.44,
+   "peak_rss_mb": 667.0,
+   "output_sha": "8d17524ba7fa"
+  }
+ ],
+ "phone": [
+  {
+   "rep": 1,
+   "build": "before",
+   "prompt_tokens": 135,
+   "decode_tok_s": 10.03,
+   "prefill_tok_s": 11.79,
+   "ttft_s": 11.451,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1540000.0,
+   "output_sha": "64c774850bc4"
+  },
+  {
+   "rep": 1,
+   "build": "batched",
+   "prompt_tokens": 135,
+   "decode_tok_s": 8.27,
+   "prefill_tok_s": 14.58,
+   "ttft_s": 9.259,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1300000.0,
+   "output_sha": "64c774850bc4"
+  },
+  {
+   "rep": 2,
+   "build": "before",
+   "prompt_tokens": 135,
+   "decode_tok_s": 9.61,
+   "prefill_tok_s": 11.58,
+   "ttft_s": 11.655,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1430000.0,
+   "output_sha": "64c774850bc4"
+  },
+  {
+   "rep": 2,
+   "build": "batched",
+   "prompt_tokens": 135,
+   "decode_tok_s": 8.13,
+   "prefill_tok_s": 14.57,
+   "ttft_s": 9.263,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1540000.0,
+   "output_sha": "64c774850bc4"
+  },
+  {
+   "rep": 3,
+   "build": "before",
+   "prompt_tokens": 135,
+   "decode_tok_s": 8.24,
+   "prefill_tok_s": 10.01,
+   "ttft_s": 13.492,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1540000.0,
+   "output_sha": "64c774850bc4"
+  },
+  {
+   "rep": 3,
+   "build": "batched",
+   "prompt_tokens": 135,
+   "decode_tok_s": 9.77,
+   "prefill_tok_s": 14.98,
+   "ttft_s": 9.013,
+   "vmhwm_mb": 633.0,
+   "big_khz_pre": 1540000.0,
+   "output_sha": "64c774850bc4"
+  }
+ ],
+ "same_session_reference": "llama.cpp CPU on the phone, 4 threads: pp16 51.4, pp64 54.5, pp128 57.8 tok/s"
+}

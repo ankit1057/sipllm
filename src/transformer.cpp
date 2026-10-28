@@ -1,5 +1,7 @@
 // transformer.cpp — decoder forward pass (see transformer.h).
 #include "llm/transformer.h"
+
+#include <cstdlib>
 #include "llm/linear.h"
 #include "llm/ops.h"
 #include "llm/simd.h"
@@ -7,17 +9,22 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 
 namespace llm {
 
 Transformer::Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool)
     : loader_(loader), kv_(kv), pool_(pool), cfg_(loader->config()) {
+    if (const char* e = std::getenv("SIPLLM_PREFILL_BATCH")) set_prefill_batch(std::atoll(e));
+    if (const char* e = std::getenv("SIPLLM_TILED_ATTN")) prefill_tiled_attn_ = std::atoi(e) != 0;
     x_.assign(cfg_.dim, 0.f);
     xb_.assign(cfg_.dim, 0.f);
     q_.assign(cfg_.q_dim(), 0.f);
     k_.assign(cfg_.kv_dim(), 0.f);
     v_.assign(cfg_.kv_dim(), 0.f);
-    att_.assign(kv_->max_ctx(), 0.f);
+    // One max_ctx score buffer per pool worker: attention runs one (token, head)
+    // item per work unit on the pool.
+    att_.assign((size_t)kv_->max_ctx() * (pool_ ? std::max(1, pool_->size()) : 1), 0.f);
     attn_out_.assign(cfg_.q_dim(), 0.f);
     proj_.assign(cfg_.dim, 0.f);
     hb_.assign(cfg_.ffn_dim, 0.f);
@@ -45,6 +52,22 @@ static inline float llama3_scale_freq(float freq, const Transformer::RopeScaling
     return (1.0f - smooth) * (freq / rs.factor) + smooth * freq;  // medium: interpolate
 }
 
+// #80: cos/sin depend on (pos, pair) only, so each RoPE call computes them once
+// and applies them to every head instead of once per head. Same expressions in
+// the same order, so the rotated values are bit-identical.
+namespace {
+struct RopeAngles {
+    static constexpr int64_t kStack = 256;
+    float c_stack[kStack], s_stack[kStack];
+    std::vector<float> c_heap, s_heap;
+    float* c = c_stack;
+    float* s = s_stack;
+    explicit RopeAngles(int64_t half) {
+        if (half > kStack) { c_heap.resize(half); s_heap.resize(half); c = c_heap.data(); s = s_heap.data(); }
+    }
+};
+} // namespace
+
 // Rotary embedding on adjacent element pairs (ggml "rope_norm"). GGUF Llama
 // weights are permuted at conversion time so that this adjacent-pair rotation
 // reproduces HF's rotate_half — so we apply exactly this to both q and k. This
@@ -53,12 +76,16 @@ static inline float llama3_scale_freq(float freq, const Transformer::RopeScaling
 void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                              int64_t pos, float theta_base) {
     const int64_t half = head_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -73,13 +100,17 @@ void Transformer::apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                              int64_t pos, float theta_base, const RopeScaling& rs) {
     if (!rs.llama3) { apply_rope(vec, n_heads, head_dim, pos, theta_base); return; }
     const int64_t half = head_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
+        freq = llama3_scale_freq(freq, rs);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta_base, -2.0f * (float)i / (float)head_dim);
-            freq = llama3_scale_freq(freq, rs);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -100,12 +131,16 @@ static inline void add_bias(float* y, const WeightRef& b, int64_t n) {
 static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
                      int64_t rot_dim, int64_t pos, float theta) {
     const int64_t half = rot_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
     for (int64_t h = 0; h < n_heads; ++h) {
         float* p = vec + h * head_dim;
         for (int64_t i = 0; i < half; ++i) {
-            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
-            float angle = (float)pos * freq;
-            float c = std::cos(angle), s = std::sin(angle);
+            const float c = a.c[i], s = a.s[i];
             float x0 = p[2 * i], x1 = p[2 * i + 1];
             p[2 * i]     = x0 * c - x1 * s;
             p[2 * i + 1] = x0 * s + x1 * c;
@@ -113,36 +148,103 @@ static void rope_rot(float* vec, int64_t n_heads, int64_t head_dim,
     }
 }
 
+// NeoX-style RoPE: rotate the half-split pairs (i, i + rot_dim/2) of the first
+// rot_dim dims of each head. `freq_factors` (optional, rot_dim/2 entries)
+// divides each pair's frequency like ggml's rope freq_factors (Gemma 4's
+// proportional global RoPE: a 1e30 factor leaves that pair unrotated).
+static void rope_neox(float* vec, int64_t n_heads, int64_t head_dim, int64_t rot_dim,
+                      int64_t pos, float theta, const float* freq_factors) {
+    const int64_t half = rot_dim / 2;
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* p = vec + h * head_dim;
+        for (int64_t i = 0; i < half; ++i) {
+            float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+            if (freq_factors) freq /= freq_factors[i];
+            float angle = (float)pos * freq;
+            float c = std::cos(angle), s = std::sin(angle);
+            float x0 = p[i], x1 = p[i + half];
+            p[i]        = x0 * c - x1 * s;
+            p[i + half] = x0 * s + x1 * c;
+        }
+    }
+}
+
+// Weightless RMSNorm (Gemma 4's per-head V norm).
+static void rmsnorm_noweight(float* x, int64_t n, float eps) {
+    float ss = 0.f;
+    for (int64_t i = 0; i < n; ++i) ss += x[i] * x[i];
+    const float scale = 1.0f / std::sqrt(ss / (float)n + eps);
+    for (int64_t i = 0; i < n; ++i) x[i] *= scale;
+}
+
+// The q/k and post-sublayer RMS norms follow the block's norm kind: (1+w) for
+// raw HF Gemma weights, plain w for GGUF (the converter bakes in the +1).
+static inline void rms_norm_kind(NormKind k, float* out, const float* x, const float* w,
+                                 int64_t n, float eps) {
+    if (k == NormKind::RMSNormGemma) rmsnorm_gemma(out, x, w, n, eps);
+    else rmsnorm(out, x, w, n, eps);
+}
+
+// Rotate-half RoPE (ggml "rope_neox"): pairs (i, i + rot_dim/2) over the first
+// `rot_dim` dims of each head; the rest pass through. For archs whose GGUF q/k
+// are not permuted at conversion (Qwen2, Gemma, Phi).
+void Transformer::apply_rope_neox(float* vec, int64_t n_heads, int64_t head_dim,
+                                  int64_t rot_dim, int64_t pos, float theta) {
+    const int64_t half = rot_dim / 2;
+    RopeAngles a(half);
+    for (int64_t i = 0; i < half; ++i) {
+        float freq = std::pow(theta, -2.0f * (float)i / (float)rot_dim);
+        float angle = (float)pos * freq;
+        a.c[i] = std::cos(angle); a.s[i] = std::sin(angle);
+    }
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* p = vec + h * head_dim;
+        for (int64_t i = 0; i < half; ++i) {
+            const float c = a.c[i], s = a.s[i];
+            float x0 = p[i], x1 = p[i + half];
+            p[i]        = x0 * c - x1 * s;
+            p[i + half] = x0 * s + x1 * c;
+        }
+    }
+}
+
 // Single data-driven transformer block pipeline (Issue #44).
 // Conditionally applies all per-architecture features based on cfg_.block_spec.
-void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
+void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in,
+                        const int64_t* row_pos, KVCache* const* row_kv) {
     if (bs == 0) return;
     if (x_in == nullptr) { x_in = x_.data(); bs = 1; }
+    // Row i's absolute position and KV cache: consecutive positions of kv_ for
+    // a prompt (prefill) or a single token, or one independent sequence per row.
+    auto pos_of = [&](int64_t i) -> int64_t { return row_pos ? row_pos[i] : pos + i; };
+    auto kv_of = [&](int64_t i) -> KVCache* { return row_kv ? row_kv[i] : kv_; };
 
     const int64_t dim = cfg_.dim;
-    const int64_t hd = cfg_.head_dim;
+    // Per-layer attention geometry (uniform for every arch but Gemma 4).
+    const int64_t hd = cfg_.head_dim_at(layer);
     const int64_t n_heads = cfg_.n_heads;
-    const int64_t n_kv = cfg_.n_kv_heads;
-    const int64_t kv_dim = cfg_.kv_dim();
-    const int64_t q_dim = cfg_.q_dim();
-    const int64_t group = cfg_.gqa_group();
+    const int64_t n_kv = cfg_.kv_heads_at(layer);
+    const int64_t kv_dim = cfg_.kv_dim_at(layer);
+    const int64_t q_dim = cfg_.q_dim_at(layer);
+    const int64_t group = n_heads / n_kv;
+    if (group > 64) throw std::runtime_error("attention: more than 64 query heads per KV head");
     const BlockSpec& b = cfg_.block_spec;
 
-    // Ensure buffers are large enough for bs
+    // Ensure buffers are large enough for bs (sized by the widest layer).
     if (xb_.size() < (size_t)bs * dim) {
+        const int64_t q_max = cfg_.q_dim(), kv_max = cfg_.kv_dim();
         xb_.resize(bs * dim);
-        q_.resize(bs * q_dim);
-        k_.resize(bs * kv_dim);
-        v_.resize(bs * kv_dim);
-        attn_out_.resize(bs * q_dim);
+        q_.resize(bs * q_max);
+        k_.resize(bs * kv_max);
+        v_.resize(bs * kv_max);
+        attn_out_.resize(bs * q_max);
         proj_.resize(bs * dim);
         hb_.resize(bs * cfg_.ffn_dim);
         hb2_.resize(bs * cfg_.ffn_dim);
-        fused_.resize(bs * std::max(q_dim + 2 * kv_dim, 2 * cfg_.ffn_dim));
-        if (b.n_experts > 0) {
-            router_.resize(bs * b.n_experts);
-            moe_.resize(bs * dim);
-        }
+        fused_.resize(bs * std::max(q_max + 2 * kv_max, 2 * cfg_.ffn_dim));
+        if (b.n_experts > 0) router_.resize(bs * b.n_experts);
+        // moe_ is also the parallel-residual FFN output (Phi-2), bs rows of dim.
+        if (b.n_experts > 0 || b.parallel_residual) moe_.resize(bs * dim);
     }
 
     // --- 1. Pre-Attention Norm ---
@@ -177,7 +279,10 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
     } else {
         linear_batch(q_.data(), loader_->getWeight(Role::AttnQ), xb_.data(), bs, pool_);
         linear_batch(k_.data(), loader_->getWeight(Role::AttnK), xb_.data(), bs, pool_);
-        linear_batch(v_.data(), loader_->getWeight(Role::AttnV), xb_.data(), bs, pool_);
+        WeightRef wv = loader_->getWeight(Role::AttnV);
+        if (wv.valid()) linear_batch(v_.data(), wv, xb_.data(), bs, pool_);
+        // Gemma 4 global layers have no attn_v: V is the raw (pre-norm, pre-RoPE) K.
+        else std::memcpy(v_.data(), k_.data(), (size_t)bs * kv_dim * sizeof(float));
         for (int64_t i = 0; i < bs; ++i) {
             add_bias(q_.data() + i * q_dim, loader_->getWeight(Role::AttnQBias), q_dim);
             add_bias(k_.data() + i * kv_dim, loader_->getWeight(Role::AttnKBias), kv_dim);
@@ -193,32 +298,56 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
             if (qn.valid())
                 for (int64_t h = 0; h < n_heads; ++h) {
                     float* qh = q_.data() + i * q_dim + h * hd;
-                    rmsnorm_gemma(qh, qh, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
+                    rms_norm_kind(b.norm, qh, qh, static_cast<const float*>(qn.data), hd, cfg_.rms_eps);
                 }
             if (kn.valid())
                 for (int64_t h = 0; h < n_kv; ++h) {
                     float* kh = k_.data() + i * kv_dim + h * hd;
-                    rmsnorm_gemma(kh, kh, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
+                    rms_norm_kind(b.norm, kh, kh, static_cast<const float*>(kn.data), hd, cfg_.rms_eps);
                 }
         }
+    }
+    if (b.v_norm) {
+        for (int64_t i = 0; i < bs * n_kv; ++i) rmsnorm_noweight(v_.data() + i * hd, hd, cfg_.rms_eps);
     }
 
     // --- 4. RoPE ---
     if (b.rope != RopeKind::None) {
         float theta_base = cfg_.rope_theta;
-        if (b.rope_dual_base && ((layer + 1) % cfg_.sliding_window_pattern) != 0)
-            theta_base = cfg_.rope_theta_local;
-            
+        const bool swa_layer = cfg_.is_swa_layer(layer);
+        if (b.rope_dual_base) {
+            const bool local = cfg_.layer_swa.empty()
+                ? ((layer + 1) % cfg_.sliding_window_pattern) != 0
+                : swa_layer;
+            if (local) theta_base = cfg_.rope_theta_local;
+        }
+        // Gemma 4: global layers apply rope_freqs factors over their full head.
+        const float* ff = (!swa_layer && !cfg_.rope_freq_factors.empty() &&
+                           (int64_t)cfg_.rope_freq_factors.size() * 2 == hd)
+                              ? cfg_.rope_freq_factors.data() : nullptr;
+
         for (int64_t i = 0; i < bs; ++i) {
             float* qi = q_.data() + i * q_dim;
             float* ki = k_.data() + i * kv_dim;
-            int64_t pos_i = pos + i;
+            int64_t pos_i = pos_of(i);
+            if (b.rope_pairing == RopePairing::NeoX) {
+                rope_neox(qi, n_heads, hd, hd, pos_i, theta_base, ff);
+                rope_neox(ki, n_kv,    hd, hd, pos_i, theta_base, ff);
+                continue;
+            }
             switch (b.rope) {
                 case RopeKind::None: break;
-                case RopeKind::Partial:
-                    rope_rot(qi, n_heads, hd, b.rope_dim > 0 ? b.rope_dim : hd, pos_i, theta_base);
-                    rope_rot(ki, n_kv,    hd, b.rope_dim > 0 ? b.rope_dim : hd, pos_i, theta_base);
+                case RopeKind::Partial: {
+                    const int64_t rd = b.rope_dim > 0 ? b.rope_dim : hd;
+                    if (b.rope_neox) {
+                        apply_rope_neox(qi, n_heads, hd, rd, pos_i, theta_base);
+                        apply_rope_neox(ki, n_kv,    hd, rd, pos_i, theta_base);
+                    } else {
+                        rope_rot(qi, n_heads, hd, rd, pos_i, theta_base);
+                        rope_rot(ki, n_kv,    hd, rd, pos_i, theta_base);
+                    }
                     break;
+                }
                 case RopeKind::Llama3Scaled: {
                     RopeScaling rs;
                     rs.llama3 = true;
@@ -231,70 +360,303 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
                     break;
                 }
                 case RopeKind::Full:
-                    apply_rope(qi, n_heads, hd, pos_i, theta_base);
-                    apply_rope(ki, n_kv,    hd, pos_i, theta_base);
+                    if (b.rope_neox) {
+                        apply_rope_neox(qi, n_heads, hd, hd, pos_i, theta_base);
+                        apply_rope_neox(ki, n_kv,    hd, hd, pos_i, theta_base);
+                    } else {
+                        apply_rope(qi, n_heads, hd, pos_i, theta_base);
+                        apply_rope(ki, n_kv,    hd, pos_i, theta_base);
+                    }
                     break;
             }
         }
     }
 
     // --- 5. Cache Write & 6. Attention Math ---
-    const float scale = cfg_.query_pre_attn_scalar > 0.f ? (1.0f / std::sqrt(cfg_.query_pre_attn_scalar)) 
+    const float scale = cfg_.attn_scale > 0.f ? cfg_.attn_scale
+                      : cfg_.query_pre_attn_scalar > 0.f ? (1.0f / std::sqrt(cfg_.query_pre_attn_scalar))
                                                          : (1.0f / std::sqrt((float)hd));
-    std::vector<float> head_scratch;
-    if (kv_->precision() == KVPrecision::Q8_0) head_scratch.resize(hd);
+    const bool q8kv = kv_->precision() == KVPrecision::Q8_0;
+    const int64_t q8_bytes = type_nbytes(DType::Q8_0, hd);
 
-    for (int64_t i = 0; i < bs; ++i) {
-        int64_t pos_i = pos + i;
+    auto write_kv = [&](int64_t i) {
+        const int64_t pos_i = pos_of(i);
+        KVCache* kv = kv_of(i);
         float* ki = k_.data() + i * kv_dim;
         float* vi = v_.data() + i * kv_dim;
-
-        if (kv_->precision() == KVPrecision::Q8_0) {
-            const int64_t q8_bytes = type_nbytes(DType::Q8_0, hd);
-            const int64_t n_kv_heads = cfg_.n_kv_heads;
-            for (int64_t h = 0; h < n_kv_heads; ++h) {
-                uint8_t* k8 = (uint8_t*)kv_->k_ptr(layer, pos_i) + h * q8_bytes;
-                uint8_t* v8 = (uint8_t*)kv_->v_ptr(layer, pos_i) + h * q8_bytes;
-                quantize_q8_0(ki + h * hd, k8, hd);
-                quantize_q8_0(vi + h * hd, v8, hd);
+        if (q8kv) {
+            for (int64_t h = 0; h < n_kv; ++h) {
+                quantize_q8_0(ki + h * hd, (uint8_t*)kv->k_ptr(layer, pos_i) + h * q8_bytes, hd);
+                quantize_q8_0(vi + h * hd, (uint8_t*)kv->v_ptr(layer, pos_i) + h * q8_bytes, hd);
             }
         } else {
-            std::memcpy(kv_->k_ptr(layer, pos_i), ki, kv_dim * sizeof(float));
-            std::memcpy(kv_->v_ptr(layer, pos_i), vi, kv_dim * sizeof(float));
+            std::memcpy(kv->k_ptr(layer, pos_i), ki, kv_dim * sizeof(float));
+            std::memcpy(kv->v_ptr(layer, pos_i), vi, kv_dim * sizeof(float));
         }
+    };
 
-        float* qi = q_.data() + i * q_dim;
-        float* attn_out_i = attn_out_.data() + i * q_dim;
-        
-        const int64_t start_t = cfg_.sliding_window > 0 ? std::max<int64_t>(0, pos_i - cfg_.sliding_window + 1) : 0;
-        const int64_t window_len = pos_i - start_t + 1;
-        
-        for (int64_t h = 0; h < n_heads; ++h) {
-            const float* qh = qi + h * hd;
-            const int64_t kvh = h / group;
-            for (int64_t t = start_t; t <= pos_i; ++t) {
-                if (kv_->precision() == KVPrecision::Q8_0) {
-                    const uint8_t* k8 = (const uint8_t*)kv_->k_ptr(layer, t) + kvh * type_nbytes(DType::Q8_0, hd);
-                    dequantize_row(DType::Q8_0, k8, head_scratch.data(), hd);
-                    att_[t] = dot_f32(qh, head_scratch.data(), hd) * scale;
-                } else {
-                    att_[t] = dot_f32(qh, (const float*)kv_->k_ptr(layer, t) + kvh * hd, hd) * scale;
+    // Attention, parallel over (token, kv head, time chunk). All `group` query
+    // heads sharing a KV head are processed together so each K/V row is read
+    // from memory once instead of `group` times. A span longer than
+    // kAttnChunk positions is split into fixed chunks (flash-decoding) whose
+    // (max, sum, partial out) are merged with log-sum-exp rescaling, so decode
+    // on a single KV head still uses every thread.
+    //
+    // A row's chunking depends only on its own span, never on the thread
+    // count, the batch size or the other rows, so its bytes are the same for
+    // any --threads and for prefill / spec verify / decode alike. A span of at
+    // most kAttnChunk positions takes the plain path: softmax-normalise, then
+    // accumulate V, in the same order as the single-threaded loop this
+    // replaced (bit-identical to it). 512 keeps a Gemma 4 sliding-window span
+    // (1024) at 2 chunks and gives a global layer at 8K context 16 items.
+    constexpr int64_t kAttnChunk = 512;
+    const int64_t win = cfg_.sliding_window > 0 && cfg_.is_swa_layer(layer) ? cfg_.sliding_window : 0;
+    auto span_of = [&](int64_t i, int64_t& t0, int64_t& len) {
+        const int64_t pos_i = pos_of(i);
+        t0 = win > 0 ? std::max<int64_t>(0, pos_i - win + 1) : 0;
+        len = pos_i - t0 + 1;
+    };
+    auto chunks_of = [](int64_t len) { return (len + kAttnChunk - 1) / kAttnChunk; };
+    const int n_thr = pool_ ? pool_->size() : 1;
+    auto attend = [&](int64_t ib, int64_t ie) {
+        int64_t n_chunks = 1;   // item stride: the most chunks any row in [ib, ie) needs
+        for (int64_t i = ib; i < ie; ++i) { int64_t t0, len; span_of(i, t0, len); n_chunks = std::max(n_chunks, chunks_of(len)); }
+        const int64_t n_items = (ie - ib) * n_kv * n_chunks;
+        const int64_t part_stride = group * (hd + 2);                          // [m, l, out[hd]] per head
+        if (n_chunks > 1 && (int64_t)attn_part_.size() < n_items * part_stride)
+            attn_part_.resize(n_items * part_stride);
+        if ((int)attn_scratch_.size() < n_thr) attn_scratch_.resize(n_thr);
+
+        auto work = [&](int tid, int64_t begin, int64_t end) {
+            std::vector<float>& scr = attn_scratch_[tid];
+            for (int64_t it = begin; it < end; ++it) {
+                const int64_t c = it % n_chunks;
+                const int64_t kvh = (it / n_chunks) % n_kv;
+                const int64_t i = ib + it / (n_chunks * n_kv);
+                int64_t t0, len;
+                span_of(i, t0, len);
+                const int64_t nc = chunks_of(len);
+                if (c >= nc) continue;                         // this row needs fewer chunks
+                const int64_t a0 = t0 + c * kAttnChunk;
+                const int64_t a1 = std::min(t0 + len, a0 + kAttnChunk);
+                const int64_t n = a1 - a0;
+                const size_t need = (size_t)(group * n + (q8kv ? hd : 0));
+                if (scr.size() < need) scr.resize(need);
+                float* sc = scr.data();                        // [group][n] scores
+                float* row = scr.data() + group * n;           // dequant row
+                const float* qg = q_.data() + i * q_dim + kvh * group * hd;
+                const KVCache* kvi = kv_of(i);
+                for (int64_t t = a0; t < a1; ++t) {
+                    const float* kr;
+                    if (q8kv) { dequantize_row(DType::Q8_0, (const uint8_t*)kvi->k_ptr(layer, t) + kvh * q8_bytes, row, hd); kr = row; }
+                    else kr = (const float*)kvi->k_ptr(layer, t) + kvh * hd;
+                    for (int64_t g = 0; g < group; ++g) sc[g * n + (t - a0)] = dot_f32(qg + g * hd, kr, hd) * scale;
                 }
+                float m[64], l[64];                            // group <= 64 for every supported arch
+                for (int64_t g = 0; g < group; ++g) {
+                    float* sg = sc + g * n;
+                    if (b.attn_softcap) softcap_inplace(sg, n, cfg_.attn_logit_softcap);
+                    float mx = -INFINITY, sum = 0.f;
+                    for (int64_t t = 0; t < n; ++t) mx = sg[t] > mx ? sg[t] : mx;
+                    for (int64_t t = 0; t < n; ++t) { sg[t] = std::exp(sg[t] - mx); sum += sg[t]; }
+                    if (nc == 1) {                             // plain softmax: normalise first
+                        const float inv = sum > 0.f ? 1.0f / sum : 0.f;
+                        for (int64_t t = 0; t < n; ++t) sg[t] *= inv;
+                    }
+                    m[g] = mx; l[g] = sum;
+                }
+                float* outs[64];
+                for (int64_t g = 0; g < group; ++g) {
+                    outs[g] = nc > 1 ? attn_part_.data() + it * part_stride + g * (hd + 2) + 2
+                                     : attn_out_.data() + i * q_dim + (kvh * group + g) * hd;
+                    std::fill(outs[g], outs[g] + hd, 0.f);
+                }
+                for (int64_t t = a0; t < a1; ++t) {
+                    const float* vr;
+                    if (q8kv) { dequantize_row(DType::Q8_0, (const uint8_t*)kvi->v_ptr(layer, t) + kvh * q8_bytes, row, hd); vr = row; }
+                    else vr = (const float*)kvi->v_ptr(layer, t) + kvh * hd;
+                    for (int64_t g = 0; g < group; ++g) axpy_f32(outs[g], vr, sc[g * n + (t - a0)], hd);
+                }
+                if (nc > 1)
+                    for (int64_t g = 0; g < group; ++g) {
+                        float* p = attn_part_.data() + it * part_stride + g * (hd + 2);
+                        p[0] = m[g]; p[1] = l[g];
+                    }
             }
-            if (b.attn_softcap) softcap_inplace(att_.data() + start_t, window_len, cfg_.attn_logit_softcap);
-            softmax(att_.data() + start_t, window_len);
-            float* out = attn_out_i + h * hd;
-            for (int64_t d = 0; d < hd; ++d) out[d] = 0.f;
-            for (int64_t t = start_t; t <= pos_i; ++t) {
-                if (kv_->precision() == KVPrecision::Q8_0) {
-                    const uint8_t* v8 = (const uint8_t*)kv_->v_ptr(layer, t) + kvh * type_nbytes(DType::Q8_0, hd);
-                    dequantize_row(DType::Q8_0, v8, head_scratch.data(), hd);
-                    axpy_f32(out, head_scratch.data(), att_[t], hd);
-                } else {
-                    axpy_f32(out, (const float*)kv_->v_ptr(layer, t) + kvh * hd, att_[t], hd);
-                }
+        };
+        if (pool_ && n_thr > 1 && n_items > 1) pool_->parallel_for(n_items, work, 1);
+        else work(0, 0, n_items);
+
+        if (n_chunks > 1) {
+            for (int64_t i = ib; i < ie; ++i) {
+                int64_t t0, len;
+                span_of(i, t0, len);
+                const int64_t nc = chunks_of(len);
+                if (nc == 1) continue;                         // written directly above
+                for (int64_t kvh = 0; kvh < n_kv; ++kvh)
+                    for (int64_t g = 0; g < group; ++g) {
+                        const int64_t it0 = ((i - ib) * n_kv + kvh) * n_chunks;
+                        float M = -INFINITY;
+                        for (int64_t c = 0; c < nc; ++c) {
+                            const float* p = attn_part_.data() + (it0 + c) * part_stride + g * (hd + 2);
+                            if (p[1] > 0.f && p[0] > M) M = p[0];
+                        }
+                        float* out = attn_out_.data() + i * q_dim + (kvh * group + g) * hd;
+                        std::fill(out, out + hd, 0.f);
+                        float L = 0.f;
+                        for (int64_t c = 0; c < nc; ++c) {
+                            const float* p = attn_part_.data() + (it0 + c) * part_stride + g * (hd + 2);
+                            if (!(p[1] > 0.f)) continue;
+                            const float w = std::exp(p[0] - M);
+                            L += w * p[1];
+                            axpy_f32(out, p + 2, w, hd);
+                        }
+                        const float inv = L > 0.f ? 1.f / L : 0.f;
+                        for (int64_t d = 0; d < hd; ++d) out[d] *= inv;
+                    }
             }
         }
+    };
+    // Query-tiled prefill attention (bs > 1, fp32 KV). attend() re-reads every
+    // K/V row once per query token; here one work item covers a tile of query
+    // tokens for one KV head, so each row is loaded once per tile and reused
+    // from cache by all of the tile's queries. Per query the arithmetic is
+    // attend()'s, operation for operation — the same span-only chunk split,
+    // the same dot / softmax / axpy order over t, the same normalise-first
+    // single-chunk path and log-sum-exp merge — so results are bit-identical. Rows at
+    // positions >= pos are read from this batch's own k_/v_ (the floats
+    // write_kv copies into the cache), so a ring layer can attend before the
+    // batch is written: its W rows still hold every earlier position the batch
+    // needs while bs <= W. The batch is written afterwards.
+    auto attend_tiled = [&]() {
+        auto k_row = [&](int64_t t, int64_t kvh) -> const float* {
+            return t >= pos ? k_.data() + (t - pos) * kv_dim + kvh * hd
+                            : (const float*)kv_->k_ptr(layer, t) + kvh * hd;
+        };
+        auto v_row = [&](int64_t t, int64_t kvh) -> const float* {
+            return t >= pos ? v_.data() + (t - pos) * kv_dim + kvh * hd
+                            : (const float*)kv_->v_ptr(layer, t) + kvh * hd;
+        };
+        const int64_t want = std::max<int64_t>(1, std::min<int64_t>(bs, (2 * n_thr + n_kv - 1) / n_kv));
+        const int64_t qt = (bs + want - 1) / want;      // queries per tile
+        const int64_t n_items = n_kv * ((bs + qt - 1) / qt);
+        if ((int)attn_scratch_.size() < n_thr) attn_scratch_.resize(n_thr);
+
+        auto work = [&](int tid, int64_t begin, int64_t end) {
+            std::vector<float>& scr = attn_scratch_[tid];
+            int64_t t0v[1024], lenv[1024], ncv[1024], clv[1024], soff[1024], moff[1024], poff[1024];
+            for (int64_t it = begin; it < end; ++it) {
+                const int64_t kvh = it % n_kv;
+                const int64_t qa = (it / n_kv) * qt;
+                const int64_t nq = std::min(bs, qa + qt) - qa;
+                // Scratch: [group][len] scores per query, then {m, l} per
+                // (query, head, chunk), then [hd] partials for chunked queries.
+                int64_t s_need = 0, m_need = 0, p_need = 0;
+                for (int64_t j = 0; j < nq; ++j) {
+                    span_of(qa + j, t0v[j], lenv[j]);
+                    ncv[j] = chunks_of(lenv[j]);
+                    clv[j] = kAttnChunk;
+                    soff[j] = s_need; s_need += group * lenv[j];
+                    moff[j] = m_need; m_need += group * ncv[j] * 2;
+                    poff[j] = p_need; if (ncv[j] > 1) p_need += group * ncv[j] * hd;
+                }
+                if ((int64_t)scr.size() < s_need + m_need + p_need) scr.resize(s_need + m_need + p_need);
+                float* S = scr.data();
+                float* ML = S + s_need;
+                float* PO = ML + m_need;
+                auto out_of = [&](int64_t j, int64_t g, int64_t c) -> float* {
+                    return ncv[j] > 1 ? PO + poff[j] + (g * ncv[j] + c) * hd
+                                      : attn_out_.data() + (qa + j) * q_dim + (kvh * group + g) * hd;
+                };
+                const int64_t ta = t0v[0], tb = pos + qa + nq;   // rows the tile reads
+
+                // Pass 1: scores — each K row once, for every query of the tile.
+                for (int64_t t = ta; t < tb; ++t) {
+                    const float* kr = k_row(t, kvh);
+                    for (int64_t j = 0; j < nq; ++j) {
+                        if (t < t0v[j] || t > pos + qa + j) continue;
+                        const float* qg = q_.data() + (qa + j) * q_dim + kvh * group * hd;
+                        float* s = S + soff[j] + (t - t0v[j]);
+                        for (int64_t g = 0; g < group; ++g) s[g * lenv[j]] = dot_f32(qg + g * hd, kr, hd) * scale;
+                    }
+                }
+                // Softmax per (query, head, chunk), exactly as attend() does it.
+                for (int64_t j = 0; j < nq; ++j)
+                    for (int64_t g = 0; g < group; ++g)
+                        for (int64_t c = 0; c < ncv[j]; ++c) {
+                            const int64_t a0 = c * clv[j];
+                            const int64_t n = std::max<int64_t>(0, std::min(lenv[j], a0 + clv[j]) - a0);
+                            float mx = -INFINITY, sum = 0.f;
+                            if (n > 0) {
+                                float* sg = S + soff[j] + g * lenv[j] + a0;
+                                if (b.attn_softcap) softcap_inplace(sg, n, cfg_.attn_logit_softcap);
+                                for (int64_t t = 0; t < n; ++t) mx = sg[t] > mx ? sg[t] : mx;
+                                for (int64_t t = 0; t < n; ++t) { sg[t] = std::exp(sg[t] - mx); sum += sg[t]; }
+                                if (ncv[j] == 1) {               // plain softmax: normalise first
+                                    const float inv = sum > 0.f ? 1.0f / sum : 0.f;
+                                    for (int64_t t = 0; t < n; ++t) sg[t] *= inv;
+                                }
+                            }
+                            float* ml = ML + moff[j] + (g * ncv[j] + c) * 2;
+                            ml[0] = mx; ml[1] = sum;
+                            float* o = out_of(j, g, c);
+                            std::fill(o, o + hd, 0.f);
+                        }
+                // Pass 2: weighted V — each V row once, for every query of the tile.
+                for (int64_t t = ta; t < tb; ++t) {
+                    const float* vr = v_row(t, kvh);
+                    for (int64_t j = 0; j < nq; ++j) {
+                        if (t < t0v[j] || t > pos + qa + j) continue;
+                        const int64_t c = (t - t0v[j]) / clv[j];
+                        const float* e = S + soff[j] + (t - t0v[j]);
+                        for (int64_t g = 0; g < group; ++g) axpy_f32(out_of(j, g, c), vr, e[g * lenv[j]], hd);
+                    }
+                }
+                // Merge the chunks of long spans (attend()'s log-sum-exp merge);
+                // a single-chunk span was accumulated with normalised weights.
+                for (int64_t j = 0; j < nq; ++j)
+                    for (int64_t g = 0; g < group; ++g) {
+                        if (ncv[j] == 1) continue;
+                        const float* ml = ML + moff[j] + g * ncv[j] * 2;
+                        float* out = attn_out_.data() + (qa + j) * q_dim + (kvh * group + g) * hd;
+                        float M = -INFINITY;
+                        for (int64_t c = 0; c < ncv[j]; ++c)
+                            if (ml[2 * c + 1] > 0.f && ml[2 * c] > M) M = ml[2 * c];
+                        std::fill(out, out + hd, 0.f);
+                        float L = 0.f;
+                        for (int64_t c = 0; c < ncv[j]; ++c) {
+                            if (!(ml[2 * c + 1] > 0.f)) continue;
+                            const float w = std::exp(ml[2 * c] - M);
+                            L += w * ml[2 * c + 1];
+                            axpy_f32(out, out_of(j, g, c), w, hd);
+                        }
+                        const float inv = L > 0.f ? 1.f / L : 0.f;
+                        for (int64_t d = 0; d < hd; ++d) out[d] *= inv;
+                    }
+            }
+        };
+        if (pool_ && n_thr > 1 && n_items > 1) pool_->parallel_for(n_items, work, 1);
+        else work(0, 0, n_items);
+    };
+    const int64_t ring_w = kv_->window(layer);
+    const bool tiled = !row_kv && prefill_tiled_attn_ && bs > 1 && bs <= 1024 && !q8kv &&
+                       (ring_w == 0 || (bs <= ring_w && win > 0 && win <= ring_w));
+    if (row_kv) {
+        // Independent sequences: each row writes its own cache, then attends it
+        // exactly as a single-token forward() would (same flash-decoding split).
+        for (int64_t i = 0; i < bs; ++i) write_kv(i);
+        for (int64_t i = 0; i < bs; ++i) attend(i, i + 1);
+    } else if (tiled) {
+        attend_tiled();
+        for (int64_t i = 0; i < bs; ++i) write_kv(i);
+    } else if (ring_w > 0) {
+        // A ring (sliding-window) layer holds exactly W rows, so writing token
+        // i+1 can evict a row token i still needs: write and attend one token
+        // at a time there. Full-cache layers write the whole batch, then attend.
+        for (int64_t i = 0; i < bs; ++i) { write_kv(i); attend(i, i + 1); }
+    } else {
+        for (int64_t i = 0; i < bs; ++i) write_kv(i);
+        attend(0, bs);
     }
 
     // --- 7. Attention Out Projection ---
@@ -305,7 +667,7 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         add_bias(proj_i, loader_->getWeight(Role::AttnOutBias), dim);
         if (b.post_attn_norm) {
             WeightRef apn = loader_->getWeight(Role::AttnPostNorm);
-            if (apn.valid()) rmsnorm_gemma(proj_i, proj_i, static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
+            if (apn.valid()) rms_norm_kind(b.norm, proj_i, proj_i, static_cast<const float*>(apn.data), dim, cfg_.rms_eps);
         }
         vec_add_inplace(x_i, proj_i, dim);
     }
@@ -436,15 +798,17 @@ void Transformer::block(int64_t layer, int64_t pos, int64_t bs, float* x_in) {
         WeightRef fpn = loader_->getWeight(Role::FfnPostNorm);
         for (int64_t i = 0; i < bs; ++i) {
             float* ffn_out_i = ffn_out + i * dim;
-            if (fpn.valid()) rmsnorm_gemma(ffn_out_i, ffn_out_i, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
+            if (fpn.valid()) rms_norm_kind(b.norm, ffn_out_i, ffn_out_i, static_cast<const float*>(fpn.data), dim, cfg_.rms_eps);
         }
     }
 
-    // --- 11. Residual Add ---
+    // --- 11. Residual Add (+ Gemma 4 per-layer output scale) ---
+    const WeightRef los = b.layer_out_scale ? loader_->getWeight(Role::LayerOutScale) : WeightRef{};
     for (int64_t i = 0; i < bs; ++i) {
         float* x_i = x_in + i * dim;
         float* ffn_out_i = ffn_out + i * dim;
         vec_add_inplace(x_i, ffn_out_i, dim);
+        if (los.valid()) scale_f32(x_i, *static_cast<const float*>(los.data), dim);
         if (hidden_hook_) hidden_hook_((int)layer, x_i, dim);
     }
 }
@@ -462,6 +826,13 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
     if (profiling_) { timings_.assign(cfg_.n_layers, LayerTiming{}); }
 
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        if (!remote_.empty()) {                    // #70: layers on another node
+            if (const RemoteSegment* r = remote_at(l)) {
+                r->exec->run(r->begin, r->end, x_.data(), 1, pos);
+                l = r->end - 1;
+                continue;
+            }
+        }
         if (profiling_) {
             double t0 = now_sec();
             loader_->loadLayer((int)l);        // may block awaiting prefetch
@@ -507,6 +878,59 @@ const float* Transformer::forward(int64_t token, int64_t pos) {
     return logits_.data();
 }
 
+const float* Transformer::forward_multi(const int64_t* tokens, const int64_t* pos,
+                                        KVCache* const* kvs, int64_t n) {
+    const int64_t dim = cfg_.dim, vocab = cfg_.vocab_size;
+    LLM_CHECK(n > 0, "forward_multi: no rows");
+    for (int64_t i = 0; i < n; ++i) {
+        LLM_CHECK(kvs[i] != nullptr && pos[i] < kvs[i]->max_ctx(),
+                  "forward_multi: position exceeds context window");
+        for (int64_t j = 0; j < i; ++j)
+            LLM_CHECK(kvs[j] != kvs[i], "forward_multi: rows must use distinct caches");
+    }
+    // Seed the n residual streams exactly as forward() seeds x_.
+    multi_x_.assign((size_t)(n * dim), 0.f);
+    for (int64_t i = 0; i < n; ++i) {
+        float* xi = multi_x_.data() + i * dim;
+        loader_->embed_token(tokens[i], xi);
+        if (cfg_.embedding_scale != 1.0f) scale_f32(xi, cfg_.embedding_scale, dim);
+        if (cfg_.learned_pos_emb) loader_->add_pos_embd(pos[i], xi);
+    }
+    for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        loader_->loadLayer((int)l);
+        block(l, 0, n, multi_x_.data(), pos, kvs);
+        loader_->unloadLayer();
+    }
+    for (int64_t i = 0; i < n; ++i) kvs[i]->set_seq_len(pos[i] + 1);
+
+    // Final norm per row, then one batched output projection for all rows.
+    multi_xb_.resize((size_t)(n * dim));
+    WeightRef on = loader_->output_norm_weight();
+    for (int64_t i = 0; i < n; ++i) {
+        const float* xi = multi_x_.data() + i * dim;
+        float* xbi = multi_xb_.data() + i * dim;
+        switch (cfg_.block_spec.norm) {
+            case NormKind::LayerNorm:
+                layernorm(xbi, xi, static_cast<const float*>(on.data),
+                          static_cast<const float*>(loader_->output_norm_bias_weight().data),
+                          dim, cfg_.layernorm_eps);
+                break;
+            case NormKind::RMSNormGemma:
+                rmsnorm_gemma(xbi, xi, static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+                break;
+            case NormKind::RMSNorm:
+            default:
+                rmsnorm(xbi, xi, static_cast<const float*>(on.data), dim, cfg_.rms_eps);
+                break;
+        }
+    }
+    multi_logits_.resize((size_t)(n * vocab));
+    loader_->project_output_batch(multi_xb_.data(), multi_logits_.data(), n, pool_);
+    for (int64_t i = 0; i < n; ++i)
+        softcap_inplace(multi_logits_.data() + i * vocab, vocab, cfg_.final_logit_softcap);
+    return multi_logits_.data();
+}
+
 // Single-pass batched prefill (see transformer.h / RFC-007).
 //
 // `forward` streams the whole model once PER token, so a P-token prompt reads
@@ -539,8 +963,15 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
 
     // Stream every layer once; run all positions through it (ascending => the
     // causal history each position needs is already in the KV cache).
-    const int64_t C = 32; // batched GEMM size
+    const int64_t C = prefill_batch_; // batched GEMM size
     for (int64_t l = 0; l < cfg_.n_layers; ++l) {
+        if (!remote_.empty()) {                    // #70: layers on another node
+            if (const RemoteSegment* r = remote_at(l)) {
+                r->exec->run(r->begin, r->end, resid_.data(), n, start_pos);
+                l = r->end - 1;
+                continue;
+            }
+        }
         loader_->loadLayer((int)l);
         for (int64_t i = 0; i < n; i += C) {
             int64_t bs = std::min(C, n - i);
@@ -577,6 +1008,7 @@ const float* Transformer::prefill(const int64_t* tokens, int64_t n, int64_t star
 
 
 const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t start_pos) {
+    LLM_CHECK(remote_.empty(), "speculative decoding is not supported with remote layers (--nodes)");
     if (n <= 0) return logits_.data();
     LLM_CHECK(start_pos + n - 1 < kv_->max_ctx(),
               "spec_forward: position exceeds context window");
@@ -634,4 +1066,31 @@ const float* Transformer::spec_forward(const int64_t* tokens, int64_t n, int64_t
     
     return spec_logits_.data();
 }
+void Transformer::set_remote_segments(std::vector<RemoteSegment> segs) {
+    int64_t prev_end = 0;
+    for (const RemoteSegment& r : segs) {
+        LLM_CHECK(r.exec != nullptr, "remote segment without an executor");
+        LLM_CHECK(r.begin >= prev_end && r.begin < r.end && r.end <= cfg_.n_layers,
+                  "remote segments must be sorted, non-overlapping and inside the model");
+        prev_end = r.end;
+    }
+    remote_ = std::move(segs);
+}
+
+void Transformer::run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos) {
+    LLM_CHECK(begin >= 0 && begin < end && end <= cfg_.n_layers, "run_layers: bad layer range");
+    LLM_CHECK(n > 0 && start_pos + n - 1 < kv_->max_ctx(), "run_layers: positions exceed context window");
+    const int64_t dim = cfg_.dim;
+    const int64_t C = 32;   // same chunking as prefill(): identical arithmetic
+    for (int64_t l = begin; l < end; ++l) {
+        loader_->loadLayer((int)l);
+        for (int64_t i = 0; i < n; i += C) {
+            const int64_t bs = std::min(C, n - i);
+            block(l, start_pos + i, bs, resid + (size_t)i * dim);
+        }
+        loader_->unloadLayer();
+    }
+    kv_->set_seq_len(start_pos + n);
+}
+
 } // namespace llm

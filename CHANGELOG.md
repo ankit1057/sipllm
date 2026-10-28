@@ -5,45 +5,242 @@ the end of every optimization wave from measured data (see [CLAUDE.md](CLAUDE.md
 Rule 1). Peak RSS is the authoritative cross-runtime number from `/usr/bin/time -l`.
 
 ```
+Unreleased (2026-10-26, Dimensity 900 phone, 4 threads, warm cache; partial refresh, n=1 for the 8B rows):
+  8B on the phone: Llama-3.1-8B Q4_K_M (4.92 GB) in 205 MB VmHWM (`--ram-budget 0 --stream-lm-head --no-async`)
+  at 0.13 tok/s, flash-bound (78 GB read for 31 tokens). llama.cpp on the same phone: 2.5 tok/s at 4.7 GB VmHWM,
+  with the phone's MemAvailable down to 0.16 GB. SipLLM left 3.4 GB available.
+  Ceiling: Qwen2.5-1.5B Q8_0 at 300M/768M/1200M and Llama-3.1-8B at 1500M exceeded the budget by 0.7-3.0% (VmHWM)
+  before the measured-base fix; after it every tested budget holds on the M3 and the phone
+  (bench/results/phone-budget-sweep-2026-10-26.json).
+  Speed (SmolLM2-135M Q8_0, ~1000-token prompt): prefill 130 tok/s, decode 25.1 (47 / 9.7 before #80).
+
+v0.6.0 (2026-10-23): the numbers below are wave 16's and were not re-measured for the
+release. The Llama-family hot path is unchanged (greedy output byte-identical to the
+pre-release tree for TinyLlama, Llama-3.2-1B and SmolLM2, with and without --fast). The
+default thread schedule is now fixed16, which closes the default-schedule gap described
+under "Current Largest Bottleneck" (measured in wave 16; the final build was not re-run on
+the phone).
+
 ============================
-SipLLM North Star   (measured 2026-10-19 · Apple M3 + OnePlus/Dimensity 900 · 4 thr · ctx 512 · warm)
+SipLLM North Star   (measured 2026-10-19, wave 16 · Apple M3 + Dimensity 900 phone (2x A78 + 6x A55) · ctx 512 · warm)
 ============================
-Peak RSS:              tinyllama Q4_K_M (669 MB file): 122 MB (stream) … 645 MB (fully resident)
-                       smollm2-135m Q8_0: 54 MB (stream) … 162 MB (resident)
-                       vs llama.cpp CPU (ggml 0.27.0): 1323 MB / 515 MB → 10.8× / 9.5× smaller at min budget
-                       PHONE (Dimensity 900, kernel VmHWM): 118 MB stream … 615 MB resident vs llama.cpp 1251 MB
-Resident Weights:      FLAT 1.5 MB across 4/16/32 toy layers (streaming thesis holds)
-                       real: 37.6 MB (smollm2 1-layer) / 106.5 MB (tinyllama 1-layer)
-                       pinned dial: up to 143 MB (smollm2) / 630 MB (tinyllama)
-Decode tok/s:          tinyllama Q4_K_M resident: fp32 21.0 → `--fast` int8 **59.6** (llama.cpp 88–96 → 62–67%)
-                       tinyllama Q4_K_M stream (122 MB): 11.7 (I/O-bound); `--spec 5` on copy-heavy output: 30.7
-                       smollm2 Q8_0 stream 58.9 / resident 67.6 (llama.cpp 366)
-                       PHONE tinyllama Q4_K_M `--fast`: resident 8.9–11.0 (8 thr 12.7) · stream 4.7  vs llama.cpp 18.7
-TTFT:                  tinyllama 123 ms stream · 68 ms resident `--fast`   vs llama.cpp 28 ms
-Prefill Throughput:    tinyllama 37–51 (stream) · 73 (resident `--fast`) tok/s   vs llama.cpp 266
-                       PHONE: 4.4–7.5 tok/s vs llama.cpp 39 — the on-device bottleneck
-Expansion Factor:      5.5× (tinyllama Q4_K_M) · 2.7× (smollm2)  = disk / peak-RSS at min budget
+Peak RSS:              tinyllama Q4_K_M (669 MB file), fully resident `--fast` (interleaved): M3 667 MB vs llama.cpp
+                       CPU 1317 MB (same session, llama-bench) → 1.97× smaller; phone (wave 15, same layout size) VmHWM 633–658 MB vs 1251–1280 MB.
+                       Streaming floor (not re-measured this wave): 122 MB M3 / 118 MB phone.
+Resident Weights:      FLAT 1.5 MB across 4/16/32 toy layers; real pinned dial up to 630 MB (tinyllama).
+Decode tok/s:          M3 tinyllama `--fast` + SIPLLM_FAST_LAYOUT=il4: 68.0 (8 thr) vs llama.cpp CPU 92.8 (4 thr) → 73%.
+                       PHONE (same rep, normal clocks): 14.7 (8 thr) vs llama.cpp 18.2 (2 thr, its best) → 81%;
+                       best SipLLM config 15.2–15.6 (8 thr, fixed8). Decode is compute-bound per core, not memory-bound.
+TTFT:                  135-token prompt: M3 0.49 s (8 thr) · phone 2.87 s (8 thr; wave 15 in the same rep: 3.69 s)
+Prefill Throughput:    M3: 274.7 tok/s (8 thr) vs llama.cpp CPU 386.8 → 71%  (native `--fast` 99.3; wave 12: 73)
+                       PHONE (final build, rep at normal clocks): 47.0 (8 thr) / 42.4 (4) / 39.9 (2) vs llama.cpp 71.4 (8) / 52.5 (2) → 66%
+                       (wave 12 scorecard: 4.4–7.5 tok/s, under the old protocol: niced, autotuner re-run per launch.
+                       Part of the gain since then is that measurement fix, not the kernels; wave 16 alone: +28%.)
+Expansion Factor:      5.5× (tinyllama Q4_K_M) · 2.7× (smollm2) = disk / peak-RSS at min budget (not re-measured)
 Largest Runnable Model:MEASURED 2026-07-27 — Llama-2-13B (7.87 GB Q4) in 317 MB peak RSS (25×);
                        Llama-3.1-8B (4.92 GB Q4) in 204 MB (24×). Bounded by layer, not model size.
 Energy / Token:        N/A (needs `sudo powermetrics`; never fabricated)
 
-Current Largest Bottleneck:  Measured on the phone the goal names: PREFILL. The batched
-                       `--fast` path loops the single-vector int8 kernel per prompt
-                       token, so prompt processing runs at 4.4–7.5 tok/s on the
-                       Dimensity 900 (llama.cpp 39) and TTFT for a 40-token prompt is
-                       ~4 s. Decode is at ½–⅔ of llama.cpp there; RAM is 2–10.6× less.
-                       Second: the AVX2 K-quant path has never run on x86.
-Estimated Gain if Fixed:  A true batched int8 kernel (quantize bs activations once, one
-                       weight pass per row) → ~bs× fewer weight reads in prefill: 3–5×
-                       on the phone, likely 2× on M3. Needed for any chat use on device.
-Why this is the next priority:  On a phone a user waits for the prompt before the
-                       first token; at 4 s per 40 tokens the RAM win is invisible.
-                       Decode parity is a longer road (attention/KV in fp32); prefill
-                       is a contained kernel change with a measured 5× gap.
-Confidence:            High on every number above (M3: quiet CPU, load recorded; phone:
-                       per-run clocks/temperature/VmHWM captured, 3 reps, JSON committed).
-                       Phone clocks were capped at 1.3–1.5 GHz by the device — floor, not peak.
+Current Largest Bottleneck:  Phone prefill is still 1.5× behind llama.cpp (47 vs 71 tok/s at
+                       8 threads) and decode ~0.8×. Profile: >95% of prefill time is the
+                       int8 matmuls; the Q4_K IL4 inner loop still spends ~8 float ops per
+                       16 SDOTs on per-32 activation scales. Second, and bigger for users
+                       today, a configuration gap: the default thread schedule of the CLI
+                       and the Flutter plugin (Proportional2) decodes at 5.7–5.8 tok/s on the
+                       phone at 4–8 threads, against 13.5–14.3 with fixed16 (3 reps each).
+Estimated Gain if Fixed:  Per-256 activation scales with integer accumulation per super-block
+                       (llama.cpp's Q8_K approach): ~20–25% fewer inner-loop instructions →
+                       hypothesis +15–25% prefill (accuracy must be re-tested; it changes the
+                       numerics). Default schedule fixed16: measured 2.4× decode and +8–38%
+                       prefill on the phone at 4–8 threads, equal at 2 threads, within 2.5% on M3.
+Why this is the next priority:  TTFT is what a phone user waits on; RAM is already 2× better
+                       than llama.cpp at every size, so prefill speed decides whether the RAM
+                       win is usable.
+Confidence:            High: phone numbers are medians of 3 interleaved reps with clocks and
+                       temperature logged (reps 2–3 of the final sweep throttled for every
+                       config; ratios quoted within a rep), explicit --schedule on every run,
+                       accuracy sign-tested over 10 docs. llama.cpp = build 585080d CPU
+                       (repack on), not the ggml 0.27.0 of earlier scorecards.
 ```
+
+## [Unreleased]
+
+### Changed
+- **#78: with no `--ram-budget`, the CLI, `llm_server` and the C ABI default now use half of the available RAM.**
+  - Before, no budget meant "stream every layer from storage on every token", even when the model fit easily. A first run was the slowest mode the engine has: TinyLlama on a Dimensity 900 phone decoded at 2.5 tok/s with no flags.
+  - The default now holds as much of the model resident as fits in half of the RAM the OS reports as available: Linux/Android `MemAvailable`, macOS free + inactive pages. It is best-effort sizing: a plan that cannot fit falls back to the minimum configuration instead of failing.
+  - An explicit `--ram-budget 0` still streams every layer. The C ABI gains `SIPLLM_RAM_BUDGET_AUTO`, which `sipllm_params_default()` now uses. The Dart `SipllmParams` default is `ramBudgetAuto`, and the example app's "0" now means auto.
+  - `llm_server` now accepts `--ram-budget`.
+  - `scripts/bench.sh` passes `--ram-budget 0` explicitly so its streaming series stays comparable with earlier results.
+- **Attention runs on the thread pool** (#80, first step). Each (query token, head) pair is one work item, and the arithmetic per item is unchanged, so logits are bit-identical for any thread count (new test `attention_threads_bit_identical`, FP32 and Q8 KV). The planner prices one attention score buffer per worker.
+  - On the Dimensity 900 phone, SmolLM2-135M Q8_0 with a 1,006-token prompt (median of 2): prefill went from 47 to 107 tok/s, time to first token from 21.3 s to 9.7 s, and decode from 9.7 to 13.1 tok/s.
+  - llama.cpp on the same file reaches 293 tok/s prefill and 26.6 tok/s decode. The gap is narrower, not closed.
+
+### Fixed
+- **#77: the CLI auto-tuner is now opt-in (`--autotune`).** Without `--threads` or `--schedule`, v0.6.0 applied the tuner's result over the defaults. On a 2+6-core phone it picked 2 threads and `Proportional2`. With no writable `$HOME`, as in an Android `adb shell`, it also re-ran on every launch. `--no-autotune` meanwhile forced 4 threads. Now, unless `--autotune` or `--recalibrate` is given, the CLI uses every core and `fixed16`, as the C ABI and Dart SDK already did. `--no-autotune` is still accepted.
+- **#79: `-t` is the sampling temperature, and the CLI now says so.** Most runtimes use `-t` for threads, so `-t 8` silently set temperature 8.0. `-t` still works but prints a warning. `--temp T` is the explicit flag, and threads are `--threads N`.
+- **#81: `--ram-budget` keeps its ceiling for the KV cache and refuses the unpriced semantic cache.** The planner prices the KV cache at the full chosen context. Growing it by doubling could briefly hold more resident rows than that whenever the context is not a doubling step. Under a budget, the KV cache is now allocated once at the planned context. Peak memory under a budget therefore includes the full planned KV from the start, which is what the planner reports. Pass a smaller `--ctx` to lower it. `--semantic-cache-budget` with `--ram-budget` is refused unless `--ram-budget-force` is given, because the planner does not count the semantic cache. No budget means no change: the KV cache still grows on demand.
+- **`--ram-budget` now prices the tokenizer and model metadata it measures, so large-vocabulary models stay under their ceiling.** The ledger assumed a fixed 24 MB of process overhead. A 32k-vocab model costs about 8 MB at plan time. Qwen2.5 (152k vocab) costs about 37 MB (Apple M3), so Qwen2.5-1.5B Q8_0 at `--ram-budget 300M`, `768M` and `1200M` peaked 7.8, 14 and 9.7 MB above the budget (`/usr/bin/time -l`). The tokenizer is now built before planning. The ledger's base is the RSS that SipLLM itself added (opening the model plus building the tokenizer) plus 16 MB, and never less than the old 24 MB. An app that embeds SipLLM keeps its own memory outside the budget: the budget is SipLLM's share, not the whole process. TinyLlama's plans are unchanged on macOS (same pinned layers at 300M, 600M and 1G). After the fix, the same three runs peak at 272, 754 and 1218 MB, 40–52 MB under. The cost is one fewer pinned layer at each budget. The output is byte-identical.
+- **The CLI's `peak rss` line now reports the kernel high-water mark** (`VmHWM` on Linux and Android, `resident_size_max` on macOS). It used to print the RSS at exit, which under-reported the peak: 277 MB was printed for a run whose true peak was 322 MB.
+
+## [0.6.0] — Correct output beyond Llama, merged waves 12–16, LAN pooling (2026-10-23)
+
+Ships everything merged to `main` since v0.5.0 (wave 12 below, waves 13–16, LAN
+pooling, the semantic cache flag) plus a correctness and safety pass driven by a
+line-by-line audit. Before this release, Qwen2, Gemma and Phi models produced wrong
+output, every chat prompt was mis-tokenized, and two heap overflows were reachable
+from the CLI.
+
+**What a user on a phone or an x86 laptop still cannot do:** match llama.cpp's speed
+(resident decode about 0.7–0.8× and prefill 0.66–0.71× of llama.cpp, wave 16), run the
+AVX2 kernels with any measured guarantee (never run on x86 hardware), or rely on Gemma 2/4,
+Phi-3/4, Mixtral or GPT-2 (implemented on synthetic weights only). StarCoder 2 and
+DeepSeek V2/V3 (multi-head latent attention) are not supported. No head-to-head against
+LiteRT or MediaPipe has been measured.
+
+### Fixed: wrong output
+- **RoPE pair layout.** Qwen2, Gemma 2/3/4 and Phi-2/3/4 GGUFs are not q/k-permuted at
+  conversion and need rotate-half pairs (llama.cpp `ROPE_TYPE_NEOX`); they ran with the
+  Llama layout. Qwen2.5-0.5B answered "The capital of France is" with a string of digits.
+- **Gemma norms and layers.** GGUF Gemma norm weights already include the +1 of
+  `(1 + w)`, which was applied a second time. Gemma 3 local layers now use RoPE base
+  10000 and period 6 when the GGUF does not say (llama.cpp's defaults), and the sliding
+  window applies to local layers only.
+- **Phi-2.** `head_dim` came from `rope.dimension_count` (32 instead of 80), and the
+  loader required an `ffn_norm` tensor that Phi-2 GGUFs do not have.
+- **Tokenizer.** Special tokens (`<|eot_id|>`, `<|im_start|>`, ...) were split into
+  ordinary text tokens; BOS was always added (SmolLM2 and Qwen2 are not trained with
+  it). Now matches llama.cpp: special tokens parsed whole, `add_bos_token` honored,
+  generation stops on turn-end tokens (`<|im_end|>`, `<end_of_turn>`, ...).
+- **Chat templates.** Picked from the GGUF's `tokenizer.chat_template` instead of the
+  architecture name, so TinyLlama (new Zephyr style), SmolLM2 and Llama-2 get their own.
+- **Semantic cache.** A prompt fully present in the cache was re-injected at the wrong
+  per-layer stride and produced garbage.
+
+### Fixed: memory safety and exposure
+- **`--kv-q8` sessions** read and wrote past the KV cache (ASan heap-buffer-overflow).
+  Session files now hold whole cache rows; the KV precision is part of the session id
+  (FP32 session files from earlier builds still load).
+- **Phi-2 batched prefill** wrote past a one-row buffer (ASan heap-buffer-overflow).
+- **`llm_server`** exposed agent tool execution to the network without an opt-in. It now
+  binds 127.0.0.1 unless `--host` is given, and agent requests need `--allow-agent`.
+- **`sipllm` wrapper** declared `/bin/sh` but needed bash; it failed on systems where
+  `/bin/sh` is dash.
+
+### Merged
+- #71 (wave 13): runtime SDOT dispatch; one baseline-ISA binary keeps `--fast`.
+- #72 (wave 14): batched int8 prefill kernels, bit-identical per token.
+- #74 (wave 15): opt-in 4-row interleaved Q4_K layout (`SIPLLM_FAST_LAYOUT=il4`).
+- #75 (wave 16): exact IL4 kernel rewrite, interleaved Q6_K, `--no-autotune` and macOS
+  page-size fixes; plus the default thread schedule `fixed16` (CLI, C ABI, Dart,
+  ThreadPool) and the IL4 batched-tile change.
+- #73: LAN pooled inference v1 (`--worker`/`--nodes`; split one model's layers across
+  machines, pre-shared token).
+- #63: semantic cache, `--semantic-cache-budget` (contributed by @GorangSinghal; the
+  cache itself reached `main` earlier, hardened, in 7d18643).
+
+### Behaviour changes
+- `llm_server`: binds 127.0.0.1 by default (`--host IP` to change); `"agent": true`
+  returns 403 unless started with `--allow-agent`.
+- Default thread schedule is `fixed16` (was `proportional2`).
+- SmolLM2 and Qwen2 prompts no longer start with BOS; chat prompts use the model's
+  template and real special tokens, so chat output changes (for the better).
+- `--semantic-cache-budget` is refused with `--kv-q8` and on a LAN worker.
+- `sipllm_version()` and the wrapper report 0.6.0.
+
+### Known issues
+- BPE pre-tokenizer: runs of whitespace, code and some punctuation-plus-letter
+  sequences tokenize differently from llama.cpp on Llama-3, Qwen2 and SmolLM2
+  (TinyLlama's SentencePiece path matches).
+- The default `--ram-budget 0` streams every layer on every token: TinyLlama Q4_K_M with
+  `--fast` at 4 threads decodes at about 12 tok/s on the M3 against about 64 tok/s with
+  all layers pinned (`--ram-budget 1200M`). Set a budget to trade RAM for speed.
+- `llm_server` ignores `--ram-budget`, `--fast` and unknown flags, and does not stream.
+- The raw-HF safetensors path has not been checked end to end.
+- Flutter plugin and app issues found by the audit (malformed UTF-8 in a streamed token
+  stops generation; a Playground state that leaves Chat unable to send; switching
+  models mid-generation) are not fixed in this release.
+- LAN pooling authenticates with a pre-shared token but does not encrypt; use it only on
+  a trusted network.
+- `llm_server` robustness: a malformed request or the profiling endpoint can still crash
+  or corrupt the server process. Keep it on localhost.
+- Model files are trusted input: a malformed GGUF, LLMW or SIPR file can cause an
+  out-of-bounds access or a crash, and an I/O error in the prefetch thread ends the
+  process. Load only files from sources you trust.
+- The `remote_server` weight-streaming tool and the `nishachar` agent CLI have no
+  authentication or opt-in for what they expose; run them only on a machine and network
+  you control. The Wear OS model receiver trusts the sender's metadata.
+
+### Verification (Apple M3)
+- `make test`: all test binaries pass; the same suite under ASan/UBSan passes with no
+  sanitizer reports. The two overflow reproductions from the audit now exit 0 under ASan.
+- Token-for-token greedy comparisons against llama.cpp on the same GGUF files:
+  Qwen2.5-0.5B-Instruct, Gemma-3-270M-it, Phi-2, plus tokenizer id parity on each model's
+  own chat template (TinyLlama, SmolLM2, Qwen2.5, Llama-3.2).
+- Not verified for this release: anything on a phone (the plugin, fixed16 on the final
+  build), anything on x86 hardware.
+
+## Waves 13–16 — any-CPU binaries, batched and interleaved int8 prefill (2026-10-19)
+
+All four waves are opt-in or behaviour-preserving: a default run produces the
+same tokens as before (output hash unchanged on M3 and phone; the golden matrix,
+which needs a llama.cpp reference build, was not re-run). Evidence: `bench/results/issue68-dispatch-…`, `wave14-…`,
+`wave15-…`, `wave16-il4-q6k-2026-10-19.json`.
+
+### Wave 13 (#68) — Runtime SDOT dispatch: one baseline binary for every ARM core
+- The int8 `--fast` kernels live in `src/neon_sdot.cpp` (the only file built
+  with `+dotprod`); the rest of the engine builds for baseline ARMv8-A. At run
+  time `cpu_has_dotprod()` (HWCAP / sysctl, `SIPLLM_CPU=generic` to force off)
+  picks SDOT or the exact path, so one binary serves cores with and without
+  SDOT (run on Cortex-A55/A78 and Apple M3; not yet on a Cortex-A53). The
+  release workflow builds an x86-64 baseline and an AVX2 binary behind a
+  launcher (not yet exercised by a tag). CI gates: portable aarch64 + x86-64 jobs, and "no SDOT outside
+  neon_sdot.o".
+
+### Wave 14 — Batched int8 prefill kernels (bit-identical per token)
+- `matmul_{q8_0,q4_K,q6_K}_i8_batch`: activations quantized once per batch,
+  one weight pass per tile of 4 tokens; output memcmp-identical to the per-token
+  kernels. Phone prefill +25–45%.
+
+### Wave 15 — Interleaved Q4_K weights (IL4), opt-in
+- `SIPLLM_FAST_LAYOUT=il4` with `--fast` repacks resident Q4_K matrices in place
+  (same size as GGUF) so one SDOT lane serves one row. 10-doc sign test vs the
+  exact path: no detectable accuracy difference (KL ratio 1.006, p = 0.34).
+
+### Wave 16 — Exact IL4 kernel rewrite, interleaved Q6_K, scheduling protocol
+- **Q4_K IL4 kernel rewrite, output byte-identical to wave 15**: vector fp16
+  scales, scales decoded once per row group, split SDOT chains, compile-time
+  token tiles (a runtime tile count spilled the accumulators to the stack).
+  Single-core decode kernel −12% time on Cortex-A78, −27% on Cortex-A55.
+- **Q6_K IL4** (`il4` now covers Q4_K and Q6_K; `il4-q4` keeps the wave-15
+  layout): Q6_K's −32 offset folded into the SDOT accumulator, int8 sub-block
+  scales applied in integer. bs=32 kernels 2.7× (A55-only) / 2.4× (A78-only)
+  vs native batched. Accuracy, 10 docs × 512 tokens vs exact: KL ratio 1.002,
+  top-1 +0.04 pt vs native `--fast` (no detectable difference).
+- **Phone end to end** (Dimensity 900, 135-token prompt, same-rep A/B vs wave 15):
+  prefill +28% (8 threads), +31% (4), +33% (2); decode within −6…+5%
+  (−5% at 2 threads). Known gap: single-token Q6_K IL4 is 13% slower than the
+  native kernel on Cortex-A55 (20% faster on A78), so it fails the
+  both-core-types gate for ever becoming a default. Greedy output with Q6_K
+  interleaved first differs from native at generated token 10 on the phone
+  (a near-tie: native margin 0.048 logits, interleaved 0.016); the M3 matched
+  native for all 48 tokens.
+- **Fix:** `--no-autotune` applied `SchedulePolicy::Static` (the struct default)
+  as if it were tuned; it now keeps the caller's default. Static is the slowest
+  policy on big.LITTLE (phone decode 4.5–8.0 vs 11–15 tok/s).
+- **Measurement protocol:** every phone run now passes `--no-autotune` and an
+  explicit `--schedule`. Without it, the phone (HOME=/ not writable from adb)
+  re-ran the fp32 autotuner on every launch and could pick a different policy
+  per run; earlier phone numbers carry that noise.
+- **Not changed (maintainer decision pending):** the CLI and the Flutter plugin
+  default to `Proportional2` (`ThreadPool` itself defaults to `Proportional4`).
+  On the phone, `Proportional2` decodes at 5.7–5.8 tok/s at 4–8 threads against
+  13.5–14.3 with `fixed16` (3 reps each; equal at 2 threads). M3 spread <2.5%.
+- **Fix (macOS):** `get_hardware_info()` read `hw.pagesize` (8 bytes) into a
+  4-byte int, overwriting 4 bytes of stack on every macOS launch. Found by an
+  ASan run of the CLI on the M3; CI's sanitizers run on Linux and never compile
+  that branch. The IL4 kernels and an interleaved end-to-end run are clean
+  under ASan+UBSan and TSan on the M3.
 
 ## [0.5.0] — Plugin runtime + persistent context (2026-08-13)
 
@@ -193,7 +390,131 @@ byte-identical greedy output for 24 tokens).
 **Verified** — full suite green on a clean build; `--fast` is opt-in so all
 `1e-3`/bit-identical correctness tests are unchanged (no regressions).
 
-## [Unreleased]
+## Wave 12 and earlier notes (wave 12 ships in 0.6.0)
+
+### Batched multi-sequence decode (`sip_batch`) + query-tiled prefill attention (2026-10-24)
+
+- **`Transformer::forward_multi`** — one decode step for *n* independent
+  sequences (per-row position and KV cache); each layer's weights are read once
+  for all rows. On CPU, row *i* is bit-identical to `forward()` on its own cache.
+- **`tools/sip_batch`** — continuous batching over a length-prefixed pipe
+  protocol, shared-prefix KV reuse, `--max-active-tokens` KV cap.
+- **Query-tiled prefill attention** (default on, `SIPLLM_TILED_ATTN=0` off) —
+  each K/V row loaded once per tile of queries; bit-identical to per-token
+  attention (same span-only chunks, softmax order and merge).
+- **`ThreadPool::parallel_for(total, fn, chunk)`** — per-call chunk size;
+  attention passes 1 so decode attention is no longer serialised by the
+  Adaptive policy's 16-item minimum chunk. Bit-identical.
+
+Measured (i7-12700H 6 P-cores, Gemma 4 12B Q4_K_M, `--fast`, 12 jobs × 48 new
+tokens, greedy; `scripts/bench_sip_batch.py`,
+`bench/results/x86-i7-12700H-2026-10-24-batch.json`):
+
+```
+aggregate decode tok/s   B=1    B=4    B=8    B=12   peak RSS (B=1 -> B=12)
+CPU only                 5.07  13.44  14.44  13.84   7159 -> 9015 MB
+--gpu-layers max         7.67  17.34  18.29  18.53   4141 -> 5997 MB (+3.4 GB VRAM)
+every job's output byte-identical to B=1 (12/12 in all 8 runs)
+```
+
+### NVIDIA GPU offload: `--gpu-layers N|max` (2026-10-24)
+
+Optional, dependency-free CUDA path: `libcuda.so.1` is `dlopen`ed at runtime and
+kernels ship as embedded PTX (`src/cuda_ptx.inc`, regenerate with `make ptx` from
+`kernels/cuda_kernels.cu` using clang's CUDA mode). No toolkit needed to build;
+CPU-only machines are unaffected (`SIPLLM_NO_CUDA=1` forces it off).
+- Q4_K / Q5_K / Q6_K / F16 / F32 matvec (decode) and tiled matmul (prefill and
+  batched rows) with 4/8/12/16-token tiles (all tiles give identical bytes).
+- Loader places whole layers' projections in VRAM until 300 MB headroom remains;
+  optional LM head. GPU weights are not duplicated in host RAM, and
+  `--ram-budget` plans host RAM for the remaining layers only.
+- Measured (i7-12700H 6 P-cores + RTX 3050 Ti Laptop 4 GB, Gemma 4 12B Q4_K_M,
+  244-token prompt; `bench/results/x86-i7-12700H-2026-10-24-cuda.json`):
+
+  ```
+                              decode  prefill  peak RSS  VRAM
+  CPU only, default            1.52     6.40   7241 MB      0
+  --gpu-layers max (24/48)     2.55    10.23   4223 MB  3399 MB
+  CPU only, --fast             4.31    16.84   7241 MB      0
+  --gpu-layers max --fast      6.88    21.92   4223 MB  3399 MB
+  ... --ram-budget 3G          3.04    21.68   2441 MB  3399 MB
+  ```
+  RSS + VRAM is 381 MB above CPU-only (CUDA context and staging buffers).
+- `SIPLLM_CUDA_BLOCKING=1` sleeps in the stream sync instead of spinning
+  (measured 0.1–0.25 ms slower per call, so off by default).
+- `tests/test_cuda.cpp` (6): per-type matvec, batched matmul, dispatch, toy-model
+  offload equivalence, token tiles byte-identical; skips cleanly without a GPU.
+
+### x86: real Gemma 4 12B, sliding-window ring KV, AVX2 `--fast` K-quants, parallel attention (2026-10-24)
+
+Measured on an i7-12700H (6 P-cores pinned, `--threads 6`, warm cache, median of 3;
+raw rows in `bench/results/x86-i7-12700H-2026-10-24-cpu.json`, harness
+`scripts/bench_linux.py`):
+
+```
+Gemma 4 12B Q4_K_M, 244-token code prompt, 32 new tokens
+                       decode   prefill   peak RSS
+  default (resident)    1.52      6.40    7241 MB
+  --fast  (resident)    4.31     16.84    7241 MB
+  --fast --ram-budget 3G 1.36    16.99    2356 MB
+  llama.cpp 1a3011c     4.55     25.15   12579 MB   (llama-bench -p 245 -n 32)
+Qwen2.5-Coder 14B Q4_K_M, same prompt (269 SipLLM tokens)
+  main 13558c9 default  1.15      5.55    8499 MB
+  main 13558c9 --fast   3.06      4.00    8499 MB   (int8 path: prefill slower than default)
+  this    default       1.13      5.34    8405 MB   (final logits byte-identical to main)
+  this    --fast        3.73     15.23    8405 MB
+  llama.cpp 1a3011c     4.29     20.83   14797 MB   (llama-bench -p 200 -n 32)
+```
+
+The previous `gemma4` path was built against synthetic models only and could not
+load Google's GGUFs (per-layer `head_count_kv` array read as 0, `(1+w)` norms,
+adjacent-pair RoPE, no K=V layers). Now validated against llama.cpp `1a3011c`
+(`LLAMA_DUMP_EXACT=1`) on `unsloth/gemma-4-12b-it` Q4_K_M: argmax agrees at 6, 965
+and 1384 prompt tokens (worst layer cosine ≥ 0.981, KL ≤ 0.03). A 1740-token
+prompt that ends mid-identifier keeps every layer ≥ 0.994 but picks llama.cpp's
+#3 token.
+
+- **Per-layer geometry** — `ModelConfig::layer_{n_kv_heads,head_dim,swa}`: SWA
+  layers 8×256 kv heads, global layers 1×512 with **K reused as V** (no `attn_v`);
+  buffers sized by the widest layer; array metadata no longer read as scalar 0.
+- **Gemma 4 block** — plain RMSNorm (no +1), weightless V-norm, attention scale
+  1.0, NeoX RoPE with dual base (1e6 global / 1e4 SWA) and **proportional RoPE**
+  from `rope_freqs.weight` on global layers, per-layer `layer_output_scale`,
+  window applied only to SWA layers.
+- **`gemma4` tokenizer** (`Tokenizer::Kind::SpmBpe`) — rank BPE over raw UTF-8,
+  `▁` escaping, newline-run splitting, `<0xNN>` fallback, literal special tokens.
+  60/60 identical to llama.cpp incl. its 46 upstream test vectors.
+- **Sliding-window ring KV** — `KVCache` supports per-layer row widths and
+  window-sized rings. Gemma 4 KV is 768 MiB at 4K context (flat: 3,072 MiB) and
+  1,664 MiB at 32K (flat: 24,576 MiB); it grows only with the 8 global layers past
+  the 1024 window. Bitwise-identical to a full cache (test). Session files store
+  per-layer rows (also fixes an over-read when saving a Q8_0 KV cache); `--reuse`
+  refuses a rewind into history a ring already overwrote.
+- **REPL append-only turns** — interactive chat feeds only the new turn on top of
+  the model's exact tokens when the template re-renders prefix-stably; Gemma 4
+  chat template (`<|turn>`/`<turn|>`, empty thought channel).
+- **AVX2 Q4_K/Q5_K/Q6_K × Q8_K kernels** (`src/kquant_avx2.cpp`, opt-in
+  `--fast`) — llama.cpp's scheme: the activation is quantized once per row to
+  Q8_K and dotted against the packed weight blocks, with a batched kernel for
+  prefill. On AVX2+FMA hosts `linear()` routes Q4_K/Q5_K/Q6_K here ahead of the
+  wave-12 int8 kernels (table above); ARM keeps the SDOT kernels. The wave-12
+  int8 kernels pass `test_neon` 7/7 on this AVX2 host.
+- **Parallel GQA attention** — heads sharing a KV head are scored together (one
+  K/V read), spread over (token, kv head, time chunk); spans > 512 positions are
+  split into fixed chunks merged by log-sum-exp. Chunking depends only on the
+  row's own span, so results are identical for any `--threads` and batched
+  prefill / `--spec` verify still equal per-token decode (tests); spans ≤ 512
+  are byte-identical to the old loop. Gemma 4 `--fast` at 1740 tokens: decode
+  3.20 → 3.37, prefill 10.79 → 12.15 tok/s.
+- **Golden harness** — `LLAMA_DUMP_EXACT=1` (f32 KV, no flash-attn) and
+  `LLAMA_DUMP_CTX`; `dump_logits --fast --ctx --threads`.
+- **Registry** — removed dead `gemma4:9b` / `kimi` and fixed `deepseek-r1` /
+  `phi4` URLs; added `gemma4:12b[:q8_0]`, `qwen2.5-coder:{3b,7b,14b}`. The
+  `sipllm` wrapper no longer uses bash-only `set -o pipefail` under `/bin/sh`.
+
+**What an x86 laptop user still cannot do:** match llama.cpp's prefill (16.8 vs
+25.2 tok/s on Gemma 4) or run the Gemma 4 E2B/E4B (per-layer embeddings) and
+26B-A4B (MoE) variants.
 
 ### Wave 12 — edge truth: K-quant integer kernels, `--spec`, planner fix, honest claims (2026-10-19)
 

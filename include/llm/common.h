@@ -122,4 +122,28 @@ inline size_t current_rss_bytes() {
 #endif
 }
 
+// Kernel high-water mark of the resident set: the true peak, including
+// transients between samples. Falls back to the current RSS if unavailable.
+//   * macOS/iOS: MACH_TASK_BASIC_INFO.resident_size_max.
+//   * Linux/Android: VmHWM in /proc/self/status.
+inline size_t peak_rss_bytes() {
+#if defined(__APPLE__)
+    mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS)
+        return static_cast<size_t>(info.resident_size_max);
+#else
+    if (FILE* f = std::fopen("/proc/self/status", "r")) {
+        char line[256];
+        long kb = -1;
+        while (std::fgets(line, sizeof(line), f))
+            if (std::sscanf(line, "VmHWM: %ld kB", &kb) == 1) break;
+        std::fclose(f);
+        if (kb >= 0) return static_cast<size_t>(kb) * 1024;
+    }
+#endif
+    return current_rss_bytes();
+}
+
 } // namespace llm

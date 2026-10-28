@@ -1,11 +1,27 @@
-// neon.cpp — ARM int8 SDOT quantized matmul + fp16 bulk convert (see neon.h).
+// neon.cpp — int8 quantized matmul dispatch + fp16 bulk convert (see neon.h).
+// Built for the baseline ISA. The ARM SDOT kernel bodies are in neon_sdot.cpp
+// (built with +dotprod) and are only entered after a runtime CPU check; the x86
+// AVX2 kernels below stay compile-time (x86 ships separate baseline/AVX2
+// binaries, picked by the `sipllm` launcher).
+#include "llm/common.h"
 #include "llm/neon.h"
 #include "llm/quant.h"
 #include "llm/simd.h"
+#include "neon_internal.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
+
+#if defined(__aarch64__) && defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+#ifndef HWCAP_ASIMDDP
+#define HWCAP_ASIMDDP (1UL << 20)   // Linux arm64 uapi: ASIMD dot product (SDOT/UDOT)
+#endif
+#endif
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
@@ -13,8 +29,36 @@
 
 namespace llm {
 
-bool neon_dotprod_available() {
-#if defined(__ARM_FEATURE_DOTPROD)
+// Runtime CPU feature detection (Issue #68). The SDOT kernels live in
+// neon_sdot.cpp, built with +dotprod; everything else is baseline ISA, so the
+// binary must ASK the CPU before calling them. Cached after the first call.
+// SIPLLM_CPU=generic forces the no-SDOT path (CI and tests use it to exercise
+// the fallback on SDOT-capable hardware).
+static bool detect_dotprod() {
+    if (const char* e = std::getenv("SIPLLM_CPU"))
+        if (std::strcmp(e, "generic") == 0) return false;
+    if (!detail::sdot_kernels_compiled()) return false;
+#if defined(__aarch64__) && defined(__APPLE__)
+    int v = 0; size_t n = sizeof(v);
+    return sysctlbyname("hw.optional.arm.FEAT_DotProd", &v, &n, nullptr, 0) == 0 && v != 0;
+#elif defined(__aarch64__) && defined(__linux__)
+    return (getauxval(AT_HWCAP) & HWCAP_ASIMDDP) != 0;
+#else
+    return false;
+#endif
+}
+
+bool cpu_has_dotprod() {
+    static const bool has = detect_dotprod();
+    return has;
+}
+
+bool neon_dotprod_available() { return cpu_has_dotprod(); }
+
+bool int8_kernels_available() {
+#if defined(__aarch64__)
+    return cpu_has_dotprod();
+#elif LLM_HAVE_AVX2
     return true;
 #else
     return false;
@@ -23,7 +67,10 @@ bool neon_dotprod_available() {
 
 static bool g_fast_quant = false;
 void set_fast_quant(bool on) { g_fast_quant = on; }
-bool fast_quant_enabled() { return g_fast_quant; }
+// --fast requested AND this CPU has an int8 kernel. When it does not, linear()
+// and linear_batch() take the exact path per batch (one weight pass for the
+// whole prompt) instead of falling back one row at a time inside each kernel.
+bool fast_quant_enabled() { return g_fast_quant && int8_kernels_available(); }
 
 void fp16_to_fp32_bulk(const uint16_t* src, float* dst, int64_t n) {
 #if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
@@ -39,73 +86,14 @@ void fp16_to_fp32_bulk(const uint16_t* src, float* dst, int64_t n) {
 #endif
 }
 
-namespace {
-
-// Quantize an fp32 activation vector to per-32-block int8 (symmetric), matching
-// the Q8 activation format. Returns int8 codes + per-block scale.
-[[maybe_unused]] void quantize_activation_q8(const float* x, int64_t n, int8_t* q, float* scale) {
-    const int64_t nb = n / 32;
-    for (int64_t b = 0; b < nb; ++b) {
-        const float* xb = x + b * 32;
-        float amax = 0.f;
-        for (int i = 0; i < 32; ++i) amax = std::max(amax, std::fabs(xb[i]));
-        float d = amax / 127.f;
-        float id = d > 0.f ? 1.f / d : 0.f;
-        scale[b] = d;
-        for (int i = 0; i < 32; ++i) {
-            int v = (int)std::lround(xb[i] * id);
-            q[b * 32 + i] = (int8_t)std::max(-127, std::min(127, v));
-        }
-    }
-}
-
-// Hardware fp16 -> fp32 for a Q8_0 block scale (one fcvt vs the software IEEE
-// decode). Falls back to the software path where fp16 arithmetic is absent.
-#if defined(__ARM_FP16_FORMAT_IEEE)
-[[maybe_unused]] inline float f16_scale(const uint8_t* p) { __fp16 h; std::memcpy(&h, p, 2); return (float)h; }
-#else
-[[maybe_unused]] inline float f16_scale(const uint8_t* p) { uint16_t h; std::memcpy(&h, p, 2); return fp16_to_fp32(h); }
-#endif
-
-} // namespace
 
 void matmul_q8_0_i8(float* y, const void* W, const float* x,
                     int64_t n_out, int64_t n_in, ThreadPool* pool) {
-    const int64_t nb = n_in / 32;
-    const uint8_t* base = static_cast<const uint8_t*>(W);
-    const int64_t row_bytes = nb * 34;   // Q8_0 block = fp16 d + 32 int8
-
-#if defined(__ARM_FEATURE_DOTPROD)
-    // Quantize the activation once; reused across all output rows.
-    std::vector<int8_t> xq(n_in);
-    std::vector<float>  xs(nb);
-    quantize_activation_q8(x, n_in, xq.data(), xs.data());
-
-    auto body = [&](int, int64_t begin, int64_t end) {
-        for (int64_t o = begin; o < end; ++o) {
-            const uint8_t* row = base + o * row_bytes;
-            // Vector float accumulator hides FMA latency; each block's int dot
-            // stays in an int32x4 (no per-block horizontal reduce) and the
-            // weight scale uses the hardware fp16 converter.
-            float32x4_t accv = vdupq_n_f32(0.f);
-            for (int64_t b = 0; b < nb; ++b) {
-                const int8_t* wq = reinterpret_cast<const int8_t*>(row + b * 34 + 2);
-                const int8_t* aq = xq.data() + b * 32;
-                int32x4_t p = vdotq_s32(vdotq_s32(vdupq_n_s32(0),
-                                        vld1q_s8(wq),      vld1q_s8(aq)),
-                                        vld1q_s8(wq + 16), vld1q_s8(aq + 16));
-                accv = vfmaq_n_f32(accv, vcvtq_f32_s32(p), f16_scale(row + b * 34) * xs[b]);
-            }
-            y[o] = vaddvq_f32(accv);
-        }
-    };
-    if (pool && pool->size() > 1 && n_out >= 32) pool->parallel_for(n_out, body);
-    else body(0, 0, n_out);
-#else
-    // No SDOT: defer to the exact fp32-dequant path.
-    (void)base; (void)row_bytes;
-    matmul_quant(y, W, DType::Q8_0, x, n_out, n_in, pool);
+#if defined(__aarch64__)
+    if (cpu_has_dotprod()) { detail::matmul_q8_0_sdot(y, W, x, n_out, n_in, pool); return; }
 #endif
+    // No SDOT on this core (and no AVX2 Q8_0 kernel): the exact fp32-dequant path.
+    matmul_quant(y, W, DType::Q8_0, x, n_out, n_in, pool);
 }
 
 } // namespace llm
@@ -130,60 +118,9 @@ namespace llm {
 
 void matmul_q4_K_i8(float* y, const void* W, const float* x,
                     int64_t n_out, int64_t n_in, ThreadPool* pool) {
-#if defined(__ARM_FEATURE_DOTPROD)
-    const int64_t nsb = n_in / 256;              // super-blocks per row
-    const int64_t nb  = n_in / 32;               // activation blocks per row
-    const uint8_t* base = static_cast<const uint8_t*>(W);
-    const int64_t row_bytes = nsb * 144;
-
-    std::vector<int8_t>  xq(n_in);
-    std::vector<float>   xs(nb);
-    std::vector<int32_t> xsum(nb);
-    quantize_activation_q8(x, n_in, xq.data(), xs.data());
-    for (int64_t b = 0; b < nb; ++b)
-        xsum[b] = vaddlvq_s8(vld1q_s8(xq.data() + b * 32))
-                + vaddlvq_s8(vld1q_s8(xq.data() + b * 32 + 16));
-
-    auto body = [&](int, int64_t begin, int64_t end) {
-        const uint8x16_t lomask = vdupq_n_u8(0x0F);
-        for (int64_t o = begin; o < end; ++o) {
-            const uint8_t* row = base + o * row_bytes;
-            float32x4_t accv = vdupq_n_f32(0.f);  // Σ xs*d*sc*dot (lane-wise)
-            float       accm = 0.f;               // Σ xs*dmin*m*Σxq (scalar)
-            for (int64_t k = 0; k < nsb; ++k) {
-                const uint8_t* p = row + k * 144;
-                const float d = f16_scale(p), dmin = f16_scale(p + 2);
-                const uint8_t* scales = p + 4;
-                const uint8_t* q = p + 16;
-                const int8_t*  aq = xq.data() + k * 256;
-                const float*   bxs = xs.data() + k * 8;
-                const int32_t* bsum = xsum.data() + k * 8;
-                for (int j = 0; j < 4; ++j) {     // four 64-weight chunks
-                    const uint8x16_t q0 = vld1q_u8(q), q1 = vld1q_u8(q + 16);
-                    const int8x16_t lo0 = vreinterpretq_s8_u8(vandq_u8(q0, lomask));
-                    const int8x16_t lo1 = vreinterpretq_s8_u8(vandq_u8(q1, lomask));
-                    const int8x16_t hi0 = vreinterpretq_s8_u8(vshrq_n_u8(q0, 4));
-                    const int8x16_t hi1 = vreinterpretq_s8_u8(vshrq_n_u8(q1, 4));
-                    const int32x4_t plo = vdotq_s32(vdotq_s32(vdupq_n_s32(0),
-                                              lo0, vld1q_s8(aq)),      lo1, vld1q_s8(aq + 16));
-                    const int32x4_t phi = vdotq_s32(vdotq_s32(vdupq_n_s32(0),
-                                              hi0, vld1q_s8(aq + 32)), hi1, vld1q_s8(aq + 48));
-                    uint8_t sc, m;
-                    const int b0 = 2 * j;         // activation block of the low half
-                    get_scale_min_k4(b0, scales, sc, m);
-                    accv = vfmaq_n_f32(accv, vcvtq_f32_s32(plo), d * (float)sc * bxs[b0]);
-                    accm += dmin * (float)m * bxs[b0] * (float)bsum[b0];
-                    get_scale_min_k4(b0 + 1, scales, sc, m);
-                    accv = vfmaq_n_f32(accv, vcvtq_f32_s32(phi), d * (float)sc * bxs[b0 + 1]);
-                    accm += dmin * (float)m * bxs[b0 + 1] * (float)bsum[b0 + 1];
-                    q += 32; aq += 64;
-                }
-            }
-            y[o] = vaddvq_f32(accv) - accm;
-        }
-    };
-    if (pool && pool->size() > 1 && n_out >= 32) pool->parallel_for(n_out, body);
-    else body(0, 0, n_out);
+#if defined(__aarch64__)
+    if (cpu_has_dotprod()) { detail::matmul_q4_K_sdot(y, W, x, n_out, n_in, pool); return; }
+    matmul_quant(y, W, DType::Q4_K, x, n_out, n_in, pool);   // no SDOT on this core: exact path
 #elif LLM_HAVE_AVX2
     // x86-64 (AMD/Intel, Haswell+/Zen+): the same arithmetic with
     // _mm256_maddubs_epi16, whose operand contract is exactly (u8, s8) — the
@@ -279,59 +216,9 @@ namespace llm {
 
 void matmul_q6_K_i8(float* y, const void* W, const float* x,
                     int64_t n_out, int64_t n_in, ThreadPool* pool) {
-#if defined(__ARM_FEATURE_DOTPROD)
-    const int64_t nsb = n_in / 256;
-    const int64_t nb  = n_in / 32;
-    const int64_t ng  = n_in / 16;
-    const uint8_t* base = static_cast<const uint8_t*>(W);
-    const int64_t row_bytes = nsb * 210;
-
-    std::vector<int8_t>  xq(n_in);
-    std::vector<float>   xs(nb);
-    std::vector<int32_t> xsum16(ng);
-    quantize_activation_q8(x, n_in, xq.data(), xs.data());
-    for (int64_t g = 0; g < ng; ++g) xsum16[g] = vaddlvq_s8(vld1q_s8(xq.data() + g * 16));
-
-    auto body = [&](int, int64_t begin, int64_t end) {
-        const uint8x16_t m0f = vdupq_n_u8(0x0F), m03 = vdupq_n_u8(0x03);
-        for (int64_t o = begin; o < end; ++o) {
-            const uint8_t* row = base + o * row_bytes;
-            float32x4_t accv = vdupq_n_f32(0.f);
-            float       accm = 0.f;
-            for (int64_t k = 0; k < nsb; ++k) {
-                const uint8_t* p  = row + k * 210;
-                const uint8_t* ql = p;
-                const uint8_t* qh = p + 128;
-                const int8_t*  sc = reinterpret_cast<const int8_t*>(p + 192);
-                const float d = f16_scale(p + 208);
-                for (int h = 0; h < 2; ++h) {                 // two 128-weight halves
-                    const int64_t e0 = k * 256 + h * 128;     // first element of this half
-                    for (int off = 0; off < 32; off += 16) {  // two 16-wide groups per quarter
-                        const int is = off / 16;
-                        const uint8x16_t qlv  = vld1q_u8(ql + off);
-                        const uint8x16_t qlv2 = vld1q_u8(ql + off + 32);
-                        const uint8x16_t qhv  = vld1q_u8(qh + off);
-                        const int8x16_t q1 = vreinterpretq_s8_u8(vorrq_u8(vandq_u8(qlv,  m0f), vshlq_n_u8(vandq_u8(qhv, m03), 4)));
-                        const int8x16_t q2 = vreinterpretq_s8_u8(vorrq_u8(vandq_u8(qlv2, m0f), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 2), m03), 4)));
-                        const int8x16_t q3 = vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(qlv,  4), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 4), m03), 4)));
-                        const int8x16_t q4 = vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(qlv2, 4), vshlq_n_u8(vandq_u8(vshrq_n_u8(qhv, 6), m03), 4)));
-                        const int8x16_t* qs[4] = {&q1, &q2, &q3, &q4};
-                        for (int quarter = 0; quarter < 4; ++quarter) {
-                            const int64_t e  = e0 + quarter * 32 + off;      // element index
-                            const int32x4_t pd = vdotq_s32(vdupq_n_s32(0), *qs[quarter], vld1q_s8(xq.data() + e));
-                            const float s = d * (float)sc[is + 2 * quarter] * xs[e / 32];
-                            accv = vfmaq_n_f32(accv, vcvtq_f32_s32(pd), s);
-                            accm += s * 32.f * (float)xsum16[e / 16];
-                        }
-                    }
-                    ql += 64; qh += 32; sc += 8;
-                }
-            }
-            y[o] = vaddvq_f32(accv) - accm;
-        }
-    };
-    if (pool && pool->size() > 1 && n_out >= 32) pool->parallel_for(n_out, body);
-    else body(0, 0, n_out);
+#if defined(__aarch64__)
+    if (cpu_has_dotprod()) { detail::matmul_q6_K_sdot(y, W, x, n_out, n_in, pool); return; }
+    matmul_quant(y, W, DType::Q6_K, x, n_out, n_in, pool);   // no SDOT on this core: exact path
 #elif LLM_HAVE_AVX2
     // Same arithmetic; 32 bytes of ql at once give two 16-wide groups (two
     // scales) per quarter, so the per-lane scale vector carries sc[is] in
@@ -402,6 +289,108 @@ void matmul_q6_K_i8(float* y, const void* W, const float* x,
 #else
     matmul_quant(y, W, DType::Q6_K, x, n_out, n_in, pool);
 #endif
+}
+
+} // namespace llm
+
+// ---- batched forms (prefill) ---------------------------------------------
+namespace llm {
+
+#define LLM_I8_BATCH(NAME, SINGLE, SDOT_BATCH)                                          \
+void NAME(float* Y, const void* W, const float* X, int64_t bs,                          \
+          int64_t n_out, int64_t n_in, ThreadPool* pool) {                              \
+    LLM_I8_BATCH_ARM(SDOT_BATCH)                                                        \
+    for (int64_t b = 0; b < bs; ++b)                                                    \
+        SINGLE(Y + b * n_out, W, X + b * n_in, n_out, n_in, pool);                      \
+}
+#if defined(__aarch64__)
+#define LLM_I8_BATCH_ARM(SDOT_BATCH)                                                    \
+    if (cpu_has_dotprod()) { detail::SDOT_BATCH(Y, W, X, bs, n_out, n_in, pool); return; }
+#else
+#define LLM_I8_BATCH_ARM(SDOT_BATCH)
+#endif
+
+LLM_I8_BATCH(matmul_q8_0_i8_batch, matmul_q8_0_i8, matmul_q8_0_sdot_batch)
+LLM_I8_BATCH(matmul_q4_K_i8_batch, matmul_q4_K_i8, matmul_q4_K_sdot_batch)
+LLM_I8_BATCH(matmul_q6_K_i8_batch, matmul_q6_K_i8, matmul_q6_K_sdot_batch)
+
+#undef LLM_I8_BATCH_ARM
+#undef LLM_I8_BATCH
+
+} // namespace llm
+
+// ---- Wave 15: IL4 interleaved Q4_K -----------------------------------------
+namespace llm {
+
+bool q4_K_interleave_supported() {
+#if defined(__aarch64__)
+    return cpu_has_dotprod();
+#else
+    return false;
+#endif
+}
+
+void repack_q4_K_il4_inplace(void* data, int64_t n_out, int64_t n_in) {
+    LLM_CHECK(n_out % 4 == 0 && n_in % 256 == 0, "repack_q4_K_il4: n_out % 4 or n_in % 256");
+    const int64_t nsb = n_in / 256, row_bytes = nsb * 144;
+    uint8_t* base = static_cast<uint8_t*>(data);
+    // A 4-row group's IL4 blocks occupy exactly its 4 rows' bytes, so each group
+    // is rewritten in place from a copy of itself (one group of scratch).
+    std::vector<uint8_t> tmp((size_t)(4 * row_bytes));
+    for (int64_t g = 0; g < n_out / 4; ++g) {
+        uint8_t* region = base + g * 4 * row_bytes;
+        std::memcpy(tmp.data(), region, tmp.size());
+        for (int64_t k = 0; k < nsb; ++k) {
+            BlockQ4KIL4 b;
+            for (int r = 0; r < 4; ++r) {
+                const uint8_t* p = tmp.data() + r * row_bytes + k * 144;
+                std::memcpy(&b.d[r], p, 2);
+                std::memcpy(&b.dmin[r], p + 2, 2);
+                for (int i = 0; i < 12; ++i) b.scales[i][r] = p[4 + i];
+                for (int j = 0; j < 4; ++j)
+                    for (int v = 0; v < 8; ++v)
+                        std::memcpy(&b.qs[j][v][r * 4], p + 16 + j * 32 + v * 4, 4);
+            }
+            std::memcpy(region + k * sizeof(BlockQ4KIL4), &b, sizeof b);
+        }
+    }
+}
+
+void matmul_q4_K_il4(float* Y, const void* W, const float* X, int64_t bs,
+                     int64_t n_out, int64_t n_in, ThreadPool* pool) {
+    LLM_CHECK(q4_K_interleave_supported(), "IL4 Q4_K weights need the ARM SDOT kernel");
+    detail::matmul_q4_K_il4_sdot(Y, W, X, bs, n_out, n_in, pool);
+}
+
+// ---- Wave 16: IL4 interleaved Q6_K -----------------------------------------
+void repack_q6_K_il4_inplace(void* data, int64_t n_out, int64_t n_in) {
+    LLM_CHECK(n_out % 4 == 0 && n_in % 256 == 0, "repack_q6_K_il4: n_out % 4 or n_in % 256");
+    const int64_t nsb = n_in / 256, row_bytes = nsb * 210;
+    uint8_t* base = static_cast<uint8_t*>(data);
+    std::vector<uint8_t> tmp((size_t)(4 * row_bytes));   // one group of scratch, as for Q4_K
+    for (int64_t g = 0; g < n_out / 4; ++g) {
+        uint8_t* region = base + g * 4 * row_bytes;
+        std::memcpy(tmp.data(), region, tmp.size());
+        for (int64_t k = 0; k < nsb; ++k) {
+            BlockQ6KIL4 b;
+            for (int r = 0; r < 4; ++r) {
+                const uint8_t* p = tmp.data() + r * row_bytes + k * 210;   // ql[128] qh[64] sc[16] d
+                std::memcpy(&b.d[r], p + 208, 2);
+                for (int i = 0; i < 16; ++i) b.scales[i][r] = static_cast<int8_t>(p[192 + i]);
+                for (int h = 0; h < 2; ++h) {
+                    for (int v = 0; v < 16; ++v) std::memcpy(&b.ql[h][v][r * 4], p + 64 * h + 4 * v, 4);
+                    for (int v = 0; v < 8; ++v)  std::memcpy(&b.qh[h][v][r * 4], p + 128 + 32 * h + 4 * v, 4);
+                }
+            }
+            std::memcpy(region + k * sizeof(BlockQ6KIL4), &b, sizeof b);
+        }
+    }
+}
+
+void matmul_q6_K_il4(float* Y, const void* W, const float* X, int64_t bs,
+                     int64_t n_out, int64_t n_in, ThreadPool* pool) {
+    LLM_CHECK(q4_K_interleave_supported(), "IL4 Q6_K weights need the ARM SDOT kernel");
+    detail::matmul_q6_K_il4_sdot(Y, W, X, bs, n_out, n_in, pool);
 }
 
 } // namespace llm

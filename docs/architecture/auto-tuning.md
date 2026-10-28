@@ -44,8 +44,11 @@ The chosen `threads` and `schedule_policy` are written to `~/.sipllm/runtime/<hw
 
 ### CLI surface
 
-- `--no-autotune` — skip tuning, use defaults (`threads=4`, `policy=0`).
-- `--recalibrate` — force a fresh benchmark even if a cached profile exists (also the only flag `bench_micro` accepts).
+Since issue #77 the `llm` CLI runs the tuner **only on request**. On a 2+6-core phone the micro-benchmark picked 2 threads and `Proportional2`, which decoded slower than the defaults (TinyLlama, all layers pinned: 8.0–8.8 tok/s against 9.9 with the tuner off). Without a request the CLI keeps its measured defaults: every core (`ThreadPool` uses `hardware_concurrency`) and the `fixed16` schedule. The C ABI and Dart SDK already worked this way: they tune only when `threads = -1`.
+
+- `--autotune` — run the tuner (or load its cached profile) and apply its thread count and policy. An explicit `--threads` or `--schedule` still wins.
+- `--recalibrate` — force a fresh benchmark even if a cached profile exists. Implies `--autotune`. It is also the only flag `bench_micro` accepts.
+- `--no-autotune` — accepted for compatibility. It never runs the tuner, even with `--autotune`.
 - `--profile-info` — print the detected `hardware_id` and the `HardwareInfo` JSON, then exit.
 
 ## Caveats
@@ -54,6 +57,7 @@ The chosen `threads` and `schedule_policy` are written to `~/.sipllm/runtime/<hw
 > - **It does not pick the RAM budget.** Peak-RSS budgeting is the separate `mem_plan.cpp` contract planner behind `--ram-budget`; the tuner only touches thread count and scheduler.
 > - **Only 4 of the 7 schedule policies are benchmarked** — `Static`, `Fixed16`, `Proportional2`, `Adaptive`. The other policies exist in the pool but are never auto-selected.
 > - **No big.LITTLE / core-cluster detection.** It reads a single logical/physical core count and treats all cores as equivalent; it does not distinguish performance from efficiency cores.
+> - **The cache needs a writable `$HOME`.** In an Android `adb shell`, `HOME=/` is read-only, so nothing is saved and `--autotune` re-runs the benchmarks on every launch.
 > - **`load_hardware_profile` is a no-op.** It intentionally returns `false` without parsing — hardware re-detection is <5 ms, so the `hardware.json` cache is never actually read back. Only the *runtime* profile (`runtime/<hw_id>.json`) is loaded.
 
 ## Alternatives considered

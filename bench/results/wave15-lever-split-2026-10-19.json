@@ -1,0 +1,105 @@
+{
+ "meta": {
+  "benchmark": "wave 15 lever split + today's --fast accuracy",
+  "date": "2026-10-19",
+  "branch": "wave15-interleave",
+  "device": "OnePlus IV2201 / Dimensity 900 (Cortex-A78 big cores, dotprod, NO i8mm), Android 13, adb shell, 4 threads",
+  "llama_cpp": "commit 585080d, CPU-only, NDK 29, -march=armv8.2-a+dotprod+fp16, OpenMP off, KleidiAI off; GGML_CPU_REPACK=ON vs OFF",
+  "model": "tinyllama-1.1b Q4_K_M"
+ },
+ "llama_cpp_llama_bench": {
+  "lb_rOFF_r1": {
+   "big_khz_pre": 1140000,
+   "results": {
+    "pp16": {
+     "tok_s": 20.03,
+     "sd": 0.22
+    },
+    "pp64": {
+     "tok_s": 20.33,
+     "sd": 0.41
+    },
+    "pp128": {
+     "tok_s": 20.75,
+     "sd": 0.07
+    }
+   }
+  },
+  "lb_rOFF_r2": {
+   "big_khz_pre": 1140000,
+   "results": {
+    "pp16": {
+     "tok_s": 20.32,
+     "sd": 0.14
+    },
+    "pp64": {
+     "tok_s": 20.5,
+     "sd": 0.02
+    },
+    "pp128": {
+     "tok_s": 20.69,
+     "sd": 0.01
+    }
+   }
+  },
+  "lb_rON_r1": {
+   "big_khz_pre": 1140000,
+   "results": {
+    "pp16": {
+     "tok_s": 37.41,
+     "sd": 0.38
+    },
+    "pp64": {
+     "tok_s": 39.77,
+     "sd": 0.44
+    },
+    "pp128": {
+     "tok_s": 41.35,
+     "sd": 0.82
+    }
+   }
+  },
+  "lb_rON_r2": {
+   "big_khz_pre": 1300000,
+   "results": {
+    "pp16": {
+     "tok_s": 37.06,
+     "sd": 0.37
+    },
+    "pp64": {
+     "tok_s": 40.48,
+     "sd": 0.25
+    },
+    "pp128": {
+     "tok_s": 41.61,
+     "sd": 0.58
+    }
+   }
+  }
+ },
+ "sipllm_batched_prefill_same_session_tok_s": [
+  14.76,
+  14.98
+ ],
+ "sipllm_prompt_tokens": 135,
+ "interpretation": "Q8_K activations on the standard layout (repack OFF) ~1.4x over SipLLM; interleaved weights (repack ON) a further ~2x.",
+ "fast_accuracy_today": {
+  "tool": "tools/fast_accuracy (teacher-forced 256 tokens, built-in passage), Apple M3",
+  "tinyllama-q4_k_m": {
+   "kl_mean": 0.000529,
+   "kl_p50": 0.000346,
+   "kl_p99": 0.0038,
+   "kl_max": 0.006615,
+   "top1_agreement_pct": 99.61,
+   "max_abs_logit_diff": 0.379
+  },
+  "smollm2-135m (Q8_0)": {
+   "kl_mean": 0.0028,
+   "kl_p50": 0.002454,
+   "kl_p99": 0.008085,
+   "kl_max": 0.019164,
+   "top1_agreement_pct": 93.75,
+   "max_abs_logit_diff": 1.223
+  }
+ }
+}

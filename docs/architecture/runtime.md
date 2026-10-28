@@ -26,7 +26,7 @@ The constructor (`src/runtime.cpp:32`) runs a fixed sequence:
 ```text
 open_model(path)            magic-sniff GGUF vs .llmw -> WeightSource
   └─ plan_memory(req)       budget -> ctx / head / buffers / weight_ceiling
-       └─ ThreadPool        auto-tuned threads (see auto-tuning)
+       └─ ThreadPool        every core by default; --autotune is opt-in (see auto-tuning)
             └─ LayerLoader   residency + prefetch, capped at weight_ceiling
                  └─ KVCache  sized to the chosen ctx
                       └─ Transformer  forward pass over the loader + KV

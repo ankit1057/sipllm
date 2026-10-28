@@ -2,6 +2,7 @@
 #include "llm/common.h"
 
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -19,6 +20,7 @@
 #if defined(__APPLE__)
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include <mach/mach.h>
 #endif
 
 namespace llm {
@@ -57,7 +59,12 @@ HardwareInfo get_hardware_info() {
     size = sizeof(mem);
     if (sysctlbyname("hw.memsize", &mem, &size, NULL, 0) == 0) info.ram_bytes = mem;
     
-    if (sysctlbyname("hw.pagesize", &val, &size, NULL, 0) == 0) info.page_size = val;
+    // hw.pagesize is 8 bytes on arm64 macOS: read it into a 64-bit value with its
+    // own size (it used to land in the 4-byte `val` with size still 8 from
+    // hw.memsize, overwriting 4 bytes of stack; ASan stack-buffer-overflow).
+    int64_t page = 0;
+    size = sizeof(page);
+    if (sysctlbyname("hw.pagesize", &page, &size, NULL, 0) == 0) info.page_size = page;
 
 #if defined(__aarch64__) || defined(_M_ARM64)
     info.architecture = "arm64";
@@ -158,6 +165,27 @@ std::string RuntimeProfile::to_json(int indent) const {
     ss << ind << "  \"thread_throughput_relative\": " << thread_throughput_relative << "\n";
     ss << ind << "}";
     return ss.str();
+}
+
+size_t available_ram_bytes() {
+#if defined(__APPLE__)
+    vm_statistics64_data_t vm{};
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm, &count) != KERN_SUCCESS) return 0;
+    vm_size_t page = 0;
+    if (host_page_size(mach_host_self(), &page) != KERN_SUCCESS) return 0;
+    return (size_t)(vm.free_count + vm.inactive_count + vm.speculative_count) * (size_t)page;
+#elif defined(__linux__)
+    std::ifstream in("/proc/meminfo");
+    std::string line;
+    while (std::getline(in, line)) {
+        unsigned long long kb = 0;
+        if (std::sscanf(line.c_str(), "MemAvailable: %llu kB", &kb) == 1) return (size_t)kb * 1024;
+    }
+    return 0;
+#else
+    return 0;
+#endif
 }
 
 std::string get_sipllm_home() {

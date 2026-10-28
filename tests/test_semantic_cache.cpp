@@ -3,6 +3,9 @@
 #include "llm/toy_model.h"
 #include "tests/test_util.h"
 
+#include <algorithm>
+#include <cmath>
+
 using namespace llm;
 
 static std::string make_toy_sc() {
@@ -45,6 +48,39 @@ TEST(semantic_cache_basic_prefix_match) {
     rt.generate("The capital of France is Paris", 4, scfg, nullptr, &s2);
     // Should have matched the prefix from turn 1!
     CHECK(s2.semantic_cache_hits > 0);
+}
+
+TEST(semantic_cache_full_prompt_hit_matches_cold_output) {
+    // A repeated prompt is fully cached, so the hit is trimmed by one token (the
+    // last token is re-run for logits). The injected rows must still line up per
+    // layer: the output must equal a cold run, token for token.
+    const std::string path = make_toy_sc();
+    LayerLoader::Options opt;
+    opt.residency = Residency::FP32;
+    opt.async = false;
+    SamplerConfig scfg;
+    scfg.temperature = 0.0f;
+    const std::string prompt = "The capital of France is";
+
+    Runtime cold(open_model(path), opt, 256, 1);
+    const std::string want = cold.generate(prompt, 8, scfg, nullptr, nullptr);
+    const std::vector<float> want_logits = cold.first_logits();
+
+    Runtime rt(open_model(path), opt, 256, 1);
+    rt.enable_semantic_cache(10 * 1024 * 1024);
+    rt.generate(prompt, 8, scfg, nullptr, nullptr);
+    rt.reset();
+    GenStats st;
+    const std::string got = rt.generate(prompt, 8, scfg, nullptr, &st);
+    CHECK(st.semantic_cache_hits > 0);
+    CHECK(got == want);
+    // Text can coincide on a toy model; the first-step logits cannot.
+    const std::vector<float>& got_logits = rt.first_logits();
+    CHECK(got_logits.size() == want_logits.size());
+    float max_diff = 0.f;
+    for (size_t i = 0; i < want_logits.size() && i < got_logits.size(); ++i)
+        max_diff = std::max(max_diff, std::fabs(got_logits[i] - want_logits[i]));
+    CHECK(max_diff < 1e-4f);
 }
 
 TEST(semantic_cache_eviction_bounded) {

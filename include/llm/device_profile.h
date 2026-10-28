@@ -39,6 +39,15 @@ struct RuntimeProfile {
 // Retrieve hardware traits (reads from OS)
 HardwareInfo get_hardware_info();
 
+// Issue #78: RAM the OS reports as available right now (Linux/Android
+// MemAvailable; macOS free + inactive + speculative pages). 0 if unknown.
+size_t available_ram_bytes();
+
+// Issue #78: the default --ram-budget when none is given: half of the
+// available RAM, so a model that fits is held resident instead of being
+// re-read from storage every token. 0 (unknown) keeps the old streaming default.
+inline size_t auto_ram_budget(size_t available_bytes) { return available_bytes / 2; }
+
 // Fetch paths for the persistence layer
 std::string get_sipllm_home();
 std::string get_hardware_profile_path();

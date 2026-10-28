@@ -1,0 +1,150 @@
+{
+  "meta": {
+    "host": "x86-i7-12700H",
+    "date": "2026-10-24",
+    "os": "Linux 7.0.0-38-generic",
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700H",
+    "logical_cpus": 20,
+    "ram_gb": 37.6,
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU, 4096 MiB, 580.178.04",
+    "on_ac_power": true,
+    "peak_rss_source": "GNU /usr/bin/time -v (maximum resident set size)",
+    "vram_source": "nvidia-smi memory.used, peak during run minus idle baseline",
+    "cache_state": "warm (model file read at least once before timing)",
+    "notes": "6 P-cores pinned (taskset 0,2,4,6,8,10), --threads 6, CPU package cooled to <= 70 C before each run. SipLLM rows: median of n_runs; llama.cpp rows: llama-bench -r 3 average (prefill and decode are separate tests). SipLLM tokenizes code-200.txt as 244 tokens (Gemma 4) / 269 (Qwen2.5); llama.cpp counts 245 / 200."
+  },
+  "sipllm": [
+    {
+      "label": "gemma4-gpu-max-default",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 32 --greedy --threads 6 --ram-budget 20G --gpu-layers max",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 3,
+      "note": null,
+      "decode_tok_s": 2.55,
+      "prefill_tok_s": 10.23,
+      "ttft_ms": 23857.0,
+      "peak_rss_mb": 4223.1,
+      "vram_peak_mb": 3399.0,
+      "kv_mb": 352.3,
+      "wall_s": 39.35,
+      "prompt_tokens": 244,
+      "gen_tokens": 32,
+      "gpu_layers": 24,
+      "gpu_weights_mb": 3123,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          2.61,
+          2.49,
+          2.55
+        ],
+        "prefill_tok_s": [
+          11.87,
+          10.12,
+          10.23
+        ],
+        "peak_rss_mb": [
+          4223.1,
+          4223.1,
+          4223.2
+        ],
+        "vram_peak_mb": [
+          3399.0,
+          3399.0,
+          3399.0
+        ],
+        "start_temp_c": [
+          63.0,
+          65.0,
+          66.0
+        ]
+      }
+    },
+    {
+      "label": "gemma4-gpu-max-fast",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 32 --greedy --threads 6 --ram-budget 20G --gpu-layers max --fast",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 3,
+      "note": null,
+      "decode_tok_s": 6.88,
+      "prefill_tok_s": 21.92,
+      "ttft_ms": 11133.0,
+      "peak_rss_mb": 4223.3,
+      "vram_peak_mb": 3399.0,
+      "kv_mb": 352.3,
+      "wall_s": 18.72,
+      "prompt_tokens": 244,
+      "gen_tokens": 32,
+      "gpu_layers": 24,
+      "gpu_weights_mb": 3123,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          6.88,
+          6.86,
+          6.91
+        ],
+        "prefill_tok_s": [
+          21.92,
+          22.05,
+          21.54
+        ],
+        "peak_rss_mb": [
+          4223.3,
+          4223.3,
+          4223.1
+        ],
+        "vram_peak_mb": [
+          3399.0,
+          3399.0,
+          3399.0
+        ],
+        "start_temp_c": [
+          66.0,
+          68.0,
+          68.0
+        ]
+      }
+    },
+    {
+      "label": "gemma4-gpu-max-fast-budget3G",
+      "runtime": "sipllm",
+      "cmd": "build/llm ~/.sipllm/models/gemma-4-12b-it-Q4_K_M.gguf -p \"$(cat bench/prompts/code-200.txt)\" -n 8 --greedy --threads 6 --ram-budget 3G --gpu-layers max --fast",
+      "cpus": "0,2,4,6,8,10",
+      "n_runs": 1,
+      "note": null,
+      "decode_tok_s": 3.04,
+      "prefill_tok_s": 21.68,
+      "ttft_ms": 11256.0,
+      "peak_rss_mb": 2440.8,
+      "vram_peak_mb": 3399.0,
+      "kv_mb": 176.2,
+      "wall_s": 16.0,
+      "prompt_tokens": 244,
+      "gen_tokens": 8,
+      "gpu_layers": 24,
+      "gpu_weights_mb": 3123,
+      "build": "this PR",
+      "_samples": {
+        "decode_tok_s": [
+          3.04
+        ],
+        "prefill_tok_s": [
+          21.68
+        ],
+        "peak_rss_mb": [
+          2440.8
+        ],
+        "vram_peak_mb": [
+          3399.0
+        ],
+        "start_temp_c": [
+          68.0
+        ]
+      }
+    }
+  ],
+  "llama_cpp": []
+}

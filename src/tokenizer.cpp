@@ -73,7 +73,18 @@ Tokenizer Tokenizer::from_source(const WeightSource& src) {
     bool is_bpe = (model == "gpt2") ||
                   (model.empty() && merges && merges->kind == MetaValue::Kind::StrArr &&
                    !merges->sa.empty() && t.scores_.empty());
-    if (is_bpe) {
+    if (model == "gemma4") {
+        t.kind_ = Kind::SpmBpe;
+        if (merges && merges->kind == MetaValue::Kind::StrArr)
+            for (int32_t r = 0; r < (int32_t)merges->sa.size(); ++r)
+                t.merge_rank_[merges->sa[r]] = r;
+        // CONTROL (3) and USER_DEFINED (4) tokens are matched literally.
+        for (size_t i = 0; i < t.types_.size() && i < t.id_to_tok_.size(); ++i)
+            if ((t.types_[i] == 3 || t.types_[i] == 4) && !t.id_to_tok_[i].empty())
+                t.specials_.push_back(t.id_to_tok_[i]);
+        std::sort(t.specials_.begin(), t.specials_.end(),
+                  [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
+    } else if (is_bpe) {
         t.kind_ = Kind::BPE;
         if (merges && merges->kind == MetaValue::Kind::StrArr)
             for (int32_t r = 0; r < (int32_t)merges->sa.size(); ++r)
@@ -85,10 +96,50 @@ Tokenizer Tokenizer::from_source(const WeightSource& src) {
 
     t.bos_ = src.meta_int("tokenizer.ggml.bos_token_id", -1);
     t.eos_ = src.meta_int("tokenizer.ggml.eos_token_id", -1);
-    if (t.eos_ >= 0) t.eog_ids_.push_back(t.eos_);
-    // Llama-3 also ends turns on <|eot_id|>.
-    if (auto it = t.tok_to_id_.find("<|eot_id|>"); it != t.tok_to_id_.end())
-        t.eog_ids_.push_back(it->second);
+
+    // BOS policy, as llama.cpp: the GGUF flag wins; otherwise SentencePiece adds
+    // it and BPE adds it only for the Llama-3 pre-tokenizer family (SmolLM2 and
+    // Qwen2 do not).
+    if (const int64_t f = src.meta_int("tokenizer.ggml.add_bos_token", -1); f >= 0) {
+        t.add_bos_ = f != 0;
+    } else if (t.kind_ == Kind::BPE) {
+        static const char* bos_pre[] = {"llama3", "llama-v3", "llama-bpe", "falcon3",
+                                        "falcon-h1", "pixtral"};
+        const std::string pre = src.meta_str("tokenizer.ggml.pre", "");
+        t.add_bos_ = std::find(std::begin(bos_pre), std::end(bos_pre), pre) != std::end(bos_pre);
+    }
+    t.add_space_prefix_ = src.meta_int("tokenizer.ggml.add_space_prefix", 1) != 0;
+
+    // End-of-generation: EOS, the declared EOT/EOM ids, and the turn-end tokens
+    // llama.cpp recognizes by text (Llama-3, ChatML/Qwen, Phi-3, Gemma).
+    auto add_eog = [&](int64_t id) {
+        if (id >= 0 && std::find(t.eog_ids_.begin(), t.eog_ids_.end(), id) == t.eog_ids_.end())
+            t.eog_ids_.push_back(id);
+    };
+    add_eog(t.eos_);
+    add_eog(src.meta_int("tokenizer.ggml.eot_token_id", -1));
+    add_eog(src.meta_int("tokenizer.ggml.eom_token_id", -1));
+    static const char* eog_text[] = {"<|eot_id|>", "<|eom_id|>", "<|im_end|>", "<|end|>",
+                                     "<end_of_turn>", "<|endoftext|>", "<|end_of_text|>",
+                                     "<EOT>", "<end_of_utterance>", "</s>", "<eos>",
+                                     "<turn|>"};   // Gemma 4
+    for (const char* e : eog_text)
+        if (auto it = t.tok_to_id_.find(e); it != t.tok_to_id_.end()) add_eog(it->second);
+
+    // Special tokens are matched as whole strings before BPE/SPM sees the text
+    // (llama.cpp parse_special): token types UNKNOWN=2, CONTROL=3,
+    // USER_DEFINED=4, plus the turn-end tokens above. Longest first, so a token
+    // that contains a shorter one wins.
+    for (int64_t id = 0; id < (int64_t)t.types_.size() && id < (int64_t)t.id_to_tok_.size(); ++id) {
+        const int32_t ty = t.types_[id];
+        if ((ty == 2 || ty == 3 || ty == 4) && !t.id_to_tok_[id].empty()) t.special_ids_.push_back(id);
+    }
+    for (int64_t id : t.eog_ids_)
+        if (std::find(t.special_ids_.begin(), t.special_ids_.end(), id) == t.special_ids_.end())
+            t.special_ids_.push_back(id);
+    std::stable_sort(t.special_ids_.begin(), t.special_ids_.end(), [&](int64_t a, int64_t b) {
+        return t.id_to_tok_[a].size() > t.id_to_tok_[b].size();
+    });
     return t;
 }
 
@@ -100,10 +151,10 @@ bool Tokenizer::is_eog(int64_t id) const {
 // ---- SentencePiece (Llama-1/2) -------------------------------------------
 // Space is encoded as U+2581 '▁'. Start from single-char symbols, then greedily
 // merge the adjacent pair with the highest vocab score until none improve.
-std::vector<int64_t> Tokenizer::encode_spm(const std::string& text) const {
+std::vector<int64_t> Tokenizer::encode_spm(const std::string& text, bool space_prefix) const {
     const std::string SPACE = "\xE2\x96\x81";   // ▁
     std::string s;
-    s += SPACE;                                 // add_dummy_prefix
+    if (space_prefix) s += SPACE;               // add_dummy_prefix
     for (char c : text) s += (c == ' ') ? SPACE : std::string(1, c);
 
     // Split into UTF-8 symbols.
@@ -212,18 +263,128 @@ std::vector<int64_t> Tokenizer::encode_bpe(const std::string& text) const {
     return out;
 }
 
+// ---- Gemma 4 SPM-style BPE ------------------------------------------------
+// Mirrors llama.cpp's LLAMA_VOCAB_PRE_TYPE_GEMMA4: special tokens are split out
+// first; in the remaining text ' ' -> '▁', then the text is cut into runs of
+// non-newlines and runs of newlines, and each run is merged by BPE rank over
+// UTF-8 characters. Symbols missing from the vocab fall back to <0xNN> bytes.
+void Tokenizer::spm_bpe_chunk(const std::string& chunk, std::vector<int64_t>& out) const {
+    if (chunk.empty()) return;
+    if (chunk.find_first_not_of('\n') == std::string::npos) {
+        // A pure newline run is a single vocab token when one exists.
+        if (auto it = tok_to_id_.find(chunk); it != tok_to_id_.end()) { out.push_back(it->second); return; }
+    }
+    std::vector<std::string> syms;
+    for (size_t i = 0; i < chunk.size();) {
+        unsigned char c = chunk[i];
+        size_t len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        len = std::min(len, chunk.size() - i);
+        syms.push_back(chunk.substr(i, len));
+        i += len;
+    }
+    // Merge the lowest-rank adjacent pair until none applies. Ties resolve to
+    // the leftmost pair, as llama.cpp's bigram queue does.
+    for (;;) {
+        int best = INT32_MAX, besti = -1;
+        for (size_t i = 0; i + 1 < syms.size(); ++i) {
+            auto it = merge_rank_.find(syms[i] + " " + syms[i + 1]);
+            if (it != merge_rank_.end() && it->second < best) { best = it->second; besti = (int)i; }
+        }
+        if (besti < 0) break;
+        syms[besti] += syms[besti + 1];
+        syms.erase(syms.begin() + besti + 1);
+    }
+    for (const std::string& sym : syms) {
+        if (auto it = tok_to_id_.find(sym); it != tok_to_id_.end()) { out.push_back(it->second); continue; }
+        for (unsigned char b : sym) {
+            char buf[8]; snprintf(buf, sizeof(buf), "<0x%02X>", b);
+            if (auto it = tok_to_id_.find(buf); it != tok_to_id_.end()) out.push_back(it->second);
+        }
+    }
+}
+
+std::vector<int64_t> Tokenizer::encode_spm_bpe(const std::string& text) const {
+    std::vector<int64_t> out;
+    auto encode_raw = [&](const std::string& raw) {
+        std::string esc;
+        esc.reserve(raw.size() + raw.size() / 2);
+        for (char c : raw) { if (c == ' ') esc += "\xE2\x96\x81"; else esc += c; }
+        for (size_t i = 0; i < esc.size();) {
+            const bool nl = esc[i] == '\n';
+            size_t j = i;
+            while (j < esc.size() && (esc[j] == '\n') == nl) ++j;
+            spm_bpe_chunk(esc.substr(i, j - i), out);
+            i = j;
+        }
+    };
+    size_t start = 0, i = 0;
+    while (i < text.size()) {
+        const std::string* hit = nullptr;
+        if (text[i] == '<' || text[i] == '[')
+            for (const std::string& sp : specials_)
+                if (text.compare(i, sp.size(), sp) == 0) { hit = &sp; break; }
+        if (!hit) { ++i; continue; }
+        encode_raw(text.substr(start, i - start));
+        out.push_back(tok_to_id_.at(*hit));
+        i += hit->size();
+        start = i;
+    }
+    encode_raw(text.substr(start));
+    return out;
+}
+
+// One stretch of plain text between special tokens. SPM gives every stretch
+// the dummy prefix: each one starts the text or follows a special token, which
+// is where llama.cpp adds it.
+std::vector<int64_t> Tokenizer::encode_fragment(const std::string& text) const {
+    switch (kind_) {
+        case Kind::Byte: {
+            std::vector<int64_t> body;
+            for (unsigned char c : text) body.push_back(c);
+            return body;
+        }
+        case Kind::SentencePiece: return encode_spm(text, add_space_prefix_);
+        case Kind::BPE:           return encode_bpe(text);
+        case Kind::SpmBpe:        return encode_spm_bpe(text);
+    }
+    return {};
+}
+
 std::vector<int64_t> Tokenizer::encode(const std::string& text, bool add_bos) const {
     std::vector<int64_t> ids;
-    if (add_bos && bos_ >= 0) ids.push_back(bos_);
-    std::vector<int64_t> body;
-    switch (kind_) {
-        case Kind::Byte:
-            for (unsigned char c : text) body.push_back(c);
-            break;
-        case Kind::SentencePiece: body = encode_spm(text); break;
-        case Kind::BPE:           body = encode_bpe(text); break;
+    const bool bos = add_bos && add_bos_ && bos_ >= 0;
+    if (bos) ids.push_back(bos_);
+
+    // Split the text on special-token strings (longest token first): specials
+    // become their id, the stretches between them are tokenized normally.
+    struct Frag { int64_t id; size_t off, len; };   // id < 0: plain text
+    std::vector<Frag> frags;
+    if (!text.empty()) frags.push_back({-1, 0, text.size()});
+    std::vector<Frag> next;
+    for (int64_t sid : special_ids_) {
+        const std::string& st = id_to_tok_[sid];
+        if (text.find(st) == std::string::npos) continue;
+        next.clear();
+        for (const Frag& f : frags) {
+            if (f.id >= 0) { next.push_back(f); continue; }
+            size_t base = f.off;
+            const size_t end = f.off + f.len;
+            for (size_t m; base < end && (m = text.find(st, base)) != std::string::npos &&
+                           m + st.size() <= end; base = m + st.size()) {
+                if (m > base) next.push_back({-1, base, m - base});
+                next.push_back({sid, m, st.size()});
+            }
+            if (base < end) next.push_back({-1, base, end - base});
+        }
+        frags.swap(next);
     }
-    ids.insert(ids.end(), body.begin(), body.end());
+    for (const Frag& f : frags) {
+        if (f.id >= 0) { ids.push_back(f.id); continue; }
+        const std::vector<int64_t> body = encode_fragment(text.substr(f.off, f.len));
+        ids.insert(ids.end(), body.begin(), body.end());
+    }
+    // A chat template that spells out BOS itself must not get a second one.
+    if (bos && ids.size() >= 2 && ids[1] == bos_) ids.erase(ids.begin() + 1);
     return ids;
 }
 
@@ -231,7 +392,7 @@ std::string Tokenizer::decode_token(int64_t id) const {
     if (id < 0 || id >= (int64_t)id_to_tok_.size()) return "";
     if (kind_ == Kind::Byte) return id_to_tok_[id];
     const std::string& t = id_to_tok_[id];
-    if (kind_ == Kind::SentencePiece) {
+    if (kind_ == Kind::SentencePiece || kind_ == Kind::SpmBpe) {
         // <0xNN> -> raw byte; ▁ -> space
         if (t.size() == 6 && t[0] == '<' && t[1] == '0' && t[2] == 'x') {
             int v = std::stoi(t.substr(3, 2), nullptr, 16);

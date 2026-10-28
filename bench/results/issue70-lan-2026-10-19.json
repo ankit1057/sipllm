@@ -1,0 +1,150 @@
+{
+ "meta": {
+  "benchmark": "issue-70 LAN layer split",
+  "date": "2026-10-19",
+  "branch": "issue-70-lan",
+  "git_commit": "58ee487",
+  "model": "tinyllama-1.1b Q4_K_M (668.8 MB)",
+  "prompt": "The three most important inventions in history are",
+  "settings": "64 greedy tokens, ctx 512, 4 threads per node",
+  "hardware": "Apple M3 (macOS) + OnePlus IV2201 / Dimensity 900 (Android 13, adb shell)",
+  "network": "same Wi-Fi subnet; phone->Mac ping rtt min/avg/max 5.0/32.4/205.4 ms (10 pings) and 12.7/114.3/294.5 ms (5 pings, earlier)",
+  "peak_rss_source": "coordinator/single: /usr/bin/time -l; worker: getrusage ru_maxrss logged by the worker",
+  "cross_device_numerics": "dump_logits M3 vs phone builds: final logits max|d|=9e-6, cosine 1.0, argmax equal; not bit-identical",
+  "correctness_tests": "tests/test_lan.cpp 6/6 on M3, under ASan+UBSan, and on the phone (bit-identical logits for in-process loopback splits)",
+  "single_machine_path_unchanged": "dump_logits sha256 identical before/after: tinyllama 11e8782a310b395a, smollm2-135m b1ede7b256cba349, smollm2-1.7b 5c1b653d9c33cd94"
+ },
+ "runs": [
+  {
+   "setup": "one machine (M3), --ram-budget 400M",
+   "log": "single3_1",
+   "decode_tok_s": 15.33,
+   "prefill_tok_s": 47.88,
+   "peak_rss_mb_time_l": 375.5,
+   "pinned": "9/22",
+   "load1m": 2.39
+  },
+  {
+   "setup": "one machine (M3), --ram-budget 400M",
+   "log": "single3_2",
+   "decode_tok_s": 15.18,
+   "prefill_tok_s": 49.19,
+   "peak_rss_mb_time_l": 375.6,
+   "pinned": "9/22",
+   "load1m": 2.39
+  },
+  {
+   "setup": "2 processes on M3 over loopback, coordinator [0,11) + worker [11,22), 400M each",
+   "log": "split3_1",
+   "decode_tok_s": 22.75,
+   "prefill_tok_s": 51.53,
+   "peak_rss_mb_time_l": 361.3,
+   "pinned": "11/11",
+   "lan_calls": 65,
+   "lan_kb_per_token": 16.0,
+   "lan_wait_ms": 1416,
+   "worker_peak_rss_mb": 301,
+   "load1m": 2.39,
+   "output_identical_to_single_machine_400M": true
+  },
+  {
+   "setup": "2 processes on M3 over loopback, coordinator [0,11) + worker [11,22), 400M each",
+   "log": "split3_2",
+   "decode_tok_s": 22.41,
+   "prefill_tok_s": 52.11,
+   "peak_rss_mb_time_l": 361.2,
+   "pinned": "11/11",
+   "lan_calls": 65,
+   "lan_kb_per_token": 16.0,
+   "lan_wait_ms": 1430,
+   "worker_peak_rss_mb": 301,
+   "load1m": 2.39,
+   "output_identical_to_single_machine_400M": true
+  },
+  {
+   "setup": "one machine (M3), fully resident (--ram-budget 1G)",
+   "log": "resident_1",
+   "decode_tok_s": 22.9,
+   "prefill_tok_s": 51.04,
+   "peak_rss_mb_time_l": 651.6,
+   "pinned": "22/22",
+   "load1m": 1.72,
+   "output_identical_to_single_machine_400M": true
+  },
+  {
+   "setup": "one machine (M3), fully resident (--ram-budget 1G)",
+   "log": "resident_2",
+   "decode_tok_s": 22.89,
+   "prefill_tok_s": 52.26,
+   "peak_rss_mb_time_l": 651.7,
+   "pinned": "22/22",
+   "load1m": 1.72,
+   "output_identical_to_single_machine_400M": true
+  },
+  {
+   "setup": "M3 coordinator [0,11) + Android phone worker [11,22) over Wi-Fi, 400M each, default path",
+   "log": "wifi2_1",
+   "decode_tok_s": 2.67,
+   "prefill_tok_s": 10.35,
+   "peak_rss_mb_time_l": 369.3,
+   "pinned": "11/11",
+   "lan_calls": 65,
+   "lan_kb_per_token": 16.0,
+   "lan_wait_ms": 21328,
+   "worker_peak_rss_mb": 301,
+   "output_identical_to_single_machine_400M": true
+  },
+  {
+   "setup": "M3 coordinator [0,11) + Android phone worker [11,22) over Wi-Fi, 400M each, default path",
+   "log": "wifi2_2",
+   "decode_tok_s": 2.57,
+   "prefill_tok_s": 10.87,
+   "peak_rss_mb_time_l": 369.4,
+   "pinned": "11/11",
+   "lan_calls": 65,
+   "lan_kb_per_token": 16.0,
+   "lan_wait_ms": 22184,
+   "worker_peak_rss_mb": 301,
+   "output_identical_to_single_machine_400M": true
+  },
+  {
+   "setup": "M3 coordinator + phone worker over Wi-Fi, default path (compute logged)",
+   "log": "wifi3_default",
+   "decode_tok_s": 2.8,
+   "prefill_tok_s": 9.13,
+   "peak_rss_mb_time_l": 369.4,
+   "pinned": "11/11",
+   "lan_calls": 65,
+   "lan_kb_per_token": 16.0,
+   "lan_wait_ms": 20318,
+   "worker_peak_rss_mb": 301,
+   "worker_compute_ms": 16291,
+   "worker_runs": 65,
+   "output_identical_to_single_machine_400M": true
+  },
+  {
+   "setup": "M3 coordinator + phone worker over Wi-Fi, --fast both",
+   "log": "wifi3_fast",
+   "decode_tok_s": 5.6,
+   "prefill_tok_s": 10.47,
+   "peak_rss_mb_time_l": 369.0,
+   "pinned": "11/11",
+   "lan_calls": 65,
+   "lan_kb_per_token": 16.0,
+   "lan_wait_ms": 10433,
+   "worker_peak_rss_mb": 301,
+   "worker_compute_ms": 8988,
+   "worker_runs": 65,
+   "output_identical_to_single_machine_fast": false,
+   "note": "diverged at a near-tie (char 146: 'around' vs 'in'); M3 and phone int8 kernels round differently"
+  },
+  {
+   "setup": "one machine (M3), --fast, 400M",
+   "log": "single_fast",
+   "decode_tok_s": 19.51,
+   "prefill_tok_s": 47.41,
+   "peak_rss_mb_time_l": 375.1,
+   "pinned": "9/22"
+  }
+ ]
+}

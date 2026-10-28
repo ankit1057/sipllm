@@ -40,6 +40,9 @@ struct GenStats {
     double decode_tok_s = 0;    // gen tokens / decode_s
     size_t weights_resident_bytes = 0;
     int    pinned_layers = 0;   // #37: layers pinned resident under --ram-budget
+    int    gpu_layers = 0;      // --gpu-layers: layers whose projections ran on CUDA
+    bool   gpu_output = false;  // LM head on CUDA
+    size_t gpu_bytes = 0;       // device bytes of placed weights
     size_t kv_bytes = 0;
     uint64_t bytes_read = 0;    // total streamed from disk
     uint64_t prefetch_hits = 0;
@@ -81,8 +84,15 @@ public:
     const ModelConfig& config() const { return cfg_; }
     const Tokenizer&   tokenizer() const { return tok_; }
     size_t weights_resident_bytes() const { return loader_->resident_bytes(); }
+    int interleaved_matrices() const { return loader_->interleaved_matrices(); }   // wave 15
+    int interleaved_q6k_matrices() const { return loader_->interleaved_q6k_matrices(); }   // wave 16
     size_t kv_bytes() const { return kv_->bytes(); }
     ThreadPool* thread_pool() { return pool_.get(); }
+    // Low-level access for multi-sequence drivers (tools/sip_batch.cpp): the
+    // transformer and the runtime's own KV cache, whose layout new per-sequence
+    // caches copy.
+    Transformer* transformer() { return tf_.get(); }
+    KVCache* kv_cache() { return kv_.get(); }
 
     // Streaming callback: called with each newly produced piece of text and the
     // token id. Return false to stop early. `on_token` may be null.
@@ -92,6 +102,13 @@ public:
     std::string generate(const std::string& prompt, int max_new,
                          SamplerConfig scfg, const TokenCallback& on_token,
                          GenStats* stats);
+
+    // Optional logit filter, applied to a copy of the logits before every
+    // sampling decision (prefill's first token and each decode step). Used by
+    // agents to forbid tokens in some states (e.g. Gemma 4 thought markers
+    // after the first token of a step). Null (default) => byte-identical.
+    using LogitFilter = std::function<void(float* logits, int64_t vocab)>;
+    void set_logit_filter(LogitFilter f) { logit_filter_ = std::move(f); }
 
     // Per-token profiling sink: when set, each decode step reports its
     // per-layer timing breakdown and peak RSS (for the live visualization).
@@ -136,6 +153,22 @@ public:
     bool save_session(const std::string& path) const;
     bool load_session(const std::string& path);
 
+    // ---- Issue #70: LAN pooling ---------------------------------------------
+    // Layer range this runtime owns (LayerLoader::Options::layer_begin/end;
+    // default all layers). Plan, pinning and KV cover only these layers.
+    int layer_begin() const { return layer_begin_; }
+    int layer_end() const { return layer_end_; }
+    const WeightSource& source() const { return *src_; }
+    int64_t max_ctx() const { return kv_->max_ctx(); }
+    KVPrecision kv_precision() const { return kv_->precision(); }
+    Residency residency() const { return opt_.residency; }
+    // Coordinator: layers [layer_end(), n_layers) run on other machines.
+    // Refuses speculative decoding, the semantic cache, plugins and sessions.
+    void set_remote_segments(std::vector<RemoteSegment> segs);
+    bool has_remote_layers() const { return tf_->has_remote_segments(); }
+    // Worker: run exactly this runtime's layers over n residual rows.
+    void run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos);
+
 private:
     std::unique_ptr<WeightSource> src_;
     ModelConfig cfg_;
@@ -154,6 +187,11 @@ private:
     std::unique_ptr<class SemanticCache> semantic_cache_;
     std::unique_ptr<class SpecDecoder> spec_decoder_;
     int max_draft_len_ = 0;
+    LogitFilter logit_filter_;           // optional, see set_logit_filter()
+    std::vector<float> filtered_logits_; // scratch copy the filter writes into
+    int layer_begin_ = 0, layer_end_ = 0;   // #70: this node's layers
+    bool budgeted_ = false;        // #81: a --ram-budget plan governs this runtime
+    bool budget_forced_ = false;   // #81: ... and the operator forced it (--ram-budget-force)
 };
 
 } // namespace llm

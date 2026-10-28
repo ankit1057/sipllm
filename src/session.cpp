@@ -83,16 +83,24 @@ bool session_write(const std::string &path, const std::vector<int64_t> &tokens,
       return false;
   }
 
-  // Keys, then values: for each layer, each position, kv_dim floats.
+  // Keys, then values: for each layer, each still-resident position, one cache
+  // row of that layer's bytes (kv_dim floats for FP32, the same bytes as before;
+  // kv_dim/32 Q8_0 blocks for --kv-q8; a sliding-window ring layer keeps only its
+  // last `window` positions). The precision is folded into model_id by the caller.
+  const int64_t base = kv.layer_base();
   for (int64_t layer = 0; layer < n_layers; ++layer) {
-    for (int64_t pos = 0; pos < seq_len; ++pos) {
-      if (!write_n(f, kv.k(layer, pos), static_cast<size_t>(kv_dim)))
+    const int64_t gl = base + layer;
+    const size_t rb = kv.row_bytes(gl);
+    for (int64_t pos = kv.first_valid(gl, seq_len); pos < seq_len; ++pos) {
+      if (!write_n(f, static_cast<const uint8_t *>(kv.k_ptr(gl, pos)), rb))
         return false;
     }
   }
   for (int64_t layer = 0; layer < n_layers; ++layer) {
-    for (int64_t pos = 0; pos < seq_len; ++pos) {
-      if (!write_n(f, kv.v(layer, pos), static_cast<size_t>(kv_dim)))
+    const int64_t gl = base + layer;
+    const size_t rb = kv.row_bytes(gl);
+    for (int64_t pos = kv.first_valid(gl, seq_len); pos < seq_len; ++pos) {
+      if (!write_n(f, static_cast<const uint8_t *>(kv.v_ptr(gl, pos)), rb))
         return false;
     }
   }
@@ -135,16 +143,21 @@ bool session_read(const std::string &path, std::vector<int64_t> &tokens,
   if (!read_n(f, tokens.data(), static_cast<size_t>(seq_len)))
     return false;
 
-  // Keys, then values (same order as written).
+  // Keys, then values (same order as written), one cache row each.
+  const int64_t base = kv.layer_base();
   for (int64_t layer = 0; layer < n_layers; ++layer) {
-    for (int64_t pos = 0; pos < seq_len; ++pos) {
-      if (!read_n(f, kv.k(layer, pos), static_cast<size_t>(kv_dim)))
+    const int64_t gl = base + layer;
+    const size_t rb = kv.row_bytes(gl);
+    for (int64_t pos = kv.first_valid(gl, seq_len); pos < seq_len; ++pos) {
+      if (!read_n(f, static_cast<uint8_t *>(kv.k_ptr(gl, pos)), rb))
         return false;
     }
   }
   for (int64_t layer = 0; layer < n_layers; ++layer) {
-    for (int64_t pos = 0; pos < seq_len; ++pos) {
-      if (!read_n(f, kv.v(layer, pos), static_cast<size_t>(kv_dim)))
+    const int64_t gl = base + layer;
+    const size_t rb = kv.row_bytes(gl);
+    for (int64_t pos = kv.first_valid(gl, seq_len); pos < seq_len; ++pos) {
+      if (!read_n(f, static_cast<uint8_t *>(kv.v_ptr(gl, pos)), rb))
         return false;
     }
   }

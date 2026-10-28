@@ -84,8 +84,12 @@ class LabsScreen extends StatelessWidget {
                     style: const TextStyle(color: AppTheme.primary, fontWeight: FontWeight.bold),
                     items: const [
                       DropdownMenuItem(
+                        value: SchedulePolicy.fixed16,
+                        child: Text('Fixed16 (Default, big.LITTLE safe)'),
+                      ),
+                      DropdownMenuItem(
                         value: SchedulePolicy.proportional2,
-                        child: Text('Proportional2 (Default, Octa-core optimized)'),
+                        child: Text('Proportional2'),
                       ),
                       DropdownMenuItem(
                         value: SchedulePolicy.proportional4,

@@ -2,8 +2,9 @@
 // the isolate boundary as plain values, so they hold no pointers.
 import '../ffi/sipllm_bindings.dart';
 
-/// How octa-core matmul work is distributed. `proportional2` is the engine
-/// default and a good balance on big.LITTLE phones.
+/// How octa-core matmul work is distributed. `fixed16` (small dynamic chunks)
+/// is the engine default; on big.LITTLE phones it keeps the slow cores from
+/// holding up every matmul.
 enum SchedulePolicy {
   static$(kSchedStatic),
   fixed8(kSchedFixed8),
@@ -30,10 +31,10 @@ enum Pooling {
 enum TokenizerKind { sentencePiece, bpe, byte }
 
 /// Open-time configuration. Zero-arg construction mirrors the engine defaults
-/// (streaming, quantized residency, hardware threads).
+/// (automatic RAM budget, quantized residency, hardware threads).
 class SipllmParams {
   const SipllmParams({
-    this.ramBudgetBytes = 0,
+    this.ramBudgetBytes = ramBudgetAuto,
     this.threads = 0,
     this.maxCtx = 0,
     this.nBuffers = 2,
@@ -43,12 +44,17 @@ class SipllmParams {
     this.streamLmHead = false,
     this.residencyFp32 = false,
     this.forceBudget = false,
-    this.schedulePolicy = SchedulePolicy.proportional2,
+    this.schedulePolicy = SchedulePolicy.fixed16,
     this.specDraft = 0,
   });
 
-  /// Hard peak-RSS ceiling in bytes (`--ram-budget`). 0 = unlimited streaming.
+  /// Peak-RSS ceiling in bytes (`--ram-budget`). [ramBudgetAuto] (the default,
+  /// issue #78) = half of the RAM the OS reports as available, so a model that
+  /// fits is held resident; 0 = stream every layer from storage (slowest).
   final int ramBudgetBytes;
+
+  /// `SIPLLM_RAM_BUDGET_AUTO` (UINT64_MAX in the C ABI; -1 in a Dart int).
+  static const int ramBudgetAuto = -1;
 
   /// >0 fixed worker count; 0 = hardware_concurrency; -1 = auto-tune + cache.
   final int threads;

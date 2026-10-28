@@ -3,6 +3,12 @@
 // The hot path is matmul: split the output rows across N workers. Spawning
 // threads per matmul would dominate runtime, so we keep persistent workers and
 // hand them a [begin,end) range via a parallel_for barrier.
+//
+// Handoff (#80): a decode token runs ~200 parallel regions, so a mutex +
+// condition-variable round trip per region dominated small models on phones.
+// Workers now spin briefly on an atomic generation counter (and the caller on
+// an atomic completion count) before falling back to sleeping on the condition
+// variables. The work split is unchanged, so results are unchanged.
 #pragma once
 
 #include "llm/common.h"
@@ -13,8 +19,19 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 namespace llm {
+
+inline void cpu_relax() {
+#if defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#elif defined(__x86_64__) || defined(_M_X64)
+    _mm_pause();
+#endif
+}
 
 class ThreadPool {
 public:
@@ -33,7 +50,7 @@ public:
     ~ThreadPool() {
         {
             std::unique_lock<std::mutex> lk(m_);
-            stop_ = true;
+            stop_.store(true);
         }
         cv_.notify_all();
         for (auto& t : workers_) t.join();
@@ -65,12 +82,19 @@ public:
     };
 
     Stats stats;
-    SchedulePolicy policy = SchedulePolicy::Proportional4;
+    SchedulePolicy policy = SchedulePolicy::Fixed16;   // see main.cpp (wave 16)
 
     void set_policy(SchedulePolicy p) { policy = p; }
 
+    // chunk_override > 0 fixes the chunk size for this call, always with the
+    // dynamic split (attention uses 1: few, heavy items). 0 keeps the schedule
+    // policy's chunking. Without it, Adaptive's 16-item minimum would hand all of
+    // attention's items to the calling thread as one chunk and leave the workers
+    // idle; with Static, an override must not fall back to one chunk per thread
+    // (that would drop every item past the n-th).
     void parallel_for(int64_t total,
-                      const std::function<void(int, int64_t, int64_t)>& fn) {
+                      const std::function<void(int, int64_t, int64_t)>& fn,
+                      int64_t chunk_override = 0) {
         if (total <= 0) return;
         if (n_ == 1) { fn(0, 0, total); return; }
 
@@ -81,32 +105,39 @@ public:
             next_row_.store(0, std::memory_order_relaxed);
             
             // Calculate chunk size based on policy
-            if (policy == SchedulePolicy::Static) chunk_ = (total + n_ - 1) / n_;
+            static_ = chunk_override <= 0 && policy == SchedulePolicy::Static;
+            if (chunk_override > 0) chunk_ = chunk_override;
+            else if (policy == SchedulePolicy::Static) chunk_ = (total + n_ - 1) / n_;
             else if (policy == SchedulePolicy::Fixed8) chunk_ = 8;
             else if (policy == SchedulePolicy::Fixed16) chunk_ = 16;
             else if (policy == SchedulePolicy::Fixed32) chunk_ = 32;
             else if (policy == SchedulePolicy::Proportional2) chunk_ = std::max<int64_t>(1, total / (n_ * 2));
             else if (policy == SchedulePolicy::Proportional4) chunk_ = std::max<int64_t>(1, total / (n_ * 4));
             else if (policy == SchedulePolicy::Adaptive) chunk_ = std::max<int64_t>(16, total / (n_ * 4));
-            
-            remaining_ = n_ - 1;   // workers we wait on (calling thread does its own)
-            ++generation_;
+
+            remaining_.store(n_ - 1);   // workers we wait on (calling thread does its own)
+            generation_.fetch_add(1);   // publish under m_: a worker about to sleep re-checks it
         }
-        cv_.notify_all();
+        if (sleepers_.load() > 0) cv_.notify_all();
 
         run_chunk(0);
         double end_time = now_sec();
 
-        // Wait for workers.
-        std::unique_lock<std::mutex> lk(m_);
-        done_cv_.wait(lk, [this] { return remaining_ == 0; });
+        // Wait for workers: spin first, sleep only if they are slow.
+        for (int spin = 0; remaining_.load() != 0 && spin < kSpinIters; ++spin) cpu_relax();
+        if (remaining_.load() != 0) {
+            std::unique_lock<std::mutex> lk(m_);
+            main_waiting_.store(true);
+            done_cv_.wait(lk, [this] { return remaining_.load() == 0; });
+            main_waiting_.store(false);
+        }
         stats.barrier_time_us.fetch_add((uint64_t)((now_sec() - end_time) * 1e6), std::memory_order_relaxed);
         fn_ = nullptr;
     }
 
 private:
     void run_chunk(int tid) {
-        if (policy == SchedulePolicy::Static) {
+        if (static_) {
             int64_t begin = static_cast<int64_t>(tid) * chunk_;
             if (begin >= total_) return;
             int64_t end = std::min(begin + chunk_, total_);
@@ -134,31 +165,49 @@ private:
         uint64_t seen = 0;
         for (;;) {
             double wait_start = now_sec();
-            std::unique_lock<std::mutex> lk(m_);
-            cv_.wait(lk, [this, &seen] { return stop_ || generation_ != seen; });
+            uint64_t g = generation_.load();
+            for (int spin = 0; g == seen && !stop_.load() && spin < kSpinIters; ++spin) {
+                cpu_relax();
+                g = generation_.load();
+            }
+            if (g == seen && !stop_.load()) {
+                std::unique_lock<std::mutex> lk(m_);
+                sleepers_.fetch_add(1);
+                cv_.wait(lk, [this, &seen] { return stop_.load() || generation_.load() != seen; });
+                sleepers_.fetch_sub(1);
+                g = generation_.load();
+            }
             stats.idle_time_us.fetch_add((uint64_t)((now_sec() - wait_start) * 1e6), std::memory_order_relaxed);
-            if (stop_) return;
-            seen = generation_;
-            lk.unlock();
+            if (stop_.load()) return;
+            seen = g;
 
             run_chunk(tid);
 
-            lk.lock();
-            if (--remaining_ == 0) done_cv_.notify_one();
+            // Last worker out wakes the caller only if it went to sleep.
+            if (remaining_.fetch_sub(1) == 1 && main_waiting_.load()) {
+                std::lock_guard<std::mutex> lk(m_);
+                done_cv_.notify_one();
+            }
         }
     }
 
     int n_ = 1;
     std::vector<std::thread> workers_;
 
+    // ~50-150 us of spinning on a phone core before a thread sleeps.
+    static constexpr int kSpinIters = 20000;
+
     std::mutex m_;
     std::condition_variable cv_, done_cv_;
-    bool stop_ = false;
-    uint64_t generation_ = 0;
-    int remaining_ = 0;
+    std::atomic<bool> stop_{false};
+    std::atomic<uint64_t> generation_{0};
+    std::atomic<int> remaining_{0};
+    std::atomic<int> sleepers_{0};        // workers blocked in cv_
+    std::atomic<bool> main_waiting_{false};
 
     const std::function<void(int, int64_t, int64_t)>* fn_ = nullptr;
     int64_t total_ = 0, chunk_ = 0;
+    bool static_ = false;   // this call uses the one-chunk-per-thread split
     std::atomic<int64_t> next_row_{0};
 };
 

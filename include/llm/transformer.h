@@ -17,6 +17,21 @@
 
 namespace llm {
 
+// Issue #70 (LAN pooling): runs a contiguous range of layers somewhere else
+// (another machine). Declared here so the transformer stays free of socket
+// code; implemented in lan.cpp.
+struct LayerExecutor {
+    virtual ~LayerExecutor() = default;
+    // Run layers [begin, end) over n residual rows (n*dim floats, updated in
+    // place) at positions start_pos .. start_pos+n-1. Throws on failure.
+    virtual void run(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos) = 0;
+};
+
+struct RemoteSegment {
+    int64_t begin = 0, end = 0;     // layers [begin, end) run by `exec`
+    LayerExecutor* exec = nullptr;  // not owned
+};
+
 class Transformer {
 public:
     Transformer(LayerLoader* loader, KVCache* kv, ThreadPool* pool = nullptr);
@@ -49,6 +64,23 @@ public:
     // Returns a pointer to an internal buffer of size (n * vocab_size).
     const float* spec_forward(const int64_t* tokens, int64_t n, int64_t start_pos);
 
+    // Batched multi-sequence decode: one token for each of `n` independent
+    // sequences. Row i is token tokens[i] at position pos[i] of its own cache
+    // kvs[i] (all caches must share this model's layout and be distinct). Every
+    // layer's weights are read once for all n rows, instead of once per
+    // sequence. Returns n x vocab logits (row-major), owned by the Transformer
+    // and valid until the next forward/forward_multi/prefill call. Row i equals
+    // forward(tokens[i], pos[i]) run against kvs[i]: bit-identical for CPU
+    // weights; weights offloaded to the GPU use the batched matmul kernel,
+    // which can differ from the single-token kernel in rounding.
+    const float* forward_multi(const int64_t* tokens, const int64_t* pos,
+                               KVCache* const* kvs, int64_t n);
+
+    // Point subsequent forward()/prefill() calls at another cache with the same
+    // layout (used to prefill several independent sequences in one process).
+    void set_kv(KVCache* kv) { kv_ = kv; }
+    KVCache* kv() const { return kv_; }
+
     // RoPE is exposed for testing. Optional llama3 frequency scaling: when
     // `rs.llama3` is set the per-wavelength stretch (issue #9) is applied;
     // default-constructed => plain RoPE, identical to pre-#9 behavior.
@@ -63,6 +95,8 @@ public:
                            int64_t pos, float theta_base);
     static void apply_rope(float* vec, int64_t n_heads, int64_t head_dim,
                            int64_t pos, float theta_base, const RopeScaling& rs);
+    static void apply_rope_neox(float* vec, int64_t n_heads, int64_t head_dim,
+                                int64_t rot_dim, int64_t pos, float theta);
 
     const ModelConfig& config() const { return cfg_; }
 
@@ -81,13 +115,39 @@ public:
     const std::vector<LayerTiming>& last_timings() const { return timings_; }
     size_t peak_rss() const { return peak_rss_; }
 
+    // Issue #70: layers handed to other machines. Empty (the default) means
+    // every layer runs here and forward()/prefill() are unchanged. Segments
+    // must be sorted, non-overlapping and inside [0, n_layers). spec_forward()
+    // refuses to run while any are set.
+    void set_remote_segments(std::vector<RemoteSegment> segs);
+    bool has_remote_segments() const { return !remote_.empty(); }
+
+    // Issue #70, worker side: run layers [begin, end) here over n residual rows
+    // at positions start_pos.. (same chunking and kernels as prefill(), so the
+    // result is bit-identical to running those layers inside one process).
+    void run_layers(int64_t begin, int64_t end, float* resid, int64_t n, int64_t start_pos);
+
     // Golden-test hook: invoked with the residual stream after each block, so a
     // harness can checksum/compare hidden states layer-by-layer with llama.cpp.
     using HiddenHook = std::function<void(int layer, const float* x, int64_t dim)>;
     void set_hidden_hook(HiddenHook h) { hidden_hook_ = std::move(h); }
 
+    // ---- prefill tuning ---------------------------------------------------
+    // Positions per batched block() call in prefill() (default 32, env
+    // SIPLLM_PREFILL_BATCH), and the query-tiled prefill attention (default on,
+    // env SIPLLM_TILED_ATTN=0 disables it). Neither changes results: the tiled
+    // path is bit-identical to per-token attention.
+    void set_prefill_batch(int64_t n) { prefill_batch_ = n < 1 ? 1 : (n > 1024 ? 1024 : n); }
+    int64_t prefill_batch() const { return prefill_batch_; }
+    void set_tiled_attention(bool on) { prefill_tiled_attn_ = on; }
+    bool tiled_attention() const { return prefill_tiled_attn_; }
+
 private:
-    void block(int64_t layer, int64_t pos, int64_t bs = 1, float* x_in = nullptr);        // arch dispatch on cfg_.block_spec
+    // arch dispatch on cfg_.block_spec. Rows are positions pos..pos+bs-1 of kv_,
+    // unless row_pos/row_kv are given: then row i is position row_pos[i] of
+    // cache row_kv[i] (independent sequences, see forward_multi).
+    void block(int64_t layer, int64_t pos, int64_t bs = 1, float* x_in = nullptr,
+               const int64_t* row_pos = nullptr, KVCache* const* row_kv = nullptr);
 
     LayerLoader* loader_;
     KVCache*     kv_;
@@ -101,6 +161,8 @@ private:
     std::vector<float> k_;       // kv_dim
     std::vector<float> v_;       // kv_dim
     std::vector<float> att_;     // max_ctx (attention scores per head)
+    std::vector<std::vector<float>> attn_scratch_;  // per-thread [group][span] scores + dequant row
+    std::vector<float> attn_part_;                  // flash-decoding partials [item][group][m,l,out[hd]]
     std::vector<float> attn_out_;// q_dim
     std::vector<float> proj_;    // dim
     std::vector<float> hb_;      // ffn_dim
@@ -114,11 +176,21 @@ private:
     // that must survive the layer sweep. Sized on demand in prefill(); the only
     // buffer that grows with prompt length (tiny vs weights/KV — see RFC-007).
     std::vector<float> resid_;   // n*dim (batched prefill)
+    // forward_multi: n residual streams, their final-normed copies, n x vocab logits.
+    std::vector<float> multi_x_, multi_xb_, multi_logits_;
+
+    int64_t prefill_batch_ = 32;
+    bool prefill_tiled_attn_ = true;
 
     bool profiling_ = false;
     std::vector<LayerTiming> timings_;
     size_t peak_rss_ = 0;
     HiddenHook hidden_hook_;
+    std::vector<RemoteSegment> remote_;   // #70; empty = all layers local
+    const RemoteSegment* remote_at(int64_t layer) const {
+        for (const RemoteSegment& r : remote_) if (r.begin == layer) return &r;
+        return nullptr;
+    }
 };
 
 } // namespace llm

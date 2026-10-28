@@ -1,0 +1,519 @@
+{
+ "schema": "sipllm-phone-budget-sweep/1",
+ "date": "2026-10-26",
+ "commit": "4ad688c",
+ "device": "MediaTek Dimensity 900 phone (2xA78+6xA55), ~7.7 GB RAM, Android 13, unrooted",
+ "binary": "build-android-fix/llm pushed as llm_fix5 (== HEAD tree)",
+ "llama_cpp": "llama-cli build 585080d",
+ "model": "Qwen2.5-1.5B-Instruct Q8_0 GGUF, 1894532128 bytes",
+ "workload": "ctx 512, 64 greedy tokens, 4 threads",
+ "measurement": "h2h_run.sh: 5 Hz sampling of /proc/pid/status (VmHWM, RssAnon, RssFile), /proc/pid/io read_bytes, /proc/meminfo MemAvailable; engine stats for tok/s",
+ "caveats": [
+  "warm page cache",
+  "interleaved order with battery-temperature cool-down",
+  "n=2 per config"
+ ],
+ "output_identical_across_budgets": true,
+ "configs": [
+  {
+   "cfg": "sw_sip_300M",
+   "n": 2,
+   "budget_bytes": 314572800,
+   "cmd": "./sipp_bin.sh ./llm_fix5 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4 --ram-budget 300M",
+   "dec_tps_median": 1.79,
+   "prefill_tps_median": 16.07,
+   "vmhwm_bytes_max": 323842048,
+   "rss_anon_bytes_max": 320397312,
+   "rss_file_bytes_max": 3055616,
+   "storage_read_bytes_median": 1435910144.0,
+   "mem_available_min_bytes": 3040985088,
+   "engine_peak_mb": 322.0,
+   "planner_estimate_mb": 308.8,
+   "streamed_mb_median": 81022.8,
+   "runs": [
+    {
+     "tag": "sw_sip_300M_r1",
+     "exit": 0,
+     "wall_s": 39.25,
+     "dec_tps": 1.79,
+     "pf_tps": 16.07,
+     "hwm_kb": 315800,
+     "anon_kb": 312800,
+     "file_kb": 2916,
+     "read_bytes": 1220603904,
+     "minavail_kb": 2969712
+    },
+    {
+     "tag": "sw_sip_300M_r2",
+     "exit": 0,
+     "wall_s": 37.1,
+     "dec_tps": 1.94,
+     "pf_tps": 13.92,
+     "hwm_kb": 316252,
+     "anon_kb": 312888,
+     "file_kb": 2984,
+     "read_bytes": 1651216384,
+     "minavail_kb": 4426360
+    }
+   ]
+  },
+  {
+   "cfg": "sw_sip_512M",
+   "n": 1,
+   "budget_bytes": 536870912,
+   "cmd": "./sipp_bin.sh ./llm_fix5 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4 --ram-budget 512M",
+   "dec_tps_median": 2.03,
+   "prefill_tps_median": 18.65,
+   "vmhwm_bytes_max": 520335360,
+   "rss_anon_bytes_max": 517103616,
+   "rss_file_bytes_max": 2846720,
+   "storage_read_bytes_median": 58884096,
+   "mem_available_min_bytes": 2865930240,
+   "engine_peak_mb": 520.0,
+   "planner_estimate_mb": 505.3,
+   "streamed_mb_median": 84206.0,
+   "runs": [
+    {
+     "tag": "sw_sip_512M_r1",
+     "exit": 0,
+     "wall_s": 34.66,
+     "dec_tps": 2.03,
+     "pf_tps": 18.65,
+     "hwm_kb": 508140,
+     "anon_kb": 504984,
+     "file_kb": 2780,
+     "read_bytes": 58884096,
+     "minavail_kb": 2798760
+    }
+   ]
+  },
+  {
+   "cfg": "sw_sip_768M",
+   "n": 2,
+   "budget_bytes": 805306368,
+   "cmd": "./sipp_bin.sh ./llm_fix5 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4 --ram-budget 768M",
+   "dec_tps_median": 2.46,
+   "prefill_tps_median": 19.55,
+   "vmhwm_bytes_max": 818970624,
+   "rss_anon_bytes_max": 815501312,
+   "rss_file_bytes_max": 3055616,
+   "storage_read_bytes_median": 0.0,
+   "mem_available_min_bytes": 2553008128,
+   "engine_peak_mb": 819.0,
+   "planner_estimate_mb": 803.8,
+   "streamed_mb_median": 65106.7,
+   "runs": [
+    {
+     "tag": "sw_sip_768M_r1",
+     "exit": 0,
+     "wall_s": 29.2,
+     "dec_tps": 2.46,
+     "pf_tps": 19.55,
+     "hwm_kb": 799536,
+     "anon_kb": 796388,
+     "file_kb": 2792,
+     "read_bytes": 0,
+     "minavail_kb": 2493172
+    },
+    {
+     "tag": "sw_sip_768M_r2",
+     "exit": 0,
+     "wall_s": 28.97,
+     "dec_tps": 2.56,
+     "pf_tps": 16.37,
+     "hwm_kb": 799776,
+     "anon_kb": 796376,
+     "file_kb": 2984,
+     "read_bytes": 0,
+     "minavail_kb": 3883424
+    }
+   ]
+  },
+  {
+   "cfg": "sw_sip_1200M",
+   "n": 2,
+   "budget_bytes": 1258291200,
+   "cmd": "./sipp_bin.sh ./llm_fix5 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4 --ram-budget 1200M",
+   "dec_tps_median": 3.43,
+   "prefill_tps_median": 17.42,
+   "vmhwm_bytes_max": 1266843648,
+   "rss_anon_bytes_max": 1263357952,
+   "rss_file_bytes_max": 3080192,
+   "storage_read_bytes_median": 3840000.0,
+   "mem_available_min_bytes": 2147192832,
+   "engine_peak_mb": 1266.5,
+   "planner_estimate_mb": null,
+   "streamed_mb_median": 36457.8,
+   "runs": [
+    {
+     "tag": "sw_sip_1200M_r1",
+     "exit": 0,
+     "wall_s": 22.63,
+     "dec_tps": 3.43,
+     "pf_tps": 17.42,
+     "hwm_kb": 1236668,
+     "anon_kb": 1233740,
+     "file_kb": 2636,
+     "read_bytes": 7680000,
+     "minavail_kb": 2096868
+    },
+    {
+     "tag": "sw_sip_1200M_r2",
+     "exit": 0,
+     "wall_s": 20.8,
+     "dec_tps": 3.74,
+     "pf_tps": 18.95,
+     "hwm_kb": 1237152,
+     "anon_kb": 1233748,
+     "file_kb": 3008,
+     "read_bytes": 0,
+     "minavail_kb": 3348568
+    }
+   ]
+  },
+  {
+   "cfg": "sw_sip_auto",
+   "n": 1,
+   "budget_bytes": 1840000000,
+   "cmd": "./sipp_bin.sh ./llm_fix5 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4",
+   "dec_tps_median": 7.02,
+   "prefill_tps_median": 20.38,
+   "vmhwm_bytes_max": 1714479104,
+   "rss_anon_bytes_max": 1711136768,
+   "rss_file_bytes_max": 2920448,
+   "storage_read_bytes_median": 292507648,
+   "mem_available_min_bytes": 2009317376,
+   "engine_peak_mb": 1714.0,
+   "planner_estimate_mb": null,
+   "streamed_mb_median": 1392.7,
+   "runs": [
+    {
+     "tag": "sw_sip_auto_r1",
+     "exit": 0,
+     "wall_s": 13.2,
+     "dec_tps": 7.02,
+     "pf_tps": 20.38,
+     "hwm_kb": 1674296,
+     "anon_kb": 1671032,
+     "file_kb": 2852,
+     "read_bytes": 292507648,
+     "minavail_kb": 1962224
+    }
+   ]
+  },
+  {
+   "cfg": "sw_sip_2500M",
+   "n": 1,
+   "budget_bytes": 2621440000,
+   "cmd": "./sipp_bin.sh ./llm_fix5 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4 --ram-budget 2500M",
+   "dec_tps_median": 7.71,
+   "prefill_tps_median": 21.15,
+   "vmhwm_bytes_max": 1714352128,
+   "rss_anon_bytes_max": 1711132672,
+   "rss_file_bytes_max": 2822144,
+   "storage_read_bytes_median": 417406976,
+   "mem_available_min_bytes": 1830232064,
+   "engine_peak_mb": 1714.0,
+   "planner_estimate_mb": null,
+   "streamed_mb_median": 1392.7,
+   "runs": [
+    {
+     "tag": "sw_sip_2500M_r1",
+     "exit": 0,
+     "wall_s": 12.81,
+     "dec_tps": 7.71,
+     "pf_tps": 21.15,
+     "hwm_kb": 1674172,
+     "anon_kb": 1671028,
+     "file_kb": 2756,
+     "read_bytes": 417406976,
+     "minavail_kb": 1787336
+    }
+   ]
+  },
+  {
+   "cfg": "sw_llama_mmap",
+   "n": 1,
+   "budget_bytes": null,
+   "cmd": "/data/local/tmp/llamacpp/llama-cli -m /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -f /data/local/tmp/h2h/prompts/dec.user.txt -n 64 -c 512 --temp 0 -t 4 -st --simple-io",
+   "dec_tps_median": 7.8,
+   "prefill_tps_median": 44.9,
+   "vmhwm_bytes_max": 3351269376,
+   "rss_anon_bytes_max": 1705938944,
+   "rss_file_bytes_max": 1901862912,
+   "storage_read_bytes_median": 405856256,
+   "mem_available_min_bytes": 2111180800,
+   "engine_peak_mb": null,
+   "planner_estimate_mb": null,
+   "streamed_mb_median": null,
+   "runs": [
+    {
+     "tag": "sw_llama_mmap_r1",
+     "exit": 0,
+     "wall_s": 14.01,
+     "dec_tps": 7.8,
+     "pf_tps": 44.9,
+     "hwm_kb": 3272724,
+     "anon_kb": 1665956,
+     "file_kb": 1857288,
+     "read_bytes": 405856256,
+     "minavail_kb": 2061700
+    }
+   ]
+  },
+  {
+   "cfg": "sw_llama_nommap",
+   "n": 1,
+   "budget_bytes": null,
+   "cmd": "/data/local/tmp/llamacpp/llama-cli -m /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -f /data/local/tmp/h2h/prompts/dec.user.txt -n 64 -c 512 --temp 0 -t 4 -st --simple-io -lm none",
+   "dec_tps_median": 7.2,
+   "prefill_tps_median": 43.1,
+   "vmhwm_bytes_max": 1964146688,
+   "rss_anon_bytes_max": 1954664448,
+   "rss_file_bytes_max": 8966144,
+   "storage_read_bytes_median": 283369472,
+   "mem_available_min_bytes": 2002948096,
+   "engine_peak_mb": null,
+   "planner_estimate_mb": null,
+   "streamed_mb_median": null,
+   "runs": [
+    {
+     "tag": "sw_llama_nommap_r1",
+     "exit": 0,
+     "wall_s": 16.15,
+     "dec_tps": 7.2,
+     "pf_tps": 43.1,
+     "hwm_kb": 1918112,
+     "anon_kb": 1908852,
+     "file_kb": 8756,
+     "read_bytes": 283369472,
+     "minavail_kb": 1956004
+    }
+   ]
+  },
+  {
+   "cfg": "sw6_sip_300M",
+   "n": 1,
+   "budget_bytes": 314572800,
+   "cmd": "./sipp_bin.sh ./llm_fix6 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4 --ram-budget 300M",
+   "dec_tps_median": 1.86,
+   "prefill_tps_median": 16.22,
+   "vmhwm_bytes_max": 273788928,
+   "rss_anon_bytes_max": 270503936,
+   "rss_file_bytes_max": 2670592,
+   "storage_read_bytes_median": 990949376,
+   "mem_available_min_bytes": 4092866560,
+   "engine_peak_mb": 274.0,
+   "planner_estimate_mb": 286.5,
+   "streamed_mb_median": 84206.0,
+   "runs": [
+    {
+     "tag": "sw6_sip_300M_r2",
+     "exit": 0,
+     "wall_s": 37.68,
+     "dec_tps": 1.86,
+     "pf_tps": 16.22,
+     "hwm_kb": 267372,
+     "anon_kb": 264164,
+     "file_kb": 2608,
+     "read_bytes": 990949376,
+     "minavail_kb": 3996940
+    }
+   ]
+  },
+  {
+   "cfg": "sw6_sip_768M",
+   "n": 1,
+   "budget_bytes": 805306368,
+   "cmd": "./sipp_bin.sh ./llm_fix6 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4 --ram-budget 768M",
+   "dec_tps_median": 2.56,
+   "prefill_tps_median": 15.92,
+   "vmhwm_bytes_max": 769171456,
+   "rss_anon_bytes_max": 765763584,
+   "rss_file_bytes_max": 3035136,
+   "storage_read_bytes_median": 1757184,
+   "mem_available_min_bytes": 4056723456,
+   "engine_peak_mb": 769.0,
+   "planner_estimate_mb": 781.7,
+   "streamed_mb_median": 68289.9,
+   "runs": [
+    {
+     "tag": "sw6_sip_768M_r2",
+     "exit": 0,
+     "wall_s": 28.66,
+     "dec_tps": 2.56,
+     "pf_tps": 15.92,
+     "hwm_kb": 751144,
+     "anon_kb": 747816,
+     "file_kb": 2964,
+     "read_bytes": 1757184,
+     "minavail_kb": 3961644
+    }
+   ]
+  },
+  {
+   "cfg": "sw6_sip_1200M",
+   "n": 1,
+   "budget_bytes": 1258291200,
+   "cmd": "./sipp_bin.sh ./llm_fix6 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4 --ram-budget 1200M",
+   "dec_tps_median": 3.53,
+   "prefill_tps_median": 17.86,
+   "vmhwm_bytes_max": 1216995328,
+   "rss_anon_bytes_max": 1213595648,
+   "rss_file_bytes_max": 3043328,
+   "storage_read_bytes_median": 0,
+   "mem_available_min_bytes": 3511771136,
+   "engine_peak_mb": 1217.0,
+   "planner_estimate_mb": null,
+   "streamed_mb_median": 39740.4,
+   "runs": [
+    {
+     "tag": "sw6_sip_1200M_r2",
+     "exit": 0,
+     "wall_s": 21.77,
+     "dec_tps": 3.53,
+     "pf_tps": 17.86,
+     "hwm_kb": 1188472,
+     "anon_kb": 1185152,
+     "file_kb": 2972,
+     "read_bytes": 0,
+     "minavail_kb": 3429464
+    }
+   ]
+  },
+  {
+   "cfg": "sw6_sip_auto",
+   "n": 1,
+   "budget_bytes": 2360000000,
+   "cmd": "./sipp_bin.sh ./llm_fix6 /data/local/tmp/h2h/prompts/qwen_dec.tmpl.txt /data/local/tmp/h2h/models/qwen2.5-1.5b-instruct-q8_0.gguf -n 64 --greedy --fast --ctx 512 --threads 4",
+   "dec_tps_median": 7.42,
+   "prefill_tps_median": 18.95,
+   "vmhwm_bytes_max": 1714692096,
+   "rss_anon_bytes_max": 1711304704,
+   "rss_file_bytes_max": 3035136,
+   "storage_read_bytes_median": 0,
+   "mem_available_min_bytes": 2963910656,
+   "engine_peak_mb": 1715.0,
+   "planner_estimate_mb": null,
+   "streamed_mb_median": 1392.7,
+   "runs": [
+    {
+     "tag": "sw6_sip_auto_r2",
+     "exit": 0,
+     "wall_s": 12.58,
+     "dec_tps": 7.42,
+     "pf_tps": 18.95,
+     "hwm_kb": 1674504,
+     "anon_kb": 1671196,
+     "file_kb": 2964,
+     "read_bytes": 0,
+     "minavail_kb": 2894444
+    }
+   ]
+  }
+ ],
+ "eight_b": [
+  {
+   "tag": "b8_llama_mmap_r1",
+   "cmd": "/data/local/tmp/llamacpp/llama-cli -m /data/local/tmp/h2h/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -f /data/local/tmp/h2h/prompts/dec.user.txt -n 16 -c 512 --temp 0 -t 4 -st --simple-io",
+   "exit": 0,
+   "wall_s": 42.22,
+   "dec_tps": 2.5,
+   "pf_tps": 5.8,
+   "hwm_kb": 4614316,
+   "anon_kb": 4593184,
+   "file_kb": 4134568,
+   "read_bytes": 8738725888,
+   "pre_avail_kb": 4381960,
+   "minavail_kb": 165504
+  },
+  {
+   "tag": "b8_sip6_1500M_r2",
+   "cmd": "./sipp_bin.sh ./llm_fix6 /data/local/tmp/h2h/prompts/dec.user.txt /data/local/tmp/h2h/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -n 16 --greedy --fast --ctx 512 --threads 4 --ram-budget 1500M",
+   "exit": 0,
+   "wall_s": 89.0,
+   "dec_tps": 0.21,
+   "pf_tps": 1.8,
+   "hwm_kb": 1448404,
+   "anon_kb": 1413884,
+   "file_kb": 2964,
+   "read_bytes": 62583840768,
+   "pre_avail_kb": 4602248,
+   "minavail_kb": 3259116
+  },
+  {
+   "tag": "b8_sip6_3500M_r1",
+   "cmd": "./sipp_bin.sh ./llm_fix6 /data/local/tmp/h2h/prompts/dec.user.txt /data/local/tmp/h2h/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -n 16 --greedy --fast --ctx 512 --threads 4 --ram-budget 3500M",
+   "exit": 0,
+   "wall_s": 42.45,
+   "dec_tps": 0.55,
+   "pf_tps": 2.1,
+   "hwm_kb": 3309480,
+   "anon_kb": 3281528,
+   "file_kb": 2660,
+   "read_bytes": 20029968384,
+   "pre_avail_kb": 4352724,
+   "minavail_kb": 1280516
+  },
+  {
+   "tag": "b8_sip_1500M_r1",
+   "cmd": "./sipp_bin.sh ./llm_fix5 /data/local/tmp/h2h/prompts/dec.user.txt /data/local/tmp/h2h/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -n 16 --greedy --fast --ctx 512 --threads 4 --ram-budget 1500M",
+   "exit": 0,
+   "wall_s": 81.14,
+   "dec_tps": 0.22,
+   "pf_tps": 2.02,
+   "hwm_kb": 1568296,
+   "anon_kb": 1563980,
+   "file_kb": 2860,
+   "read_bytes": 60170776576,
+   "pre_avail_kb": 4068528,
+   "minavail_kb": 2570508
+  },
+  {
+   "tag": "b8_sip_min_r1",
+   "cmd": "./sipp_bin.sh ./llm_fix5 /data/local/tmp/h2h/prompts/dec.user.txt /data/local/tmp/h2h/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -n 16 --greedy --ctx 512 --threads 4 --stream-lm-head --no-async --ram-budget 0",
+   "exit": 0,
+   "wall_s": 139.26,
+   "dec_tps": 0.13,
+   "pf_tps": 1.0,
+   "hwm_kb": 205548,
+   "anon_kb": 202624,
+   "file_kb": 2912,
+   "read_bytes": 78329167872,
+   "pre_avail_kb": 3704564,
+   "minavail_kb": 3519796
+  }
+ ],
+ "binaries": {
+  "llm_fix5": "7820982",
+  "llm_fix6": "4ad688c (code)",
+  "llm_fix7": "a622a76 (code): budget = SipLLM's own share"
+ },
+ "fix7_verification": [
+  {
+   "tag": "sw7_sip_300M",
+   "budget_bytes": 314572800,
+   "vmhwm_bytes": 273743872,
+   "dec_tps": 1.88
+  },
+  {
+   "tag": "sw7_sip_768M",
+   "budget_bytes": 805306368,
+   "vmhwm_bytes": 769122304,
+   "dec_tps": 2.54
+  },
+  {
+   "tag": "sw7_sip_1200M",
+   "budget_bytes": 1258291200,
+   "vmhwm_bytes": 1216954368,
+   "dec_tps": 3.26
+  },
+  {
+   "tag": "b8_sip7_1500M",
+   "budget_bytes": 1572864000,
+   "vmhwm_bytes": 1483423744,
+   "dec_tps": 0.22
+  }
+ ],
+ "fix7_output_identical_to_fix5_fix6": true
+}

@@ -68,7 +68,7 @@ const SipllmParams({
   this.streamLmHead = false,
   this.residencyFp32 = false,
   this.forceBudget = false,
-  this.schedulePolicy = SchedulePolicy.proportional2,
+  this.schedulePolicy = SchedulePolicy.fixed16,
   this.specDraft = 0,
 });
 
@@ -202,7 +202,7 @@ enum SchedulePolicy {
   fixed32(kSchedFixed32), proportional2(kSchedProportional2),
   proportional4(kSchedProportional4), adaptive(kSchedAdaptive);
   final int code;
-}                                          // proportional2 is the engine default
+}                                          // fixed16 is the engine default
 
 enum Pooling { last(kPoolLast), mean(kPoolMean); final int code; }
 enum TokenizerKind { sentencePiece, bpe, byte }
