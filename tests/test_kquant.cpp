@@ -244,13 +244,21 @@ TEST(linear_dispatch_default_unchanged_fast_routes) {
         CHECK_MSG(std::memcmp(A.data(), B.data(), m * n_out * 4) == 0, "fast-off linear_batch changed");
 
         set_fast_quant(true);
+        const bool fast_live = fast_quant_enabled();   // requested AND an int8 kernel exists
         linear(a.data(), W, X.data());
         linear_batch(A.data(), W, X.data(), m);
         set_fast_quant(false);
         if (kquant_simd_available()) {
             matmul_kq_q8K(b.data(), w.data(), t, X.data(), n_out, n_in);
             matmul_kq_q8K_batch(B.data(), w.data(), t, X.data(), m, n_out, n_in);
-        }  // else: fast still uses matmul_quant (b/B already hold it)
+        } else if (fast_live && t == DType::Q4_K && n_in % 256 == 0) {
+            // No AVX2 K-quant kernels (e.g. ARM): --fast keeps the int8 SDOT path.
+            matmul_q4_K_i8(b.data(), w.data(), X.data(), n_out, n_in);
+            matmul_q4_K_i8_batch(B.data(), w.data(), X.data(), m, n_out, n_in);
+        } else if (fast_live && t == DType::Q6_K && n_in % 256 == 0) {
+            matmul_q6_K_i8(b.data(), w.data(), X.data(), n_out, n_in);
+            matmul_q6_K_i8_batch(B.data(), w.data(), X.data(), m, n_out, n_in);
+        }  // else (Q5_K, or no int8 kernel): matmul_quant (b/B already hold it)
         CHECK_MSG(a == b, "fast linear did not route as expected");
         CHECK_MSG(A == B, "fast linear_batch did not route as expected");
     }
