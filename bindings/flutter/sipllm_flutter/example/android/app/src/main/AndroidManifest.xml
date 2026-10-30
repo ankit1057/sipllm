@@ -1,6 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- AgentRunService: held only while a Phone-mode agent run is active. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <!-- Keep a Phone-mode run alive while another app is in front (ColorOS's
+         com.oplus.battery killed it for background CPU use mid-run). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <application
         android:label="local_llm_chat"
         android:name="${applicationName}"
@@ -27,6 +35,29 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Agent device control. Off until the user enables it in Android's
+             Accessibility settings; acts only during an agent run, and only
+             in the run's allowlisted apps (SipAccessibilityService.kt). -->
+        <service
+            android:name=".SipAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="SipLLM agent device control"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/sipllm_accessibility_service" />
+        </service>
+        <service
+            android:name=".AgentRunService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="On-device LLM agent operating another app at the user's request, for the length of one run" />
+        </service>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -43,5 +74,10 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- Agent open_app: the launch intents of the allowlisted apps. -->
+        <package android:name="com.android.settings"/>
+        <!-- Agent open_settings_page: ColorOS serves some Settings pages from these. -->
+        <package android:name="com.oplus.wirelesssettings"/>
+        <package android:name="com.oplus.battery"/>
     </queries>
 </manifest>

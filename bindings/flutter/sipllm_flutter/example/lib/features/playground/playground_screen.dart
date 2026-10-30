@@ -31,7 +31,7 @@ class _PlaygroundScreenState extends State<PlaygroundScreen> {
   }
 
   void _runInference(SipllmController controller) {
-    if (_promptController.text.trim().isEmpty || controller.generating) return;
+    if (_promptController.text.trim().isEmpty || controller.runtimeInUse) return;
     setState(() {
       _streamedText = '';
       _tokPerSec = 0.0;
@@ -50,13 +50,20 @@ class _PlaygroundScreenState extends State<PlaygroundScreen> {
         if (elapsedSec > 0) {
           _tokPerSec = _totalTokens / elapsedSec;
         }
+        if (!mounted) return;
         setState(() {
           _streamedText += token.piece;
         });
       },
+      onError: (Object e) {
+        // Shown in the output box instead of an uncaught async error.
+        stopwatch.stop();
+        if (!mounted) return;
+        setState(() => _streamedText += '${_streamedText.isEmpty ? '' : '\n\n'}[error: $e]');
+      },
       onDone: () {
         stopwatch.stop();
-        setState(() {});
+        if (mounted) setState(() {});
       },
     );
   }
@@ -168,7 +175,9 @@ class _PlaygroundScreenState extends State<PlaygroundScreen> {
                   children: [
                     const Text('CPU Threads', style: TextStyle(color: AppTheme.textMain, fontWeight: FontWeight.w600)),
                     Text(
-                      c.threads == 0 ? 'Auto (${c.hardwareConcurrency})' : '${c.threads}',
+                      c.threads == 0
+                          ? (c.fastCores > 0 ? 'Auto: ${c.fastCores} fast cores' : 'Auto (${c.hardwareConcurrency})')
+                          : '${c.threads}',
                       style: const TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold),
                     ),
                   ],
@@ -185,6 +194,14 @@ class _PlaygroundScreenState extends State<PlaygroundScreen> {
             ),
           ),
         ),
+        if (c.isModelLoaded)
+          const Padding(
+            padding: EdgeInsets.only(top: 8, left: 4),
+            child: Text(
+              'RAM budget and threads apply the next time a model is loaded (Models → Unload, then Load).',
+              style: TextStyle(color: AppTheme.textSec, fontSize: 11),
+            ),
+          ),
         const SizedBox(height: 12),
         // Prompt Input
         TextField(
@@ -204,7 +221,7 @@ class _PlaygroundScreenState extends State<PlaygroundScreen> {
           width: double.infinity,
           height: 46,
           child: ElevatedButton.icon(
-            onPressed: c.generating || !c.isModelLoaded ? null : () => _runInference(c),
+            onPressed: c.runtimeInUse || !c.isModelLoaded ? null : () => _runInference(c),
             style: ElevatedButton.styleFrom(
               backgroundColor: AppTheme.primary,
               foregroundColor: Colors.white,

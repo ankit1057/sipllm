@@ -14,12 +14,16 @@ class ChatInput extends StatefulWidget {
   final ValueChanged<String> onSend;
   final VoidCallback onStop;
 
+  /// The field's hint while [enabled] is false.
+  final String disabledHint;
+
   const ChatInput({
     super.key,
     required this.enabled,
     required this.generating,
     required this.onSend,
     required this.onStop,
+    this.disabledHint = 'Load a model to chat',
   });
 
   @override
@@ -72,7 +76,7 @@ class _ChatInputState extends State<ChatInput> {
                 onSubmitted: (_) => _submit(),
                 style: const TextStyle(color: AppTheme.textMain),
                 decoration: InputDecoration(
-                  hintText: widget.enabled ? 'Message…' : 'Load a model to chat',
+                  hintText: widget.enabled ? 'Message…' : widget.disabledHint,
                   contentPadding:
                       const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                 ),
@@ -89,6 +93,7 @@ class _ChatInputState extends State<ChatInput> {
   Widget _actionButton(bool generating) {
     if (generating) {
       return _circle(
+        label: 'Stop generating',
         color: Colors.redAccent,
         icon: LucideIcons.square,
         onTap: widget.onStop,
@@ -96,6 +101,7 @@ class _ChatInputState extends State<ChatInput> {
     }
     final active = widget.enabled;
     return _circle(
+      label: 'Send message',
       color: active ? AppTheme.primary : AppTheme.surface,
       icon: LucideIcons.send,
       iconColor: active ? Colors.black : AppTheme.textSec,
@@ -103,21 +109,35 @@ class _ChatInputState extends State<ChatInput> {
     );
   }
 
+  // [label] is what TalkBack reads and what UI automation sees as the
+  // button's content-desc; the bare icon had none.
   Widget _circle({
+    required String label,
     required Color color,
     required IconData icon,
     Color iconColor = Colors.white,
     VoidCallback? onTap,
   }) {
-    return Material(
-      color: color,
-      shape: const CircleBorder(),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Icon(icon, size: 20, color: iconColor),
+    return Semantics(
+      button: true,
+      enabled: onTap != null,
+      label: label,
+      excludeSemantics: true,
+      onTap: onTap,
+      child: Tooltip(
+        message: label,
+        excludeFromSemantics: true,
+        child: Material(
+          color: color,
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Icon(icon, size: 20, color: iconColor),
+            ),
+          ),
         ),
       ),
     );

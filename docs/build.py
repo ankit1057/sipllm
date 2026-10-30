@@ -28,7 +28,7 @@ from pathlib import Path
 SITE_TITLE = "SipLLM"
 POSITIONING = ("Run GGUF models larger than available RAM through "
                "bounded-memory transformer layer streaming.")
-VERSION = "v0.6.0"
+VERSION = "v0.7.0"
 REPO_URL = "https://github.com/ankit1057/sipllm"
 
 ROOT = Path(__file__).resolve().parent           # docs/

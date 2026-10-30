@@ -14,6 +14,11 @@ Unreleased (2026-10-26, Dimensity 900 phone, 4 threads, warm cache; partial refr
   (bench/results/phone-budget-sweep-2026-10-26.json).
   Speed (SmolLM2-135M Q8_0, ~1000-token prompt): prefill 130 tok/s, decode 25.1 (47 / 9.7 before #80).
 
+v0.7.0 (2026-11-01): no optimization wave, so the scorecard below was not re-measured.
+Raw logits from the release tree are byte-identical to the previous main (5872a43) for
+TinyLlama Q4_K_M, SmolLM2-135M Q8_0 and Qwen2.5-0.5B Q4_K_M, with and without --fast
+(Apple M3, one 15-token prompt; dump_logits --raw).
+
 v0.6.0 (2026-10-23): the numbers below are wave 16's and were not re-measured for the
 release. The Llama-family hot path is unchanged (greedy output byte-identical to the
 pre-release tree for TinyLlama, Llama-3.2-1B and SmolLM2, with and without --fast). The
@@ -63,7 +68,55 @@ Confidence:            High: phone numbers are medians of 3 interleaved reps wit
                        (repack on), not the ggml 0.27.0 of earlier scorecards.
 ```
 
-## [Unreleased]
+## [0.7.0] — Agent API, phone mode, exact BPE tokenization, contributed CUDA and batched decode (2026-11-01)
+
+v0.6.0 was prepared and merged (PR #76) but never tagged or published. This is the first published release since v0.5.0, so read both sections.
+- **This section:** everything merged to `main` after v0.6.0 was cut:
+  - the #77–#81 fixes;
+  - the contributions merged in PR #84;
+  - the agent and app work.
+- **The [0.6.0] section below:** that release itself.
+
+### Merged contributions (PR #84)
+Details are under "Contributed in 0.7.0 (PR #84)" further down.
+- **Batched decode across sequences (`sip_batch`) and query-tiled prefill attention.**
+- **Optional NVIDIA GPU offload (`--gpu-layers N|max`).**
+  - `libcuda.so.1` is loaded at run time, and the kernels ship as embedded PTX.
+  - No CUDA toolkit is needed to build, and CPU-only machines are unaffected.
+- **x86 work:**
+  - Gemma 4 12B runs;
+  - sliding-window ring KV cache;
+  - AVX2 `--fast` K-quant kernels;
+  - parallel attention.
+- **Nishachar v6 harness:**
+  - post-edit syntax checks;
+  - line-range `edit_file`;
+  - per-edit analyzer feedback;
+  - a control-token guard and thinking mode.
+
+### Added
+- **The Nishachar agent is usable from the C ABI and from Dart, with tools run by the caller.**
+  - The C ABI's new `sipllm_agent_*` calls are stepped by the caller. The engine keeps the conversation, the chat template, tool-call parsing and the step bound. Each `sipllm_agent_step` generates one model turn and returns either a tool call or the end of the run. The caller runs the tool and passes the result to `sipllm_agent_submit_result`. Nothing runs inside the engine.
+  - Steps are greedy and stop at a closing `</tool_call>`. They reuse the KV of the conversation so far, so each step prefills only the new tail: about 15–27 tokens per step on the phone instead of the whole prompt. `sipllm_cancel` stops a step at the next token. Prefill cannot be interrupted.
+  - The C++ side is `AgentSession` (`nishachar.h`). `Nishachar::run()` now drives that same session synchronously, and its tests are unchanged.
+  - Dart has `SipllmAgent` (`create`, `run(goal, executor)`, `cancel`, `dispose`). It emits token, tool-call, tool-result, final and stopped events. Tool-result events report what actually ran, separately from what the model says it did.
+  - The example app has an Agent tab with four harmless tools confined to an app-private workspace: calc, echo, list_files and read_file.
+- **Qwen2.5's own tool format, opt-in.** `ToolPromptFormat::Qwen` renders tools as JSON schemas inside `<tools>` and feeds results back as `<tool_response>` in a user turn. The rendering is pinned against jinja2 output of Qwen's official template. `tool_format_from_model()` detects the format from the GGUF template.
+  - The C++ `AgentConfig` default stays `Compact`, so existing prompts are byte-identical. The C ABI and Dart default `AUTO` picks the model's format.
+  - Measured on Qwen2.5-1.5B-Instruct Q8_0, greedy, one run per goal, 9 goals: both formats pass 8 of 9. Compact fails by claiming an echo it never called. Qwen fails by refusing to open a file it was not told the tool name for.
+- **`nishachar_probe`: an end-to-end check that a real model drives the tool loop.** It runs 9 goals with harmless tools: named and unnamed tools, a read-then-calc chain, a no-tool control and a missing-file error. For each step it checks the parsed call, the dispatched tool and arguments, the result fed back, the final answer and the step bound. It writes every prompt, output and timing to a transcript.
+- **The example app can let the agent operate the phone through an accessibility service (Phone mode, opt-in).**
+  - The user enables "SipLLM agent device control" in Android's Accessibility settings. The service reads the active window and clicks or scrolls nodes by index, nothing else: no gestures, screenshots, key filtering or touch exploration. It acts and reads only during a run, and only in the run's allowlisted apps. The first proof allows Settings and its ColorOS sibling `com.oplus.wirelesssettings`. Password fields are never read, and this app and the system UI are never acted on.
+  - The agent sees each screen as a compact numbered list. A Settings screen is about 140 Qwen tokens, because a clickable row takes its child texts as its label. Lists say when more content is below.
+  - Refused by policy: toggles, typing, any label that could change or delete something, and Back on the app's main screen. The same no-op action is refused on its third try.
+  - Each action returns the new screen once the UI settles. If an action leaves the allowlist, the app is reopened.
+  - A Stop bar is drawn over the other app (`TYPE_ACCESSIBILITY_OVERLAY`). An answer that states a number seen on no screen is rejected once and retried; a second such answer is shown as Unverified.
+  - Keep-alive while another app is in front: a foreground service and a wake lock held for the run, prompts for notifications and the battery-optimization exemption, and a shortcut to ColorOS's "Allow background activity". Without these, ColorOS's `com.oplus.battery` killed the app about 65–70 s into a run ("ProcessCpuManager: K … Cpu too high 41.5").
+  - Measured on the IV2201 with Qwen2.5-1.5B-Instruct Q8_0, greedy:
+    - "Is Bluetooth on or off?" passed 2 of 2 in 18 s; the phone's `bluetooth_on` is 0.
+    - "What Android version…" and "How much storage…" failed every run. The model never tapped "About device" although it was on screen. It ended at the 10-step bound, or with an answer the grounding check rejected.
+    - With keep-alive: 6 runs of up to 195 s, and no kill in 30 minutes.
+- **The example app keeps its chat history across launches.** The history is a JSON file in app support storage, written atomically after each turn. Each prompt keeps only the newest turns that fit the context, so a long history does not overflow it. Not yet driven on a device.
 
 ### Changed
 - **#78: with no `--ram-budget`, the CLI, `llm_server` and the C ABI default now use half of the available RAM.**
@@ -77,11 +130,48 @@ Confidence:            High: phone numbers are medians of 3 interleaved reps wit
   - llama.cpp on the same file reaches 293 tok/s prefill and 26.6 tok/s decode. The gap is narrower, not closed.
 
 ### Fixed
+- **BPE prompts for Qwen2, Llama-3 and SmolLM2 are now tokenized as Hugging Face tokenizes them.**
+  - All BPE models used one ASCII approximation of GPT-2's pre-tokenizer. Qwen2 and Llama-3 split text with a different regex, so `notes.txt`, `read_file` and ` "x"` reached the model as pieces it was never trained on (`notes` `.` `txt`, not `notes` `.txt`). Qwen2.5 then wrote file names back as `notes. txt`, and tool calls failed.
+  - The pre-tokenizer now follows `tokenizer.ggml.pre`:
+    - `qwen2`, `deepseek-r1-qwen`: Qwen2's regex;
+    - `llama-bpe`, `llama3`, `llama-v3`: Llama-3's regex;
+    - `smollm`: single digits, then GPT-2's regex.
+  - These use Unicode letter and number tables generated by `scripts/gen_unicode_ranges.py` (Unicode 15).
+  - Any other or absent value keeps the old splitter byte for byte. That covers Phi-2. SentencePiece models (TinyLlama, Gemma) are unaffected.
+  - Token IDs were compared with HF `tokenizers` on each model's `tokenizer.json`:
+    - 52 targeted strings: Qwen2 and Llama-3 went from 23 to 52 matching, SmolLM2 from 33 to 52.
+    - 3,011 lines and whole files from this repository: Qwen2 and Llama-3 went from 292 to 3,011 matching. For Qwen2, 8 strings containing a literal `</s>` are excluded (see Known issues). SmolLM2 went from 414 to 3,011.
+  - Prompt-token counts in earlier Qwen, Llama-3 and SmolLM2 benchmarks used the old split, so they are not directly comparable with new runs.
+  - On the 9-goal tool test (Qwen2.5-1.5B-Instruct Q8_0, greedy), the compact format went from 7 to 8 passing and the Qwen format from 5 to 8.
+  - New tests: `bpe_pretokenize_matches_hf` and `bpe_pre_from_name_keeps_unverified_on_legacy`.
+- **Nishachar no longer sends the tool list twice.** `run()` added the tool block to the system message, and `render_chat()` added it again. That doubled about 170 of the 433 prompt tokens of the first step on every step. New test `tool_schema_rendered_once`.
+- **Back on the example app's root screen no longer leaks the loaded model.**
+  - Back used to finish the activity and destroy the Flutter engine while the process lived on, so about 1.8 GB of native model memory stayed allocated with nothing left to free it. It now moves the app to the background (`popSystemNavigator`).
+  - Verified on the IV2201: the activity is not destroyed, the pid is unchanged, and the model is still loaded on relaunch.
+- **Example app fixes**, each covered by widget or unit tests (`example/test/app_state_test.dart`, `app_fixes_batch2_test.dart`):
+  - **Models screen**
+    - The folder is rescanned when the screen opens, when the app returns to the foreground, on pull-to-refresh and from the refresh button. A GGUF copied in while the app runs appears, and one deleted outside the app disappears. The loaded model and downloads in progress are left alone.
+    - A catalog model is recognised under its download name or its Hugging Face file name. If both copies exist, the second is marked as a copy and no file is deleted.
+    - Import never overwrites: a file whose name is already in the folder is refused and left as it was.
+    - The loaded model has an Unload button. During an agent run, Unload asks first, and Cancel keeps the model.
+  - **Chat:**
+    - Send and Stop have accessibility labels.
+    - The stats bar shows peak RAM in whole MB, with the thread count first.
+  - **Threads:** with no user setting, the app uses only the fast cores when the slow cores are clearly slower. That gives 4 threads on the POCO X6 Pro. On the OnePlus Nord CE 2 the slow cores are within the cut-off, so it uses all cores. A thread count set by the user still wins.
+  - **Playground and Arena:** the busy flag clears exactly once when a stream ends, errors or is cancelled.
+  - **Agent tab:** mode, page and goal survive a Hub tab switch. A Stop during the answer-check step ends the run instead of retrying.
+  - **Verified on device:** on the OnePlus Nord CE 2, the release APK installs, launches and loads Qwen2.5-1.5B Q8_0. The rest of these fixes have not been exercised on a device.
+- **`SipllmRuntime.close()` (Dart) no longer leaks the native model when called during a generation.** It used to send `close`, then kill the worker isolate 50 ms later. A worker still inside a long prefill never ran `sipllm_close`, and the model's weights stayed allocated. `close()` now cancels and waits for the worker to confirm (timeout 120 s). Measured on an M3 with Qwen2.5-1.5B Q8_0, closing 100 ms into a 1,000-token prefill: `close()` returned after 8.1 s and process RSS fell from 1,902 to 727 MB. A worker that dies now fails its pending streams and futures instead of leaving them open; no test kills a worker yet.
 - **#77: the CLI auto-tuner is now opt-in (`--autotune`).** Without `--threads` or `--schedule`, v0.6.0 applied the tuner's result over the defaults. On a 2+6-core phone it picked 2 threads and `Proportional2`. With no writable `$HOME`, as in an Android `adb shell`, it also re-ran on every launch. `--no-autotune` meanwhile forced 4 threads. Now, unless `--autotune` or `--recalibrate` is given, the CLI uses every core and `fixed16`, as the C ABI and Dart SDK already did. `--no-autotune` is still accepted.
 - **#79: `-t` is the sampling temperature, and the CLI now says so.** Most runtimes use `-t` for threads, so `-t 8` silently set temperature 8.0. `-t` still works but prints a warning. `--temp T` is the explicit flag, and threads are `--threads N`.
 - **#81: `--ram-budget` keeps its ceiling for the KV cache and refuses the unpriced semantic cache.** The planner prices the KV cache at the full chosen context. Growing it by doubling could briefly hold more resident rows than that whenever the context is not a doubling step. Under a budget, the KV cache is now allocated once at the planned context. Peak memory under a budget therefore includes the full planned KV from the start, which is what the planner reports. Pass a smaller `--ctx` to lower it. `--semantic-cache-budget` with `--ram-budget` is refused unless `--ram-budget-force` is given, because the planner does not count the semantic cache. No budget means no change: the KV cache still grows on demand.
 - **`--ram-budget` now prices the tokenizer and model metadata it measures, so large-vocabulary models stay under their ceiling.** The ledger assumed a fixed 24 MB of process overhead. A 32k-vocab model costs about 8 MB at plan time. Qwen2.5 (152k vocab) costs about 37 MB (Apple M3), so Qwen2.5-1.5B Q8_0 at `--ram-budget 300M`, `768M` and `1200M` peaked 7.8, 14 and 9.7 MB above the budget (`/usr/bin/time -l`). The tokenizer is now built before planning. The ledger's base is the RSS that SipLLM itself added (opening the model plus building the tokenizer) plus 16 MB, and never less than the old 24 MB. An app that embeds SipLLM keeps its own memory outside the budget: the budget is SipLLM's share, not the whole process. TinyLlama's plans are unchanged on macOS (same pinned layers at 300M, 600M and 1G). After the fix, the same three runs peak at 272, 754 and 1218 MB, 40–52 MB under. The cost is one fewer pinned layer at each budget. The output is byte-identical.
 - **The CLI's `peak rss` line now reports the kernel high-water mark** (`VmHWM` on Linux and Android, `resident_size_max` on macOS). It used to print the RSS at exit, which under-reported the peak: 277 MB was printed for a run whose true peak was 322 MB.
+- **A read error while streaming a layer is now reported to the caller instead of killing the process.** On the async prefetch worker (the default streaming path), a failed read (I/O error, a model file replaced mid-run, a dropped LAN weight source) escaped the worker thread, and `std::terminate` aborted the whole process, an app embedding SipLLM included (exit 134, reproduced 3/3 on prefetch and on direct loads). `loadLayer` now rethrows the error on the caller's thread and the loader stays usable. The synchronous loader already threw, but it kept the slot's old label after a half-finished refill, so a retry of the previous layer was served as a hit with mixed weights. New test `e2e_worker_read_error_reaches_caller`. Successful loads are unchanged.
+
+### Known issues
+- A literal `</s>` in a Qwen2 prompt becomes one token. In Qwen's vocabulary `</s>` is an ordinary token, but SipLLM treats every turn-end text it recognizes as special. Hugging Face splits it as text.
+- With `--fast`, free-text answers from a native Mac build and a baseline-ISA Android build can differ in wording. In the 9-goal test, every tool call matched. Without `--fast`, outputs matched byte for byte.
 
 ## [0.6.0] — Correct output beyond Llama, merged waves 12–16, LAN pooling (2026-10-23)
 
@@ -390,7 +480,7 @@ byte-identical greedy output for 24 tokens).
 **Verified** — full suite green on a clean build; `--fast` is opt-in so all
 `1e-3`/bit-identical correctness tests are unchanged (no regressions).
 
-## Wave 12 and earlier notes (wave 12 ships in 0.6.0)
+## Contributed in 0.7.0 (PR #84)
 
 ### Batched multi-sequence decode (`sip_batch`) + query-tiled prefill attention (2026-10-24)
 
@@ -515,6 +605,8 @@ prompt that ends mid-identifier keeps every layer ≥ 0.994 but picks llama.cpp'
 **What an x86 laptop user still cannot do:** match llama.cpp's prefill (16.8 vs
 25.2 tok/s on Gemma 4) or run the Gemma 4 E2B/E4B (per-layer embeddings) and
 26B-A4B (MoE) variants.
+
+## Wave 12 and earlier notes (wave 12 ships in 0.6.0)
 
 ### Wave 12 — edge truth: K-quant integer kernels, `--spec`, planner fix, honest claims (2026-10-19)
 

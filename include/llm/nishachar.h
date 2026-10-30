@@ -246,6 +246,10 @@ struct AgentConfig {
         "tool call.";
 
     ChatTemplateStyle style = ChatTemplateStyle::ChatML;
+    // How tools and results are rendered (tools.h). Compact keeps the prompt
+    // byte-identical to earlier releases; tool_format_from_model() picks the
+    // model's own format (Qwen) when its GGUF template carries one.
+    ToolPromptFormat tool_format = ToolPromptFormat::Compact;
     bool stop_on_tool_error = false;  // false => feed the error back and continue
 
     // When the model answers without ever having used a tool, nudge it once
@@ -259,6 +263,53 @@ struct AgentConfig {
 
     // Optional observer invoked after every recorded step (transcripts, UIs).
     std::function<void(const AgentStep&)> on_step;
+};
+
+class Nishachar;
+
+// One run of the loop, stepped by the caller instead of run(): the caller
+// generates the model's turn for prompt() and runs each tool itself, so tools
+// may be asynchronous (an app's UI actions) and nothing executes inside the
+// loop. run() is this session driven synchronously. Holds a reference to the
+// agent's tool registry: the Nishachar must outlive the session and must not
+// gain or lose tools while it runs.
+class AgentSession {
+public:
+    enum class Event { ToolCall, Final, Empty };
+
+    AgentSession(const Nishachar& agent, const std::string& goal, const AgentConfig& cfg);
+
+    // The rendered prompt for the next model turn. Only while !finished() and
+    // !awaiting_result().
+    std::string prompt() const;
+
+    // The model's output for prompt(). ToolCall: run pending_call(), then
+    // submit_result(). Final and Empty end the session.
+    Event submit_output(const std::string& out);
+
+    // The call to run; valid while awaiting_result().
+    const ToolCall& pending_call() const { return pending_; }
+
+    // The tool's result text (or error text with ok=false), fed back to the
+    // model. May end the session (max_steps, or stop_on_tool_error).
+    void submit_result(const std::string& result, bool ok);
+
+    bool awaiting_result() const { return awaiting_; }
+    bool finished() const { return finished_; }
+    int  steps_taken() const { return result_.steps_taken(); }
+
+    // The report so far; final once finished().
+    const AgentResult& result() const { return result_; }
+
+private:
+    const ToolRegistry&      registry_;
+    AgentConfig              cfg_;
+    std::vector<ChatMessage> messages_;
+    AgentResult              result_;
+    AgentStep                step_;      // the tool step awaiting its result
+    ToolCall                 pending_;
+    bool awaiting_ = false;
+    bool finished_ = false;
 };
 
 // The loop. Model-agnostic: register tools (advertised schema + C++ executor),

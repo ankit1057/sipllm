@@ -75,6 +75,61 @@ std::string ToolDef::schema_text() const {
     return o.str();
 }
 
+// JSON string literal, escaped the way Python's json.dumps(ensure_ascii=False)
+// does: quotes, backslashes and control characters; UTF-8 passes through.
+static std::string json_quote(const std::string& s) {
+    std::string o = "\"";
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n"; break;
+            case '\r': o += "\\r"; break;
+            case '\t': o += "\\t"; break;
+            case '\b': o += "\\b"; break;
+            case '\f': o += "\\f"; break;
+            default:
+                if (c < 0x20) { char b[8]; std::snprintf(b, sizeof b, "\\u%04x", c); o += b; }
+                else o += (char)c;
+        }
+    }
+    return o + "\"";
+}
+
+std::string ToolDef::json_schema() const {
+    // Key order and ", " / ": " separators match HF's tojson (json.dumps).
+    std::ostringstream o;
+    o << "{\"type\": \"function\", \"function\": {\"name\": " << json_quote(name);
+    if (!description.empty()) o << ", \"description\": " << json_quote(description);
+    o << ", \"parameters\": {\"type\": \"object\", \"properties\": {";
+    for (size_t i = 0; i < params.size(); ++i) {
+        const ToolParam& p = params[i];
+        if (i) o << ", ";
+        o << json_quote(p.name) << ": {\"type\": ";
+        switch (p.type) {
+            case ToolParamType::String:      o << "\"string\""; break;
+            case ToolParamType::Int:         o << "\"integer\""; break;
+            case ToolParamType::Float:       o << "\"number\""; break;
+            case ToolParamType::Bool:        o << "\"boolean\""; break;
+            case ToolParamType::StringArray: o << "\"array\", \"items\": {\"type\": \"string\"}"; break;
+        }
+        if (!p.description.empty()) o << ", \"description\": " << json_quote(p.description);
+        o << "}";
+    }
+    o << "}";
+    bool any_required = false;
+    for (const ToolParam& p : params) any_required = any_required || p.required;
+    if (any_required) {
+        o << ", \"required\": [";
+        bool first = true;
+        for (const ToolParam& p : params)
+            if (p.required) { o << (first ? "" : ", ") << json_quote(p.name); first = false; }
+        o << "]";
+    }
+    o << "}}}";
+    return o.str();
+}
+
 void ToolRegistry::register_tool(ToolDef def) {
     for (ToolDef& t : tools_)
         if (t.name == def.name) { t = std::move(def); return; }
@@ -308,6 +363,14 @@ ChatTemplateStyle style_from_model(const ModelConfig& cfg) {
     }
 }
 
+ToolPromptFormat tool_format_from_model(const ModelConfig& cfg) {
+    const std::string& t = cfg.chat_template;
+    if (t.find("<|im_start|>") != std::string::npos && t.find("<tools>") != std::string::npos &&
+        t.find("<tool_call>") != std::string::npos)
+        return ToolPromptFormat::Qwen;
+    return ToolPromptFormat::Compact;
+}
+
 static const char* role_word(ChatMessage::Role r) {
     switch (r) {
         case ChatMessage::Role::System:    return "system";
@@ -316,6 +379,50 @@ static const char* role_word(ChatMessage::Role r) {
         case ChatMessage::Role::Tool:      return "tool";
     }
     return "user";
+}
+
+// The Qwen2.5 template's tools branch, rendered without a Jinja engine. The
+// system turn carries the JSON schemas; consecutive tool results share one
+// user turn as <tool_response> blocks. Pinned against jinja2 output of Qwen's
+// official template (test_tool_calling). GGUF copies of it can write the
+// example call as {{...}}, which the model then imitates; the official one
+// renders {...}.
+static std::string render_chat_qwen_tools(const std::vector<ChatMessage>& msgs,
+                                          const ToolRegistry& tools, bool add_gen_prompt) {
+    std::ostringstream o;
+    const bool has_system = !msgs.empty() && msgs[0].role == ChatMessage::Role::System;
+    o << "<|im_start|>system\n"
+      << (has_system ? msgs[0].content
+                     : std::string("You are Qwen, created by Alibaba Cloud. You are a helpful assistant."))
+      << "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
+         "You are provided with function signatures within <tools></tools> XML tags:\n<tools>";
+    for (const ToolDef& t : tools.all()) o << "\n" << t.json_schema();
+    o << "\n</tools>\n\nFor each function call, return a json object with function name and "
+         "arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": "
+         "<function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n";
+    for (size_t i = has_system ? 1 : 0; i < msgs.size(); ++i) {
+        const ChatMessage& m = msgs[i];
+        if (m.role == ChatMessage::Role::Tool) {
+            const bool first = i == 0 || msgs[i - 1].role != ChatMessage::Role::Tool;
+            const bool last = i + 1 == msgs.size() || msgs[i + 1].role != ChatMessage::Role::Tool;
+            if (first) o << "<|im_start|>user";
+            o << "\n<tool_response>\n" << m.content << "\n</tool_response>";
+            if (last) o << "<|im_end|>\n";
+        } else {
+            o << "<|im_start|>" << role_word(m.role) << "\n" << m.content << "<|im_end|>\n";
+        }
+    }
+    if (add_gen_prompt) o << "<|im_start|>assistant\n";
+    return o.str();
+}
+
+std::string render_chat(const std::vector<ChatMessage>& messages,
+                        const ToolRegistry& tools, ChatTemplateStyle style,
+                        bool add_gen_prompt, ToolPromptFormat format) {
+    if (format == ToolPromptFormat::Qwen && !tools.empty() &&
+        (style == ChatTemplateStyle::ChatML || style == ChatTemplateStyle::Qwen2))
+        return render_chat_qwen_tools(messages, tools, add_gen_prompt);
+    return render_chat(messages, tools, style, add_gen_prompt);
 }
 
 std::string render_chat(const std::vector<ChatMessage>& messages,

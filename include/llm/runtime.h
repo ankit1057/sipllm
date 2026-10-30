@@ -137,6 +137,7 @@ public:
     // prefix with the previously committed tokens, reprocessing only the tail.
     // Opt-in (default off => byte-identical). Set before the first generate().
     void set_context_reuse(bool on) { reuse_ = on; }
+    bool context_reuse() const { return reuse_; }
 
     // Persist / restore the committed context (tokens + KV) to a session file
     // so cross-turn reuse survives a process restart (Phase 5). Opt-in.

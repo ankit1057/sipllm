@@ -64,20 +64,27 @@ class _RunControls extends StatelessWidget {
 
   final SipllmController controller;
 
+  // A failed run (runtime busy, model unloaded mid-run) used to be an
+  // unhandled Future error: nothing shown.
+  Future<void> _run(BuildContext context) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      await context.read<SipllmController>().runBenchmark();
+    } catch (e) {
+      messenger?.showSnackBar(SnackBar(content: Text('Benchmark failed: $e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final busy = controller.benchmarking;
-    final canRun = controller.isModelLoaded &&
-        !controller.benchmarking &&
-        !controller.generating;
+    final canRun = controller.isModelLoaded && !controller.runtimeInUse;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         ElevatedButton.icon(
-          onPressed: canRun
-              ? () => context.read<SipllmController>().runBenchmark()
-              : null,
+          onPressed: canRun ? () => _run(context) : null,
           style: ElevatedButton.styleFrom(
             backgroundColor: AppTheme.primary,
             foregroundColor: Colors.black,

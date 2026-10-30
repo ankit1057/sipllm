@@ -1,6 +1,7 @@
 // tokenizer.cpp — see tokenizer.h.
 #include "llm/tokenizer.h"
 #include "llm/common.h"
+#include "unicode_ranges.h"
 
 #include <algorithm>
 #include <cctype>
@@ -90,6 +91,10 @@ Tokenizer Tokenizer::from_source(const WeightSource& src) {
             for (int32_t r = 0; r < (int32_t)merges->sa.size(); ++r)
                 t.merge_rank_[merges->sa[r]] = r;
         build_byte_unicode(t.byte_to_unicode_, t.unicode_to_byte_);
+        // Families whose split regex is reproduced exactly (checked against the
+        // models' tokenizer.json); llama.cpp's aliases of them map the same way.
+        // Any other value (or none, as in Phi-2) keeps the legacy splitter.
+        t.pre_ = bpe_pre_from_name(src.meta_str("tokenizer.ggml.pre", ""));
     } else {
         t.kind_ = Kind::SentencePiece;   // "llama" / SPM with scores
     }
@@ -237,9 +242,203 @@ static std::vector<std::string> pretokenize(const std::string& text) {
     return out;
 }
 
+// ---- exact pre-tokenizers ------------------------------------------------
+// The Hugging Face split regexes, matched by hand over codepoints:
+//   Qwen2 / Llama3:
+//     (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,K}
+//     | ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+//     with K = 1 (Qwen2) or 3 (Llama-3).
+//   SmolLM: every \p{N} isolated, then GPT-2's ByteLevel regex on the rest:
+//     's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+// Alternatives are tried in order at each position (leftmost-first), as the
+// regex engines do.
+namespace {
+
+bool in_ranges(const uint32_t (*r)[2], size_t n, uint32_t cp) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (cp < r[mid][0]) hi = mid;
+        else if (cp > r[mid][1]) lo = mid + 1;
+        else return true;
+    }
+    return false;
+}
+
+enum class CpClass : uint8_t { Letter, Number, Space, Other };
+
+// One codepoint and its byte span. Invalid UTF-8 bytes stand alone as Other.
+struct Cp { uint32_t cp; uint32_t off; uint32_t len; CpClass cls; };
+
+CpClass classify(uint32_t cp) {
+    if (cp < 0x80) {
+        if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z')) return CpClass::Letter;
+        if (cp >= '0' && cp <= '9') return CpClass::Number;
+        if (cp == ' ' || (cp >= 0x09 && cp <= 0x0D)) return CpClass::Space;
+        return CpClass::Other;
+    }
+    // White_Space property, non-ASCII part.
+    if (cp == 0x85 || cp == 0xA0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) ||
+        cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000)
+        return CpClass::Space;
+    if (in_ranges(kUnicodeLetterRanges, sizeof kUnicodeLetterRanges / sizeof *kUnicodeLetterRanges, cp))
+        return CpClass::Letter;
+    if (in_ranges(kUnicodeNumberRanges, sizeof kUnicodeNumberRanges / sizeof *kUnicodeNumberRanges, cp))
+        return CpClass::Number;
+    return CpClass::Other;
+}
+
+std::vector<Cp> decode_utf8(const std::string& s) {
+    std::vector<Cp> out;
+    out.reserve(s.size());
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        const unsigned char c = (unsigned char)s[i];
+        uint32_t cp = c, len = 1;
+        if (c >= 0xC0 && c < 0xF8) {
+            len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2;
+            cp = c & (0x7F >> len);
+            bool ok = i + len <= n;
+            for (uint32_t k = 1; ok && k < len; ++k) {
+                const unsigned char d = (unsigned char)s[i + k];
+                ok = (d & 0xC0) == 0x80;
+                cp = (cp << 6) | (d & 0x3F);
+            }
+            if (!ok) { cp = c; len = 1; out.push_back({cp, (uint32_t)i, 1, CpClass::Other}); ++i; continue; }
+        } else if (c >= 0x80) {
+            out.push_back({cp, (uint32_t)i, 1, CpClass::Other}); ++i; continue;
+        }
+        out.push_back({cp, (uint32_t)i, len, classify(cp)});
+        i += len;
+    }
+    return out;
+}
+
+inline bool is_nl(const Cp& c) { return c.cp == '\r' || c.cp == '\n'; }
+// ASCII lowercase; 0 for anything non-ASCII, so a codepoint whose low byte
+// happens to be 's' or 't' never reads as a contraction letter.
+inline char lower_ascii(uint32_t cp) {
+    if (cp >= 'A' && cp <= 'Z') return (char)(cp + 32);
+    return cp < 0x80 ? (char)cp : 0;
+}
+
+// Length (in codepoints) of a contraction at i: 's 't 're 've 'm 'll 'd.
+size_t contraction_len(const std::vector<Cp>& c, size_t i, bool icase) {
+    if (c[i].cp != '\'' || i + 1 >= c.size()) return 0;
+    auto ch = [&](size_t k) { return icase ? lower_ascii(c[k].cp) : (char)(c[k].cp < 0x80 ? c[k].cp : 0); };
+    const char a = ch(i + 1);
+    if (a == 's' || a == 't' || a == 'm' || a == 'd') return 2;
+    if (i + 2 < c.size()) {
+        const char b = ch(i + 2);
+        if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') || (a == 'l' && b == 'l')) return 3;
+    }
+    return 0;
+}
+
+// \s*[\r\n]+ | \s+(?!\S) | \s+ at a whitespace codepoint i; returns the end.
+size_t whitespace_end(const std::vector<Cp>& c, size_t i, size_t n, bool newline_rule) {
+    size_t j = i;
+    while (j < n && c[j].cls == CpClass::Space) ++j;
+    if (newline_rule)
+        for (size_t k = j; k > i; --k)
+            if (is_nl(c[k - 1])) return k;          // up to the last newline of the run
+    if (j == n) return j;                           // (?!\S) holds at the end of text
+    if (j - 1 > i) return j - 1;                    // leave one space for the next word
+    return j;                                       // \s+
+}
+
+// Split codepoints [b, e) with the Qwen2 / Llama-3 regex.
+void split_llama3(const std::vector<Cp>& c, size_t b, size_t e, size_t max_digits,
+                  std::vector<std::pair<size_t, size_t>>& out) {
+    auto is_punct = [&](size_t k) { return c[k].cls == CpClass::Other; };
+    size_t i = b;
+    while (i < e) {
+        size_t j = i;
+        if (size_t l = contraction_len(c, i, /*icase=*/true); l && i + l <= e) {
+            j = i + l;
+        } else if (c[i].cls == CpClass::Letter ||
+                   (c[i].cls != CpClass::Number && !is_nl(c[i]) && i + 1 < e && c[i + 1].cls == CpClass::Letter)) {
+            j = i + 1;
+            while (j < e && c[j].cls == CpClass::Letter) ++j;
+        } else if (c[i].cls == CpClass::Number) {
+            while (j < e && c[j].cls == CpClass::Number && j - i < max_digits) ++j;
+        } else if (is_punct(i) || (c[i].cp == ' ' && i + 1 < e && is_punct(i + 1))) {
+            j = c[i].cp == ' ' ? i + 1 : i;
+            while (j < e && is_punct(j)) ++j;
+            while (j < e && is_nl(c[j])) ++j;
+        } else {
+            j = whitespace_end(c, i, e, /*newline_rule=*/true);
+        }
+        out.push_back({i, j});
+        i = j;
+    }
+}
+
+// Split codepoints [b, e) with GPT-2's ByteLevel regex.
+void split_gpt2(const std::vector<Cp>& c, size_t b, size_t e,
+                std::vector<std::pair<size_t, size_t>>& out) {
+    size_t i = b;
+    while (i < e) {
+        size_t j = i;
+        if (size_t l = contraction_len(c, i, /*icase=*/false); l && i + l <= e) {
+            j = i + l;
+        } else {
+            const size_t k = (c[i].cp == ' ' && i + 1 < e && c[i + 1].cls != CpClass::Space) ? i + 1 : i;
+            if (c[k].cls != CpClass::Space) {
+                const CpClass cls = c[k].cls;               // ' ?\p{L}+', ' ?\p{N}+' or ' ?[^\s\p{L}\p{N}]+'
+                j = k;
+                while (j < e && c[j].cls == cls) ++j;
+            } else {
+                j = whitespace_end(c, i, e, /*newline_rule=*/false);
+            }
+        }
+        out.push_back({i, j});
+        i = j;
+    }
+}
+
+} // namespace
+
+BpePre bpe_pre_from_name(const std::string& pre) {
+    if (pre == "qwen2" || pre == "deepseek-r1-qwen")                     return BpePre::Qwen2;
+    if (pre == "llama-bpe" || pre == "llama3" || pre == "llama-v3")      return BpePre::Llama3;
+    if (pre == "smollm")                                                 return BpePre::SmolLM;
+    return BpePre::Legacy;
+}
+
+std::vector<std::string> bpe_pretokenize(const std::string& text, BpePre pre) {
+    if (pre == BpePre::Legacy) return pretokenize(text);
+    const std::vector<Cp> c = decode_utf8(text);
+    std::vector<std::pair<size_t, size_t>> spans;
+    switch (pre) {
+        case BpePre::Qwen2:  split_llama3(c, 0, c.size(), 1, spans); break;
+        case BpePre::Llama3: split_llama3(c, 0, c.size(), 3, spans); break;
+        case BpePre::SmolLM: {
+            size_t i = 0;
+            while (i < c.size()) {
+                if (c[i].cls == CpClass::Number) { spans.push_back({i, i + 1}); ++i; continue; }
+                size_t j = i;
+                while (j < c.size() && c[j].cls != CpClass::Number) ++j;
+                split_gpt2(c, i, j, spans);
+                i = j;
+            }
+            break;
+        }
+        case BpePre::Legacy: break;
+    }
+    std::vector<std::string> out;
+    out.reserve(spans.size());
+    for (const auto& sp : spans) {
+        const size_t from = c[sp.first].off;
+        const size_t to = sp.second < c.size() ? c[sp.second].off : text.size();
+        out.push_back(text.substr(from, to - from));
+    }
+    return out;
+}
+
 std::vector<int64_t> Tokenizer::encode_bpe(const std::string& text) const {
     std::vector<int64_t> out;
-    for (const std::string& chunk : pretokenize(text)) {
+    for (const std::string& chunk : bpe_pretokenize(text, pre_)) {
         // map bytes -> unicode symbols
         std::vector<std::string> syms;
         for (unsigned char b : chunk) syms.push_back(byte_to_unicode_[b]);

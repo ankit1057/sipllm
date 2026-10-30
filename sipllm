@@ -15,7 +15,7 @@ set -eu
 SIPLLM_HOME="${SIPLLM_HOME:-$HOME/.sipllm}"
 MODELS_DIR="$SIPLLM_HOME/models"
 REGISTRY_FILE="$SIPLLM_HOME/registry.conf"
-VERSION="0.6.0"
+VERSION="0.7.0"
 
 mkdir -p "$MODELS_DIR"
 

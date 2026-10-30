@@ -20,6 +20,7 @@ class ManagedModel {
     this.task,
     this.error,
     this.imported = false,
+    this.duplicateOf,
   });
 
   final String id;
@@ -44,6 +45,10 @@ class ManagedModel {
 
   String? error;
   final bool imported;
+
+  /// For an imported file that is a second copy of a catalog model (its other
+  /// file name): that model's name. Shown, never acted on.
+  final String? duplicateOf;
 
   bool get isInstalled => status == ModelStatus.installed;
   bool get isBusy =>

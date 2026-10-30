@@ -1,0 +1,1487 @@
+{
+"package": "com.android.settings",
+"nodes": [
+{
+"i": 0,
+"p": -1,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 1,
+"p": 0,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 2,
+"p": 1,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 3,
+"p": 2,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 4,
+"p": 3,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 5,
+"p": 4,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 6,
+"p": 5,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 7,
+"p": 6,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 8,
+"p": 7,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 9,
+"p": 8,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 10,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 11,
+"p": 10,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 12,
+"p": 11,
+"text": "",
+"desc": "",
+"cls": "RecyclerView",
+"click": false,
+"edit": false,
+"scroll": true,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+],
+"more_down": false,
+"more_up": true
+},
+{
+"i": 13,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+540,
+172
+]
+},
+{
+"i": 14,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+540,
+107,
+1080,
+172
+]
+},
+{
+"i": 15,
+"p": 14,
+"text": "Dimensity 900 Octa-core",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+558,
+107,
+984,
+136
+]
+},
+{
+"i": 16,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+172,
+540,
+357
+]
+},
+{
+"i": 17,
+"p": 16,
+"text": "Battery capacity",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+208,
+324,
+251
+]
+},
+{
+"i": 18,
+"p": 16,
+"text": "4500 mAh (TYP)",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+263,
+414,
+321
+]
+},
+{
+"i": 19,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+540,
+172,
+1080,
+357
+]
+},
+{
+"i": 20,
+"p": 19,
+"text": "Screen size",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+558,
+208,
+723,
+251
+]
+},
+{
+"i": 21,
+"p": 19,
+"text": "16.33 cm",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+558,
+263,
+736,
+321
+]
+},
+{
+"i": 22,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+357,
+1080,
+549
+]
+},
+{
+"i": 23,
+"p": 22,
+"text": "RAM",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+357,
+219,
+441
+]
+},
+{
+"i": 24,
+"p": 22,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+453,
+984,
+549
+]
+},
+{
+"i": 25,
+"p": 24,
+"text": "8.00\u00a0GB",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+458,
+247,
+508
+]
+},
+{
+"i": 26,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+549,
+1080,
+840
+]
+},
+{
+"i": 27,
+"p": 26,
+"text": "Cameras",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+549,
+224,
+628
+]
+},
+{
+"i": 28,
+"p": 26,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+640,
+984,
+698
+]
+},
+{
+"i": 29,
+"p": 28,
+"text": "Front",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+640,
+196,
+698
+]
+},
+{
+"i": 30,
+"p": 28,
+"text": "16MP",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+202,
+640,
+315,
+698
+]
+},
+{
+"i": 31,
+"p": 26,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+710,
+984,
+816
+]
+},
+{
+"i": 32,
+"p": 31,
+"text": "Rear",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+710,
+184,
+768
+]
+},
+{
+"i": 33,
+"p": 31,
+"text": "64MP+8MP+2MP",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+190,
+710,
+529,
+768
+]
+},
+{
+"i": 34,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+840,
+1080,
+888
+]
+},
+{
+"i": 35,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+888,
+1080,
+1068
+]
+},
+{
+"i": 36,
+"p": 35,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+926,
+810,
+1054
+]
+},
+{
+"i": 37,
+"p": 36,
+"text": "Android version",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+961,
+810,
+1019
+]
+},
+{
+"i": 38,
+"p": 35,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+810,
+928,
+984,
+1052
+]
+},
+{
+"i": 39,
+"p": 38,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+810,
+928,
+984,
+1052
+]
+},
+{
+"i": 40,
+"p": 39,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+810,
+964,
+924,
+1016
+]
+},
+{
+"i": 41,
+"p": 40,
+"text": "13",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+810,
+964,
+924,
+1016
+]
+},
+{
+"i": 42,
+"p": 39,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+969,
+984,
+1011
+]
+},
+{
+"i": 43,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1068,
+1080,
+1224
+]
+},
+{
+"i": 44,
+"p": 43,
+"text": "Version",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1082,
+924,
+1210
+]
+},
+{
+"i": 45,
+"p": 43,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1125,
+984,
+1167
+]
+},
+{
+"i": 46,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1224,
+1080,
+1380
+]
+},
+{
+"i": 47,
+"p": 46,
+"text": "Legal information",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1238,
+924,
+1366
+]
+},
+{
+"i": 48,
+"p": 46,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1281,
+984,
+1323
+]
+},
+{
+"i": 49,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1380,
+1080,
+1536
+]
+},
+{
+"i": 50,
+"p": 49,
+"text": "Status",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1394,
+924,
+1522
+]
+},
+{
+"i": 51,
+"p": 49,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1437,
+984,
+1479
+]
+},
+{
+"i": 52,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1536,
+1080,
+1716
+]
+},
+{
+"i": 53,
+"p": 52,
+"text": "Instructions",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1550,
+924,
+1678
+]
+},
+{
+"i": 54,
+"p": 52,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1593,
+984,
+1635
+]
+},
+{
+"i": 55,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1716,
+1080,
+1764
+]
+},
+{
+"i": 56,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1764,
+1080,
+1944
+]
+},
+{
+"i": 57,
+"p": 56,
+"text": "Experience improvement programs",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1802,
+924,
+1930
+]
+},
+{
+"i": 58,
+"p": 56,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1845,
+984,
+1887
+]
+},
+{
+"i": 59,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1944,
+1080,
+2124
+]
+},
+{
+"i": 60,
+"p": 59,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1944,
+924,
+2124
+]
+},
+{
+"i": 61,
+"p": 60,
+"text": "Award",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1979,
+218,
+2037
+]
+},
+{
+"i": 62,
+"p": 60,
+"text": "OxygenOS Contributors",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+2046,
+429,
+2089
+]
+},
+{
+"i": 63,
+"p": 59,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+2013,
+984,
+2055
+]
+},
+{
+"i": 64,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+2124,
+1080,
+2245
+]
+},
+{
+"i": 65,
+"p": 64,
+"text": "Regulatory",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+2138,
+924,
+2245
+]
+},
+{
+"i": 66,
+"p": 64,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+2181,
+984,
+2223
+]
+},
+{
+"i": 67,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+289
+]
+},
+{
+"i": 68,
+"p": 67,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+287
+]
+},
+{
+"i": 69,
+"p": 68,
+"text": "",
+"desc": "Navigate up",
+"cls": "ImageButton",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+18,
+137,
+174,
+287
+]
+},
+{
+"i": 70,
+"p": 68,
+"text": "About device",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+174,
+178,
+921,
+243
+]
+},
+{
+"i": 71,
+"p": 68,
+"text": "",
+"desc": "",
+"cls": "LinearLayoutCompat",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+921,
+137,
+1047,
+287
+]
+},
+{
+"i": 72,
+"p": 71,
+"text": "",
+"desc": "Share",
+"cls": "TextView",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+921,
+137,
+1047,
+287
+]
+},
+{
+"i": 73,
+"p": 67,
+"text": "",
+"desc": "",
+"cls": "View",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+287,
+1080,
+289
+]
+}
+]
+}

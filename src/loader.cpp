@@ -487,14 +487,23 @@ void LayerLoader::worker_loop() {
             // touches the buffers, which the slot's new owner may be reading.
             if (slots_[job.slot].ticket != job.ticket) continue;
         }
-        fill_slot(slots_[job.slot], job.layer);   // I/O + dequant, unlocked
+        // A read error must reach the caller of loadLayer. Escaping this
+        // thread, it would std::terminate the whole process.
+        std::exception_ptr err;
+        try {
+            fill_slot(slots_[job.slot], job.layer);   // I/O + dequant, unlocked
+        } catch (...) {
+            err = std::current_exception();
+        }
         {
             std::lock_guard<std::mutex> lk(mutex_);
             // Re-claimed mid-fill: the newer job refills the slot, so only the
-            // current owner may mark it Ready.
-            if (slots_[job.slot].ticket == job.ticket)
-                slots_[job.slot].state = Slot::State::Ready;
-            stats_.layers_loaded += 1;
+            // current owner may mark it Ready (or Failed).
+            if (slots_[job.slot].ticket == job.ticket) {
+                slots_[job.slot].state = err ? Slot::State::Failed : Slot::State::Ready;
+                slots_[job.slot].error = err;
+            }
+            if (!err) stats_.layers_loaded += 1;
         }
         cv_ready_.notify_all();
     }
@@ -506,6 +515,7 @@ void LayerLoader::claim(int slot, int layer, bool front) {
     Slot& s = slots_[slot];
     s.layer  = layer;
     s.state  = Slot::State::Loading;
+    s.error  = nullptr;
     s.ticket += 1;
     if (front) jobs_.push_front({slot, layer, s.ticket});
     else       jobs_.push_back({slot, layer, s.ticket});
@@ -514,7 +524,9 @@ void LayerLoader::claim(int slot, int layer, bool front) {
 
 void LayerLoader::enqueue(int slot, int layer) {
     // caller holds mutex_. Already claimed for `layer` (Loading or Ready): done.
-    if (slots_[slot].layer == layer && slots_[slot].state != Slot::State::Empty) return;
+    // Empty or Failed: claim it again.
+    if (slots_[slot].layer == layer && (slots_[slot].state == Slot::State::Loading ||
+                                        slots_[slot].state == Slot::State::Ready)) return;
     claim(slot, layer, /*front=*/false);
 }
 
@@ -533,7 +545,8 @@ bool LayerLoader::loadLayer(int layer) {
     if (!opt_.async || opt_.n_buffers == 1) {
         // Synchronous single-buffer path: strictly one block resident.
         Slot& s = slots_[0];
-        if (s.layer != layer) { fill_slot(s, layer); s.layer = layer; stats_.layers_loaded += 1; s.state = Slot::State::Ready; stats_.prefetch_misses += 1; }
+        // Unlabel first: a read that throws mid-fill leaves no false hit behind.
+        if (s.layer != layer) { s.layer = -1; fill_slot(s, layer); s.layer = layer; stats_.layers_loaded += 1; s.state = Slot::State::Ready; stats_.prefetch_misses += 1; }
         else stats_.prefetch_hits += 1;
         current_ = 0;
         active_ = &slots_[0];
@@ -564,8 +577,17 @@ bool LayerLoader::loadLayer(int layer) {
     // cannot move while we wait, and a stale job can never satisfy it.
     const uint64_t ticket = slots_[s].ticket;
     cv_ready_.wait(lk, [&] {
-        return slots_[s].ticket == ticket && slots_[s].state == Slot::State::Ready;
+        return slots_[s].ticket == ticket && (slots_[s].state == Slot::State::Ready ||
+                                              slots_[s].state == Slot::State::Failed);
     });
+    if (slots_[s].state == Slot::State::Failed) {
+        // The read failed: free the slot for a retry and report it here.
+        std::exception_ptr err = slots_[s].error;
+        slots_[s].error = nullptr;
+        slots_[s].state = Slot::State::Empty;
+        slots_[s].layer = -1;
+        std::rethrow_exception(err);
+    }
     current_ = s;
     active_ = &slots_[current_];
 

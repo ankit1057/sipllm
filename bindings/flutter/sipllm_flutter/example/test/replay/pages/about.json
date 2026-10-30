@@ -1,0 +1,1367 @@
+{
+"package": "com.android.settings",
+"nodes": [
+{
+"i": 0,
+"p": -1,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 1,
+"p": 0,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 2,
+"p": 1,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 3,
+"p": 2,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 4,
+"p": 3,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 5,
+"p": 4,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 6,
+"p": 5,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 7,
+"p": 6,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 8,
+"p": 7,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 9,
+"p": 8,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 10,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 11,
+"p": 10,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 12,
+"p": 11,
+"text": "",
+"desc": "",
+"cls": "RecyclerView",
+"click": false,
+"edit": false,
+"scroll": true,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+],
+"more_down": true,
+"more_up": false
+},
+{
+"i": 13,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+48,
+339,
+1032,
+711
+]
+},
+{
+"i": 14,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+108,
+411,
+570,
+507
+]
+},
+{
+"i": 15,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+108,
+531,
+352,
+580
+]
+},
+{
+"i": 16,
+"p": 15,
+"text": "OxygenOS",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+108,
+531,
+273,
+580
+]
+},
+{
+"i": 17,
+"p": 15,
+"text": "13.0",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+282,
+531,
+352,
+580
+]
+},
+{
+"i": 18,
+"p": 13,
+"text": "Official version",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+108,
+592,
+347,
+641
+]
+},
+{
+"i": 19,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+48,
+759,
+528,
+1095
+]
+},
+{
+"i": 20,
+"p": 19,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+807,
+168,
+879
+]
+},
+{
+"i": 21,
+"p": 19,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+915,
+342,
+973
+]
+},
+{
+"i": 22,
+"p": 21,
+"text": "Device name",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+915,
+342,
+973
+]
+},
+{
+"i": 23,
+"p": 19,
+"text": "OnePlus Nord CE 2",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+979,
+415,
+1031
+]
+},
+{
+"i": 24,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+552,
+759,
+1032,
+1095
+]
+},
+{
+"i": 25,
+"p": 24,
+"text": "",
+"desc": "",
+"cls": "ProgressBar",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+600,
+843,
+984,
+855
+]
+},
+{
+"i": 26,
+"p": 24,
+"text": "Storage",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+600,
+915,
+748,
+973
+]
+},
+{
+"i": 27,
+"p": 24,
+"text": "119\u00a0GB\u00a0/\u00a0128\u00a0GB",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+600,
+979,
+878,
+1031
+]
+},
+{
+"i": 28,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1095,
+1080,
+1143
+]
+},
+{
+"i": 29,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1143,
+540,
+1420
+]
+},
+{
+"i": 30,
+"p": 29,
+"text": "Model",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1215,
+185,
+1258
+]
+},
+{
+"i": 31,
+"p": 29,
+"text": "IV2201",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1270,
+232,
+1328
+]
+},
+{
+"i": 32,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+540,
+1143,
+1080,
+1420
+]
+},
+{
+"i": 33,
+"p": 32,
+"text": "Processor",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+558,
+1215,
+704,
+1258
+]
+},
+{
+"i": 34,
+"p": 32,
+"text": "Dimensity 900 Octa-core",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+558,
+1270,
+984,
+1384
+]
+},
+{
+"i": 35,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1420,
+540,
+1605
+]
+},
+{
+"i": 36,
+"p": 35,
+"text": "Battery capacity",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1456,
+324,
+1499
+]
+},
+{
+"i": 37,
+"p": 35,
+"text": "4500 mAh (TYP)",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1511,
+414,
+1569
+]
+},
+{
+"i": 38,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+540,
+1420,
+1080,
+1605
+]
+},
+{
+"i": 39,
+"p": 38,
+"text": "Screen size",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+558,
+1456,
+723,
+1499
+]
+},
+{
+"i": 40,
+"p": 38,
+"text": "16.33 cm",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+558,
+1511,
+736,
+1569
+]
+},
+{
+"i": 41,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1605,
+1080,
+1797
+]
+},
+{
+"i": 42,
+"p": 41,
+"text": "RAM",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1605,
+219,
+1689
+]
+},
+{
+"i": 43,
+"p": 41,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1701,
+984,
+1797
+]
+},
+{
+"i": 44,
+"p": 43,
+"text": "8.00\u00a0GB",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1706,
+247,
+1756
+]
+},
+{
+"i": 45,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1797,
+1080,
+2088
+]
+},
+{
+"i": 46,
+"p": 45,
+"text": "Cameras",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1797,
+224,
+1876
+]
+},
+{
+"i": 47,
+"p": 45,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1888,
+984,
+1946
+]
+},
+{
+"i": 48,
+"p": 47,
+"text": "Front",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1888,
+196,
+1946
+]
+},
+{
+"i": 49,
+"p": 47,
+"text": "16MP",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+202,
+1888,
+315,
+1946
+]
+},
+{
+"i": 50,
+"p": 45,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1958,
+984,
+2064
+]
+},
+{
+"i": 51,
+"p": 50,
+"text": "Rear",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1958,
+184,
+2016
+]
+},
+{
+"i": 52,
+"p": 50,
+"text": "64MP+8MP+2MP",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+190,
+1958,
+529,
+2016
+]
+},
+{
+"i": 53,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+2088,
+1080,
+2136
+]
+},
+{
+"i": 54,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+2136,
+1080,
+2245
+]
+},
+{
+"i": 55,
+"p": 54,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+2174,
+810,
+2245
+]
+},
+{
+"i": 56,
+"p": 55,
+"text": "Android version",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+2209,
+810,
+2245
+]
+},
+{
+"i": 57,
+"p": 54,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+810,
+2176,
+984,
+2245
+]
+},
+{
+"i": 58,
+"p": 57,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+810,
+2176,
+984,
+2245
+]
+},
+{
+"i": 59,
+"p": 58,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+810,
+2212,
+924,
+2245
+]
+},
+{
+"i": 60,
+"p": 59,
+"text": "13",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+810,
+2212,
+924,
+2245
+]
+},
+{
+"i": 61,
+"p": 58,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+2217,
+984,
+2245
+]
+},
+{
+"i": 62,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+289
+]
+},
+{
+"i": 63,
+"p": 62,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+287
+]
+},
+{
+"i": 64,
+"p": 63,
+"text": "",
+"desc": "Navigate up",
+"cls": "ImageButton",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+18,
+137,
+174,
+287
+]
+},
+{
+"i": 65,
+"p": 63,
+"text": "About device",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+174,
+178,
+921,
+243
+]
+},
+{
+"i": 66,
+"p": 63,
+"text": "",
+"desc": "",
+"cls": "LinearLayoutCompat",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+921,
+137,
+1047,
+287
+]
+},
+{
+"i": 67,
+"p": 66,
+"text": "",
+"desc": "Share",
+"cls": "TextView",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+921,
+137,
+1047,
+287
+]
+}
+]
+}

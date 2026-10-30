@@ -1,0 +1,1305 @@
+{
+"package": "com.android.settings",
+"nodes": [
+{
+"i": 0,
+"p": -1,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 1,
+"p": 0,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 2,
+"p": 1,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 3,
+"p": 2,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 4,
+"p": 3,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 5,
+"p": 4,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 6,
+"p": 5,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 7,
+"p": 5,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 8,
+"p": 7,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 9,
+"p": 8,
+"text": "",
+"desc": "",
+"cls": "RecyclerView",
+"click": false,
+"edit": false,
+"scroll": true,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+2245
+]
+},
+{
+"i": 10,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+668,
+1080,
+890
+]
+},
+{
+"i": 11,
+"p": 10,
+"text": "",
+"desc": "",
+"cls": "RecyclerView",
+"click": false,
+"edit": false,
+"scroll": true,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+668,
+1080,
+890
+]
+},
+{
+"i": 12,
+"p": 11,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+48,
+668,
+852,
+890
+]
+},
+{
+"i": 13,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+84,
+692,
+258,
+866
+]
+},
+{
+"i": 14,
+"p": 12,
+"text": "Flexible windows",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+306,
+704,
+597,
+756
+]
+},
+{
+"i": 15,
+"p": 12,
+"text": "Watch animated tutorials to learn how to use floating windows.",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+306,
+768,
+780,
+855
+]
+},
+{
+"i": 16,
+"p": 11,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+876,
+668,
+1080,
+890
+]
+},
+{
+"i": 17,
+"p": 16,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+912,
+692,
+1080,
+866
+]
+},
+{
+"i": 18,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+938,
+1080,
+1199
+]
+},
+{
+"i": 19,
+"p": 18,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1014,
+204,
+1122
+]
+},
+{
+"i": 20,
+"p": 19,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1014,
+204,
+1122
+]
+},
+{
+"i": 21,
+"p": 18,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+252,
+1010,
+984,
+1127
+]
+},
+{
+"i": 22,
+"p": 21,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+252,
+1010,
+984,
+1068
+]
+},
+{
+"i": 23,
+"p": 22,
+"text": "Log In to Your OnePlus Account",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+252,
+1010,
+864,
+1068
+]
+},
+{
+"i": 24,
+"p": 22,
+"text": "NEW",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+888,
+1021,
+982,
+1058
+]
+},
+{
+"i": 25,
+"p": 21,
+"text": "Unlock your exclusive benefits",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+252,
+1080,
+724,
+1127
+]
+},
+{
+"i": 26,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1199,
+1080,
+1247
+]
+},
+{
+"i": 27,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1247,
+1080,
+1439
+]
+},
+{
+"i": 28,
+"p": 27,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1307,
+192,
+1403
+]
+},
+{
+"i": 29,
+"p": 27,
+"text": "Wi-Fi",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+240,
+1291,
+339,
+1419
+]
+},
+{
+"i": 30,
+"p": 27,
+"text": "ExampleNet",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+387,
+1294,
+912,
+1416
+]
+},
+{
+"i": 31,
+"p": 27,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1334,
+984,
+1376
+]
+},
+{
+"i": 32,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1439,
+1080,
+1607
+]
+},
+{
+"i": 33,
+"p": 32,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1475,
+192,
+1571
+]
+},
+{
+"i": 34,
+"p": 32,
+"text": "Mobile network",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+240,
+1459,
+912,
+1587
+]
+},
+{
+"i": 35,
+"p": 32,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1502,
+984,
+1544
+]
+},
+{
+"i": 36,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1607,
+1080,
+1775
+]
+},
+{
+"i": 37,
+"p": 36,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1643,
+192,
+1739
+]
+},
+{
+"i": 38,
+"p": 36,
+"text": "Bluetooth",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+240,
+1627,
+425,
+1755
+]
+},
+{
+"i": 39,
+"p": 36,
+"text": "Off",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+473,
+1630,
+912,
+1752
+]
+},
+{
+"i": 40,
+"p": 36,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1670,
+984,
+1712
+]
+},
+{
+"i": 41,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1775,
+1080,
+1967
+]
+},
+{
+"i": 42,
+"p": 41,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1811,
+192,
+1907
+]
+},
+{
+"i": 43,
+"p": 41,
+"text": "Connection & sharing",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+240,
+1795,
+912,
+1923
+]
+},
+{
+"i": 44,
+"p": 41,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1838,
+984,
+1880
+]
+},
+{
+"i": 45,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1967,
+1080,
+2015
+]
+},
+{
+"i": 46,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+2015,
+1080,
+2207
+]
+},
+{
+"i": 47,
+"p": 46,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+2075,
+192,
+2171
+]
+},
+{
+"i": 48,
+"p": 46,
+"text": "Wallpapers & style",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+240,
+2059,
+912,
+2187
+]
+},
+{
+"i": 49,
+"p": 46,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+2102,
+984,
+2144
+]
+},
+{
+"i": 50,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+2207,
+1080,
+2245
+]
+},
+{
+"i": 51,
+"p": 50,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+2243,
+192,
+2245
+]
+},
+{
+"i": 52,
+"p": 50,
+"text": "Home screen & Lock screen",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+240,
+2227,
+912,
+2245
+]
+},
+{
+"i": 53,
+"p": 50,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+0,
+0
+]
+},
+{
+"i": 54,
+"p": 9,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+0,
+0
+]
+},
+{
+"i": 55,
+"p": 54,
+"text": "Display & brightness",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+0,
+0
+]
+},
+{
+"i": 56,
+"p": 5,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+620
+]
+},
+{
+"i": 57,
+"p": 56,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+287
+]
+},
+{
+"i": 58,
+"p": 57,
+"text": "Settings",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+72,
+178,
+1029,
+243
+]
+},
+{
+"i": 59,
+"p": 56,
+"text": "Settings",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+287,
+1080,
+518
+]
+},
+{
+"i": 60,
+"p": 56,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+72,
+518,
+1008,
+620
+]
+},
+{
+"i": 61,
+"p": 60,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+72,
+518,
+1008,
+620
+]
+},
+{
+"i": 62,
+"p": 61,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+72,
+518,
+1008,
+620
+]
+},
+{
+"i": 63,
+"p": 62,
+"text": "",
+"desc": "Search",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+108,
+539,
+168,
+599
+]
+},
+{
+"i": 64,
+"p": 62,
+"text": "Search",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+168,
+518,
+1008,
+620
+]
+}
+]
+}

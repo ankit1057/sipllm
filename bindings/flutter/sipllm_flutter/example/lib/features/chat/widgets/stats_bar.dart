@@ -25,6 +25,13 @@ class StatsBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = stats;
     final chips = <Widget>[];
+    // Near the front: the row scrolls sideways, and at the end it was off
+    // screen on a phone.
+    final threadsChip = _chip(
+      LucideIcons.cpu,
+      threads == 0 ? 'auto threads' : '$threads threads',
+      AppTheme.textSec,
+    );
 
     if (s != null) {
       chips.add(_chip(
@@ -32,6 +39,7 @@ class StatsBar extends StatelessWidget {
         '${s.decodeTokensPerSecond.toStringAsFixed(1)} tok/s',
         AppTheme.primary,
       ));
+      chips.add(threadsChip);
       chips.add(_chip(
         LucideIcons.timer,
         'TTFT ${_secs(s.ttftSeconds)}',
@@ -39,7 +47,7 @@ class StatsBar extends StatelessWidget {
       ));
       chips.add(_chip(
         LucideIcons.memoryStick,
-        '${s.peakRssMiB} MB',
+        formatMiB(s.peakRssMiB),
         AppTheme.textSec,
       ));
       chips.add(_chip(
@@ -52,15 +60,10 @@ class StatsBar extends StatelessWidget {
         'ctx ${s.ctxUsed}/${s.ctxMax}',
         AppTheme.textSec,
       ));
-    } else if (generating) {
-      chips.add(_chip(LucideIcons.loader, 'generating…', AppTheme.primary));
+    } else {
+      if (generating) chips.add(_chip(LucideIcons.loader, 'generating…', AppTheme.primary));
+      chips.add(threadsChip);
     }
-
-    chips.add(_chip(
-      LucideIcons.cpu,
-      threads == 0 ? 'auto threads' : '$threads threads',
-      AppTheme.textSec,
-    ));
 
     return Container(
       width: double.infinity,
@@ -83,6 +86,9 @@ class StatsBar extends StatelessWidget {
   }
 
   String _secs(double v) => v <= 0 ? '—' : '${(v * 1000).toStringAsFixed(0)} ms';
+
+  /// Whole MB ("2177 MB"); peak RSS arrived as a raw double ("2177.015625 MB").
+  static String formatMiB(double mib) => '${mib.round()} MB';
 
   Widget _chip(IconData icon, String label, Color color) {
     return Container(

@@ -99,7 +99,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                 min: 0,
                 max: maxThreads.toDouble(),
                 divisions: maxThreads,
-                display: c.threads == 0 ? 'auto' : '${c.threads}',
+                display: c.threads == 0 ? c.autoThreadsLabel : '${c.threads}',
                 onChanged: (v) => setState(() => c.threads = v.round()),
               ),
               SwitchListTile(

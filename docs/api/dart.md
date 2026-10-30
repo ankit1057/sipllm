@@ -208,6 +208,61 @@ enum Pooling { last(kPoolLast), mean(kPoolMean); final int code; }
 enum TokenizerKind { sentencePiece, bpe, byte }
 ```
 
+## Agent (since v0.7.0)
+
+### `SipllmAgent`
+
+A Nishachar agent bound to one loaded `SipllmRuntime`. The engine drives the conversation and parses tool calls. Your `execute` function runs each tool.
+
+```dart
+final agent = await SipllmAgent.create(rt, tools: const [
+  AgentTool('read_file', 'Read a text file.', [AgentToolParam('path')]),
+]);
+await for (final e in agent.run('What does notes.txt say?', (call) async {
+  return AgentToolResult(await File(call.arguments['path']!).readAsString());
+})) {
+  switch (e) {
+    case AgentTokenEvent(:final piece): stdout.write(piece);
+    case AgentToolCallEvent(:final call): print('calling ${call.name}');
+    case AgentToolResultEvent(:final result): print('ran: ${result.text}');
+    case AgentFinalEvent(:final text): print('answer: $text');
+    case AgentStoppedEvent(:final reason): print('stopped: $reason');
+  }
+}
+await agent.dispose();
+```
+
+```dart
+static Future<SipllmAgent> create(SipllmRuntime runtime, {
+  required List<AgentTool> tools,
+  int maxSteps = 8,
+  int maxNewTokens = 256,
+  AgentToolFormat format = AgentToolFormat.auto,
+  bool stopOnToolError = false,
+  String? systemPreamble,
+});
+Stream<AgentEvent> run(String goal, AgentToolExecutor execute);
+void cancel();
+Future<void> dispose();
+bool get isRunning;
+```
+
+- **The runtime is busy during a run.** `SipllmRuntime.generate` calls are refused until the run ends.
+- **The agent shares the runtime's KV cache.** Call `SipllmRuntime.reset()` before chatting on it again.
+- **A throw from `execute`** is reported to the model as an error result.
+- **`AgentToolResultEvent` reports what the tool actually returned,** separately from what the model later says it did.
+
+### Agent types
+
+| Type | Fields |
+|:---|:---|
+| `AgentTool(name, description, params)` | The tool's name, its description, and a list of `AgentToolParam` |
+| `AgentToolParam(name, {type, required, description})` | `type` is an `AgentParamType`: `string`, `integer`, `number`, `boolean` or `stringArray` |
+| `AgentToolCall` | `step`, `name`, `arguments` (`Map<String, String>`), `rawJson` |
+| `AgentToolResult(text, {ok})` | `ok = false` means the model sees `text` as an error. `AgentToolResult.error(text)` is a shortcut. |
+| `AgentToolFormat` | `auto`, `compact`, `qwen` |
+| `AgentStopReason` | `maxSteps`, `empty`, `toolError`, `cancelled`, `error` |
+
 ## Device / architecture
 
 ### `SipllmDevice`
