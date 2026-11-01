@@ -9,16 +9,68 @@ import 'widgets/model_tile.dart';
 /// The Ollama-style model manager: browse the catalog, download / import GGUFs,
 /// verify or delete them, push one to a paired watch, and load the active model
 /// into the inference runtime. A thin `Consumer` over [SipllmController].
-class ModelsScreen extends StatelessWidget {
+///
+/// The models folder is re-read when this screen opens, when the app comes
+/// back to the foreground, on pull-to-refresh and from the refresh button, so
+/// a GGUF copied in while the app runs shows up without a restart.
+class ModelsScreen extends StatefulWidget {
   const ModelsScreen({super.key});
+
+  @override
+  State<ModelsScreen> createState() => _ModelsScreenState();
+}
+
+class _ModelsScreenState extends State<ModelsScreen> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // After the first frame: a rescan notifies listeners, which must not
+    // happen while this tree is being built.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<SipllmController>().rescanModels();
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      context.read<SipllmController>().rescanModels();
+    }
+  }
 
   Future<void> _import(BuildContext context) async {
     final controller = context.read<SipllmController>();
     final messenger = ScaffoldMessenger.of(context);
-    final error = await controller.importModel();
-    messenger.showSnackBar(
-      SnackBar(content: Text(error ?? 'Imported')),
-    );
+    try {
+      final message = await controller.importModel();
+      // null: the picker was cancelled.
+      if (message != null) messenger.showSnackBar(SnackBar(content: Text(message)));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Import failed: $e')));
+    }
+  }
+
+  Future<void> _refresh(BuildContext context) async {
+    final controller = context.read<SipllmController>();
+    final messenger = ScaffoldMessenger.of(context);
+    final before = controller.models.length;
+    await controller.rescanModels();
+    final added = controller.models.length - before;
+    messenger.showSnackBar(SnackBar(
+      duration: const Duration(seconds: 2),
+      content: Text(added > 0
+          ? 'Found $added new model${added == 1 ? '' : 's'}'
+          : added < 0
+              ? 'Models folder re-read: ${-added} removed'
+              : 'Models folder re-read: no new models'),
+    ));
   }
 
   @override
@@ -29,6 +81,11 @@ class ModelsScreen extends StatelessWidget {
         backgroundColor: AppTheme.background,
         title: const Text('Models'),
         actions: [
+          IconButton(
+            icon: const Icon(LucideIcons.refreshCw),
+            tooltip: 'Rescan models folder',
+            onPressed: () => _refresh(context),
+          ),
           IconButton(
             icon: const Icon(LucideIcons.filePlus),
             tooltip: 'Import GGUF',
@@ -46,14 +103,25 @@ class ModelsScreen extends StatelessWidget {
                 totalBytes: controller.totalStorageBytes,
               ),
               Expanded(
-                child: models.isEmpty
-                    ? const _EmptyState()
-                    : ListView.builder(
-                        padding: const EdgeInsets.only(top: 4, bottom: 24),
-                        itemCount: models.length,
-                        itemBuilder: (context, i) =>
-                            ModelTile(model: models[i]),
-                      ),
+                child: RefreshIndicator(
+                  onRefresh: () => controller.rescanModels(),
+                  child: models.isEmpty
+                      // Scrollable, so pull-to-refresh works on an empty list.
+                      ? ListView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          children: const [
+                            SizedBox(height: 120),
+                            _EmptyState(),
+                          ],
+                        )
+                      : ListView.builder(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.only(top: 4, bottom: 24),
+                          itemCount: models.length,
+                          itemBuilder: (context, i) =>
+                              ModelTile(model: models[i]),
+                        ),
+                ),
               ),
             ],
           );

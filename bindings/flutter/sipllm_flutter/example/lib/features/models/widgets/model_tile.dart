@@ -107,6 +107,13 @@ class ModelTile extends StatelessWidget {
                         ),
                       ),
                     ],
+                    if (model.duplicateOf != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        'Second copy of ${model.duplicateOf} (same model, other file name)',
+                        style: const TextStyle(color: Colors.amber, fontSize: 11),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -196,13 +203,16 @@ class ModelTile extends StatelessWidget {
 
   Widget _loadButton(BuildContext context, SipllmController controller) {
     final isLoaded = controller.loadedModel?.id == model.id;
-    final busy = controller.loading;
+    final busy = controller.loading || controller.unloading;
     if (isLoaded) {
-      return _iconButton(
-        icon: LucideIcons.cpu,
-        tooltip: 'Loaded',
-        color: AppTheme.primary,
-        onTap: null,
+      return TextButton.icon(
+        onPressed: busy ? null : () => _unload(context),
+        icon: const Icon(LucideIcons.power, size: 16),
+        label: const Text('Unload'),
+        style: TextButton.styleFrom(
+          foregroundColor: AppTheme.primary,
+          visualDensity: VisualDensity.compact,
+        ),
       );
     }
     if (busy) {
@@ -222,11 +232,78 @@ class ModelTile extends StatelessWidget {
       icon: LucideIcons.play,
       tooltip: 'Load',
       color: AppTheme.primary,
-      onTap: () => context.read<SipllmController>().loadModel(model),
+      onTap: () => _load(context),
     );
   }
 
+  // Loading or unloading closes the current model, which stops whatever is
+  // using it. Say so first instead of silently ending an agent run or reply.
+  Future<bool> _confirmInterrupt(BuildContext context, String action) async {
+    final c = context.read<SipllmController>();
+    final what = c.agentRunning
+        ? 'the agent run'
+        : c.benchmarking
+            ? 'the benchmark'
+            : c.generating
+                ? 'the reply being generated'
+                : null;
+    if (what == null) return true;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: Text('$action now?', style: const TextStyle(color: AppTheme.textMain)),
+        content: Text('This stops $what.', style: const TextStyle(color: AppTheme.textSec)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: AppTheme.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(action, style: const TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  // A failed load used to end as an unhandled Future error: nothing shown.
+  Future<void> _load(BuildContext context) async {
+    final controller = context.read<SipllmController>();
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (!await _confirmInterrupt(context, 'Load')) return;
+    try {
+      await controller.loadModel(model);
+    } catch (e) {
+      messenger?.showSnackBar(
+        SnackBar(content: Text('Could not load ${model.name}: $e')),
+      );
+    }
+  }
+
+  Future<void> _unload(BuildContext context) async {
+    final controller = context.read<SipllmController>();
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (!await _confirmInterrupt(context, 'Unload')) return;
+    try {
+      await controller.unloadModel();
+      messenger?.showSnackBar(
+        SnackBar(content: Text('Unloaded ${model.name}')),
+      );
+    } catch (e) {
+      messenger?.showSnackBar(
+        SnackBar(content: Text('Could not unload ${model.name}: $e')),
+      );
+    }
+  }
+
   Widget _overflowMenu(BuildContext context) {
+    final controller = context.read<SipllmController>();
+    final canUnload = controller.loadedModel?.id == model.id &&
+        !controller.loading &&
+        !controller.unloading;
     return PopupMenuButton<String>(
       icon: const Icon(
         LucideIcons.moreVertical,
@@ -235,16 +312,21 @@ class ModelTile extends StatelessWidget {
       ),
       color: AppTheme.surface,
       onSelected: (value) => _onMenu(context, value),
-      itemBuilder: (context) => const [
-        PopupMenuItem(
+      itemBuilder: (context) => [
+        if (canUnload)
+          const PopupMenuItem(
+            value: 'unload',
+            child: _MenuRow(icon: LucideIcons.power, label: 'Unload'),
+          ),
+        const PopupMenuItem(
           value: 'verify',
           child: _MenuRow(icon: LucideIcons.shieldCheck, label: 'Verify'),
         ),
-        PopupMenuItem(
+        const PopupMenuItem(
           value: 'watch',
           child: _MenuRow(icon: LucideIcons.watch, label: 'Send to Watch'),
         ),
-        PopupMenuItem(
+        const PopupMenuItem(
           value: 'delete',
           child: _MenuRow(
             icon: LucideIcons.trash2,
@@ -260,6 +342,9 @@ class ModelTile extends StatelessWidget {
     final controller = context.read<SipllmController>();
     final messenger = ScaffoldMessenger.of(context);
     switch (value) {
+      case 'unload':
+        await _unload(context);
+        break;
       case 'verify':
         final ok = await controller.verifyModel(model);
         messenger.showSnackBar(

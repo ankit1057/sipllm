@@ -209,6 +209,63 @@ SIPLLM_API int32_t sipllm_embed(sipllm_ctx* ctx, const char* text, int32_t pooli
 ```
 Prefill `text`, pool the final-layer hidden state, L2-normalize into `out` (`embed_dim` floats). `pooling` is `SIPLLM_POOL_*`. Returns dim (`>0`) or `-1`. **Clears KV state** — use a dedicated context for embeddings if you also hold a live conversation.
 
+### Agent (Nishachar), stepped by the caller (since v0.7.0)
+
+The engine keeps the conversation, the chat template, tool-call parsing and the step bound. The caller runs every tool, so nothing executes inside the engine.
+
+```c
+sipllm_agent_params ap;
+sipllm_agent_params_default(&ap);            /* max_steps 8, max_new_tokens 256, AUTO format */
+sipllm_agent* a = sipllm_agent_new(ctx, &ap, err, sizeof err);
+sipllm_agent_add_tool(a, "read_file", "Read a text file.");
+sipllm_agent_add_param(a, "read_file", "path", SIPLLM_PARAM_STRING, 1, "relative path");
+sipllm_agent_start(a, "What does notes.txt say?", err, sizeof err);
+for (;;) {
+  int32_t ev = sipllm_agent_step(a, NULL /* greedy */, cb, user, &stats, err, sizeof err);
+  if (ev != SIPLLM_AGENT_TOOL_CALL) break;   /* FINAL, a stop, or -1 */
+  /* run sipllm_agent_tool_name(a) with sipllm_agent_arg_key/value(a, i) */
+  if (sipllm_agent_submit_result(a, result_text, /*ok=*/1) != 1) break;
+}
+sipllm_agent_free(a);                        /* before sipllm_close(ctx) */
+```
+
+**`sipllm_agent_params`**
+
+| Field | Meaning |
+|:---|:---|
+| `max_steps` | step bound, 0 = 8 |
+| `max_new_tokens` | tokens per step, 0 = 256 |
+| `tool_format` | `SIPLLM_TOOL_FORMAT_AUTO` (the model's own format when its template has one), `_COMPACT` or `_QWEN` (Qwen2.5 `<tools>` / `<tool_response>`) |
+| `stop_on_tool_error` | 0: a failed tool's error is fed back to the model and the run continues |
+| `system_preamble` | `NULL` uses Nishachar's default |
+
+**Calls**
+- **Declare tools:** `sipllm_agent_add_tool` and `sipllm_agent_add_param`.
+  - Call both before `sipllm_agent_start`. Re-adding a tool name replaces it.
+  - Parameter types are `SIPLLM_PARAM_STRING`, `_INT`, `_FLOAT`, `_BOOL` and `_STRING_ARRAY`.
+- **`sipllm_agent_step` generates one model turn.**
+  - It streams pieces through `cb`, and stops at a closing `</tool_call>`.
+  - It reuses the KV cache of the conversation so far, so each step prefills only the new tail.
+  - It returns one of:
+    - `SIPLLM_AGENT_TOOL_CALL`
+    - `_FINAL`: the answer is in `sipllm_agent_text`
+    - `_MAX_STEPS`
+    - `_EMPTY`
+    - `_TOOL_ERROR`
+    - `_CANCELLED`
+    - `-1`: an error, with the message in `err_buf`; the session is unchanged
+- **Read the pending call:**
+  - `sipllm_agent_tool_name`;
+  - `sipllm_agent_tool_args_json`;
+  - `sipllm_agent_arg_count`, `_arg_key(i)` and `_arg_value(i)`, which return top-level keys, with string values unescaped.
+- **`sipllm_agent_submit_result(a, text, ok)` feeds the result back.** `ok = 0` marks it as an error the model should see. It returns:
+  - `1`: the run continues;
+  - `0`: the run ended (see `sipllm_agent_stop_reason`);
+  - `-1`: no call was pending.
+- **Cancelling:** `sipllm_cancel(ctx)`, or a token callback returning 0, stops a step at the next token. Prefill cannot be interrupted.
+- **The agent shares its context's KV cache.** Call `sipllm_reset(ctx)` before chatting on that context again.
+- **String lifetime:** strings returned by the accessors stay valid until the next step, `submit_result`, `start` or `free`.
+
 ### Device / build info (no context required)
 
 ```c

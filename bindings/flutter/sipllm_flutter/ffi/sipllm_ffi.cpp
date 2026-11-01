@@ -8,6 +8,8 @@
 
 #include "llm/runtime.h"
 #include "llm/auto_tuner.h"
+#include "llm/nishachar.h"
+#include "llm/tools.h"
 #include "llm/device_profile.h"
 #include "llm/vulkan_backend.h"
 #include "llm/threadpool.h"
@@ -27,6 +29,17 @@ struct sipllm_ctx {
   std::unique_ptr<Runtime> rt;
   std::atomic<bool> cancel{false};
   int threads = 0;
+};
+
+struct sipllm_agent {
+  sipllm_ctx* ctx = nullptr;
+  AgentConfig cfg;
+  Nishachar tools;                        // schemas only; the caller runs every tool
+  std::vector<ToolDef> defs;              // as declared, until start() registers them
+  std::unique_ptr<AgentSession> session;
+  // Accessor storage: valid until the next step / submit / start / free.
+  std::string text;
+  ToolCall call;
 };
 
 namespace {
@@ -58,6 +71,44 @@ LayerLoader::Options options_from(const sipllm_params& p) {
   opt.stream_lm_head = p.stream_lm_head != 0;
   opt.fast_quant = p.fast_quant != 0;
   return opt;
+}
+
+void fill_stats(sipllm_ctx* ctx, const GenStats& gs, sipllm_stats* stats) {
+  std::memset(stats, 0, sizeof(*stats));
+  stats->load_s = gs.load_s;
+  stats->ttft_s = gs.ttft_s;
+  stats->prefill_s = gs.prefill_s;
+  stats->decode_s = gs.decode_s;
+  stats->prefill_tok_s = gs.prefill_tok_s;
+  stats->decode_tok_s = gs.decode_tok_s;
+  {
+    size_t peak = ctx->rt->peak_rss();
+    stats->peak_rss_bytes = peak ? peak : current_rss_bytes();
+  }
+  stats->weights_resident_bytes = gs.weights_resident_bytes;
+  stats->kv_bytes = gs.kv_bytes;
+  stats->bytes_read = gs.bytes_read;
+  stats->prefetch_hits = gs.prefetch_hits;
+  stats->prefetch_misses = gs.prefetch_misses;
+  stats->pinned_layers = gs.pinned_layers;
+  stats->n_layers = static_cast<int32_t>(ctx->rt->config().n_layers);
+  stats->prompt_tokens = gs.prompt_tokens;
+  stats->gen_tokens = gs.gen_tokens;
+  stats->ctx_used = gs.ctx_used;
+  stats->ctx_max = gs.ctx_max;
+}
+
+SamplerConfig sampler_from(const sipllm_sampler* scfg) {
+  SamplerConfig s;
+  if (scfg) {
+    s.temperature = scfg->temperature;
+    s.top_k = scfg->top_k;
+    s.top_p = scfg->top_p;
+    s.repeat_penalty = scfg->repeat_penalty;
+    s.repeat_last_n = scfg->repeat_last_n;
+    s.seed = scfg->seed;
+  }
+  return s;
 }
 
 int32_t tokenizer_kind_code(Tokenizer::Kind k) {
@@ -183,15 +234,7 @@ int32_t sipllm_generate(sipllm_ctx* ctx, const char* prompt, int32_t max_new,
     return -1;
   }
   ctx->cancel.store(false, std::memory_order_relaxed);
-  SamplerConfig s;
-  if (scfg) {
-    s.temperature = scfg->temperature;
-    s.top_k = scfg->top_k;
-    s.top_p = scfg->top_p;
-    s.repeat_penalty = scfg->repeat_penalty;
-    s.repeat_last_n = scfg->repeat_last_n;
-    s.seed = scfg->seed;
-  }
+  SamplerConfig s = sampler_from(scfg);
   GenStats gs;
   try {
     Runtime::TokenCallback on_token = [&](const std::string& piece, int64_t id) -> bool {
@@ -200,30 +243,7 @@ int32_t sipllm_generate(sipllm_ctx* ctx, const char* prompt, int32_t max_new,
       return true;
     };
     ctx->rt->generate(prompt ? prompt : "", max_new, s, on_token, &gs);
-    if (stats) {
-      std::memset(stats, 0, sizeof(*stats));
-      stats->load_s = gs.load_s;
-      stats->ttft_s = gs.ttft_s;
-      stats->prefill_s = gs.prefill_s;
-      stats->decode_s = gs.decode_s;
-      stats->prefill_tok_s = gs.prefill_tok_s;
-      stats->decode_tok_s = gs.decode_tok_s;
-      {
-        size_t peak = ctx->rt->peak_rss();
-        stats->peak_rss_bytes = peak ? peak : current_rss_bytes();
-      }
-      stats->weights_resident_bytes = gs.weights_resident_bytes;
-      stats->kv_bytes = gs.kv_bytes;
-      stats->bytes_read = gs.bytes_read;
-      stats->prefetch_hits = gs.prefetch_hits;
-      stats->prefetch_misses = gs.prefetch_misses;
-      stats->pinned_layers = gs.pinned_layers;
-      stats->n_layers = static_cast<int32_t>(ctx->rt->config().n_layers);
-      stats->prompt_tokens = gs.prompt_tokens;
-      stats->gen_tokens = gs.gen_tokens;
-      stats->ctx_used = gs.ctx_used;
-      stats->ctx_max = gs.ctx_max;
-    }
+    if (stats) fill_stats(ctx, gs, stats);
     return gs.gen_tokens;
   } catch (const std::exception& e) {
     set_err(err_buf, err_cap, e.what());
@@ -307,7 +327,205 @@ int32_t sipllm_embed(sipllm_ctx* ctx, const char* text, int32_t pooling,
   }
 }
 
-const char* sipllm_version(void) { return "0.6.0"; }
+// ---- agent -----------------------------------------------------------------
+
+void sipllm_agent_params_default(sipllm_agent_params* out) {
+  if (!out) return;
+  std::memset(out, 0, sizeof(*out));
+  out->max_steps = 8;
+  out->max_new_tokens = 256;
+  out->tool_format = SIPLLM_TOOL_FORMAT_AUTO;
+}
+
+sipllm_agent* sipllm_agent_new(sipllm_ctx* ctx, const sipllm_agent_params* p,
+                               char* err_buf, int32_t err_cap) {
+  if (!ctx || !ctx->rt) {
+    set_err(err_buf, err_cap, "null context");
+    return nullptr;
+  }
+  sipllm_agent_params params;
+  if (p) params = *p; else sipllm_agent_params_default(&params);
+  if (params.tool_format < SIPLLM_TOOL_FORMAT_AUTO || params.tool_format > SIPLLM_TOOL_FORMAT_QWEN) {
+    set_err(err_buf, err_cap, "unknown tool_format");
+    return nullptr;
+  }
+  try {
+    auto a = std::unique_ptr<sipllm_agent>(new sipllm_agent());
+    a->ctx = ctx;
+    a->cfg.max_steps = params.max_steps > 0 ? params.max_steps : 8;
+    a->cfg.max_new_tokens = params.max_new_tokens > 0 ? params.max_new_tokens : 256;
+    a->cfg.stop_on_tool_error = params.stop_on_tool_error != 0;
+    if (params.system_preamble) a->cfg.system_preamble = params.system_preamble;
+    a->cfg.style = style_from_model(ctx->rt->config());
+    a->cfg.tool_format = params.tool_format == SIPLLM_TOOL_FORMAT_QWEN    ? ToolPromptFormat::Qwen
+                         : params.tool_format == SIPLLM_TOOL_FORMAT_COMPACT ? ToolPromptFormat::Compact
+                         : tool_format_from_model(ctx->rt->config());
+    return a.release();
+  } catch (const std::exception& e) {
+    set_err(err_buf, err_cap, e.what());
+    return nullptr;
+  }
+}
+
+void sipllm_agent_free(sipllm_agent* a) { delete a; }
+
+static bool agent_running(const sipllm_agent* a) {
+  return a->session && !a->session->finished();
+}
+
+int32_t sipllm_agent_add_tool(sipllm_agent* a, const char* name, const char* description) {
+  if (!a || !name || !*name || agent_running(a)) return -1;
+  for (ToolDef& d : a->defs)
+    if (d.name == name) { d = ToolDef{name, description ? description : "", {}}; return 0; }
+  a->defs.push_back(ToolDef{name, description ? description : "", {}});
+  return 0;
+}
+
+int32_t sipllm_agent_add_param(sipllm_agent* a, const char* tool, const char* name,
+                               int32_t type, int32_t required, const char* description) {
+  if (!a || !tool || !name || !*name || agent_running(a)) return -1;
+  if (type < SIPLLM_PARAM_STRING || type > SIPLLM_PARAM_STRING_ARRAY) return -1;
+  for (ToolDef& d : a->defs) {
+    if (d.name != tool) continue;
+    d.params.push_back(ToolParam{name, static_cast<ToolParamType>(type), required != 0,
+                                 description ? description : "", ""});
+    return 0;
+  }
+  return -1;
+}
+
+int32_t sipllm_agent_start(sipllm_agent* a, const char* goal, char* err_buf, int32_t err_cap) {
+  if (!a) {
+    set_err(err_buf, err_cap, "null agent");
+    return -1;
+  }
+  try {
+    a->session.reset();   // the session refers to `tools`: drop it before re-registering
+    a->tools = Nishachar();
+    for (const ToolDef& d : a->defs)
+      a->tools.add_tool(d, [](const ToolCall&) -> std::string {
+        throw std::runtime_error("tools run in the caller");
+      });
+    a->session = std::make_unique<AgentSession>(a->tools, goal ? goal : "", a->cfg);
+    a->text.clear();
+    a->call = ToolCall{};
+    return 0;
+  } catch (const std::exception& e) {
+    a->session.reset();
+    set_err(err_buf, err_cap, e.what());
+    return -1;
+  }
+}
+
+static int32_t agent_stop_code(const AgentSession& s) {
+  if (!s.finished()) return 0;
+  switch (s.result().stop) {
+    case AgentStop::Done:      return SIPLLM_AGENT_FINAL;
+    case AgentStop::MaxSteps:  return SIPLLM_AGENT_MAX_STEPS;
+    case AgentStop::Empty:     return SIPLLM_AGENT_EMPTY;
+    case AgentStop::ToolError: return SIPLLM_AGENT_TOOL_ERROR;
+  }
+  return SIPLLM_AGENT_FINAL;
+}
+
+int32_t sipllm_agent_step(sipllm_agent* a, const sipllm_sampler* scfg, sipllm_token_cb cb,
+                          void* user, sipllm_stats* stats, char* err_buf, int32_t err_cap) {
+  if (!a || !a->ctx || !a->ctx->rt) {
+    set_err(err_buf, err_cap, "null agent");
+    return SIPLLM_AGENT_ERROR;
+  }
+  if (!a->session) {
+    set_err(err_buf, err_cap, "no run: call sipllm_agent_start first");
+    return SIPLLM_AGENT_ERROR;
+  }
+  if (a->session->finished()) return agent_stop_code(*a->session);
+  if (a->session->awaiting_result()) {
+    set_err(err_buf, err_cap, "a tool call is pending: call sipllm_agent_submit_result first");
+    return SIPLLM_AGENT_ERROR;
+  }
+  sipllm_ctx* ctx = a->ctx;
+  Runtime& rt = *ctx->rt;
+  ctx->cancel.store(false, std::memory_order_relaxed);
+  // NULL sampler = greedy: tool arguments must not be sampled.
+  SamplerConfig s = sampler_from(scfg);
+  if (!scfg) s.temperature = 0.0f;
+  const bool reuse_before = rt.context_reuse();
+  try {
+    const std::string prompt = a->session->prompt();
+    std::string acc;
+    bool cancelled = false;
+    Runtime::TokenCallback on_token = [&](const std::string& piece, int64_t id) -> bool {
+      if (ctx->cancel.load(std::memory_order_relaxed)) { cancelled = true; return false; }
+      acc += piece;
+      if (cb && cb(piece.c_str(), id, user) == 0) { cancelled = true; return false; }
+      // One call per turn: what follows a closing tag would be the model
+      // imagining the tool's answer.
+      return acc.find("</tool_call>") == std::string::npos;
+    };
+    // Each step re-sends the whole conversation; reuse prefills only the tail.
+    rt.set_context_reuse(true);
+    GenStats gs;
+    std::string out = rt.generate(prompt, a->cfg.max_new_tokens, s, on_token, &gs);
+    rt.set_context_reuse(reuse_before);
+    if (stats) fill_stats(ctx, gs, stats);
+    if (cancelled) return SIPLLM_AGENT_CANCELLED;
+    a->text = out;
+    const AgentSession::Event ev = a->session->submit_output(out);
+    if (ev == AgentSession::Event::ToolCall) {
+      a->call = a->session->pending_call();
+      return SIPLLM_AGENT_TOOL_CALL;
+    }
+    return agent_stop_code(*a->session);
+  } catch (const std::exception& e) {
+    rt.set_context_reuse(reuse_before);
+    set_err(err_buf, err_cap, e.what());
+    return SIPLLM_AGENT_ERROR;
+  } catch (...) {
+    rt.set_context_reuse(reuse_before);
+    set_err(err_buf, err_cap, "unknown error during agent step");
+    return SIPLLM_AGENT_ERROR;
+  }
+}
+
+const char* sipllm_agent_tool_name(sipllm_agent* a) { return a ? a->call.name.c_str() : ""; }
+const char* sipllm_agent_tool_args_json(sipllm_agent* a) { return a ? a->call.raw_json.c_str() : ""; }
+
+int32_t sipllm_agent_arg_count(sipllm_agent* a) {
+  return a ? static_cast<int32_t>(a->call.args.size()) : 0;
+}
+
+const char* sipllm_agent_arg_key(sipllm_agent* a, int32_t i) {
+  if (!a || i < 0 || i >= static_cast<int32_t>(a->call.args.size())) return "";
+  return a->call.args[static_cast<size_t>(i)].key.c_str();
+}
+
+const char* sipllm_agent_arg_value(sipllm_agent* a, int32_t i) {
+  if (!a || i < 0 || i >= static_cast<int32_t>(a->call.args.size())) return "";
+  return a->call.args[static_cast<size_t>(i)].value.c_str();
+}
+
+const char* sipllm_agent_text(sipllm_agent* a) { return a ? a->text.c_str() : ""; }
+
+int32_t sipllm_agent_submit_result(sipllm_agent* a, const char* result, int32_t ok) {
+  if (!a || !a->session || !a->session->awaiting_result()) return -1;
+  try {
+    a->session->submit_result(result ? result : "", ok != 0);
+  } catch (...) {
+    return -1;
+  }
+  a->call = ToolCall{};
+  return a->session->finished() ? 0 : 1;
+}
+
+int32_t sipllm_agent_steps(sipllm_agent* a) {
+  return a && a->session ? a->session->steps_taken() : 0;
+}
+
+int32_t sipllm_agent_stop_reason(sipllm_agent* a) {
+  return a && a->session ? agent_stop_code(*a->session) : 0;
+}
+
+const char* sipllm_version(void) { return "0.7.0"; }
 
 int32_t sipllm_vulkan_compiled(void) { return vulkan_compiled() ? 1 : 0; }
 int32_t sipllm_vulkan_available(void) { return vulkan_available() ? 1 : 0; }

@@ -26,6 +26,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -203,10 +204,12 @@ public:
 private:
     struct Slot {
         int   layer = -1;
-        enum class State { Empty, Loading, Ready } state = State::Empty;
+        enum class State { Empty, Loading, Ready, Failed } state = State::Empty;
         // Bumped by every claim (see claim()); a job owns the slot iff its
         // ticket still matches, so an older job queued for the slot is stale.
         uint64_t ticket = 0;
+        // Failed: the worker's read error, rethrown to the caller of loadLayer.
+        std::exception_ptr error;
         // One resident buffer per role.
         std::vector<uint8_t> buf[(int)Role::COUNT];
         WeightRef            ref[(int)Role::COUNT];

@@ -67,6 +67,9 @@ struct ToolDef {
     std::vector<ToolParam> params;
 
     std::string schema_text() const;
+    // OpenAI-style function schema as one JSON line, the shape chat templates
+    // render with `tojson`: {"type": "function", "function": {...}}.
+    std::string json_schema() const;
 };
 
 class ToolRegistry {
@@ -77,6 +80,7 @@ public:
 
     std::string system_prompt_block() const;
 
+    const std::vector<ToolDef>& all() const { return tools_; }   // registration order
     size_t size() const { return tools_.size(); }
     bool empty() const { return tools_.empty(); }
 
@@ -142,10 +146,32 @@ struct ChatMessage {
 
 ChatTemplateStyle style_from_model(const ModelConfig& cfg);
 
+// How the tool list and tool results are presented to the model.
+enum class ToolPromptFormat {
+    // SipLLM's compact signature list in the system message; results as a
+    // "tool" role turn. The default, and the only format for non-ChatML styles.
+    Compact,
+    // The Qwen2.5 chat template's own tool format (Qwen3 uses the same tool
+    // block): JSON schemas inside <tools></tools>, calls in <tool_call> tags,
+    // results as <tool_response> in a user turn. ChatML-family styles only.
+    Qwen,
+};
+
+// Qwen when the GGUF's chat template carries Qwen's tool block, else Compact.
+ToolPromptFormat tool_format_from_model(const ModelConfig& cfg);
+
 std::string render_chat(const std::vector<ChatMessage>& messages,
                         const ToolRegistry& tools,
                         ChatTemplateStyle style,
                         bool add_gen_prompt);
+
+// As above with an explicit tool format. ToolPromptFormat::Qwen with a
+// non-ChatML style, or with no tools registered, renders exactly as Compact.
+std::string render_chat(const std::vector<ChatMessage>& messages,
+                        const ToolRegistry& tools,
+                        ChatTemplateStyle style,
+                        bool add_gen_prompt,
+                        ToolPromptFormat format);
 
 // ============================================================================
 // Production System Tools (read_file, write_file, edit_file, list_dir, bash,

@@ -10,8 +10,8 @@
 SipLLM *sips* weights off storage — one transformer layer at a time — so peak RAM tracks a single resident layer, not the whole model: measured at 122 MB vs 1323 MB for llama.cpp on the same TinyLlama Q4_K_M file (10.8× less), and the gap widens with model size. Output is checked token for token against llama.cpp on Llama-family, Qwen2, Gemma 3 and Phi-2 models; see [Model architectures](#model-architectures) for what is and is not validated.
 
 > ### Status
-> **Latest tagged release: v0.6.0** (see [`CHANGELOG.md`](CHANGELOG.md) for what changed
-> and the known issues). The one-line installer fetches its prebuilt bundle where one
+> **Latest tagged release: v0.7.0** (see [`CHANGELOG.md`](CHANGELOG.md) for what changed
+> and the known issues; v0.6.0 was merged but never tagged, so the v0.7.0 notes cover both). The one-line installer fetches its prebuilt bundle where one
 > exists for your platform and builds from source otherwise. Every number in this README is a
 > measurement with its date, hardware and source file named; the authoritative,
 > per-wave-refreshed figures are the **North Star scorecard** at the top of
@@ -20,19 +20,21 @@ SipLLM *sips* weights off storage — one transformer layer at a time — so pea
 > Output accuracy is validated against reference implementations (cosine similarity
 > `1.000000` on F16).
 >
-> **What a user on a phone (ARM) or an AMD laptop still cannot do:** match llama.cpp's
-> speed. On a OnePlus (Dimensity 900, 2×A78 + 6×A55) the same TinyLlama Q4_K_M file runs
-> in **615 MB resident at 8.9–12.7 tok/s** or **118 MB streaming at 4.7 tok/s**, against
-> llama.cpp's 1251 MB at 18.7 tok/s — 2–10.6× less RAM at half to two-thirds of the
-> decode speed and a fifth of the prefill. The AVX2 path for AMD is cross-compiled only
-> and has never been run. On Apple M3, resident 4-bit decode is 62–67% of llama.cpp.
+> **What a user on a phone (ARM) or an AMD laptop still cannot do:**
+> - **Match llama.cpp's speed on a phone.** On a OnePlus (Dimensity 900, 2×A78 + 6×A55), the same TinyLlama Q4_K_M file resident with `--fast` uses **633–658 MB** against llama.cpp's 1251–1280 MB. It decodes at **14.7 tok/s** against 18.2 (81%) and prefills at **47 tok/s** against 71 (66%) (wave 16 scorecard).
+> - **Run a model larger than RAM at interactive speed.** Streamed, Llama-3.1-8B runs in 205 MB at 0.13 tok/s on that phone, bound by storage reads.
+> - **Measure on AMD hardware.** The AVX2 `--fast` path has been measured only on an Intel i7-12700H (contributed, PR #84). No AMD CPU has been measured.
+> - **Use a phone GPU.** The Vulkan backend is a stub that never runs on the GPU.
+>
+> On Apple M3, resident 4-bit decode is 73% of llama.cpp.
 
 **Edge-first, and therefore CPU-first.** This engine targets phones, SBCs, and
 other edge hardware — where there's plenty of storage but very little RAM and
 almost no usable VRAM. The **CPU is the primary compute target**: everything runs
 deterministically and is optimized on CPU (hand-written ARM64 NEON kernels,
-x86_64 AVX2/FMA vector paths, scalar fallbacks elsewhere). The optional Vulkan
-backend provides GPU offload where hardware permits. No PyTorch, no ONNX, no
+x86_64 AVX2/FMA vector paths, scalar fallbacks elsewhere). On Linux with an NVIDIA GPU, an
+optional CUDA path (`--gpu-layers`) loads `libcuda.so.1` at run time and offloads layers.
+The Vulkan backend is a stub that does not run on the GPU yet. No PyTorch, no ONNX, no
 ggml inference runtime dependency, no BLAS — just standard C++17 and `pthread`.
 Builds and runs on Termux / Android and on any Linux or macOS ARM or x86 host;
 all performance numbers below were measured on Apple M3 unless stated otherwise.
@@ -229,7 +231,7 @@ sipllm rm tinyllama:q8_0          # Remove model from local storage
 For advanced profiling, benchmark scripting, and low-level tuning:
 ```bash
 ./build/llm model.gguf -p "prompt" -n 64 --greedy
-./build/llm model.gguf --ram-budget 512M      # Hard peak-RSS ceiling (pin hot layers, stream rest)
+./build/llm model.gguf --ram-budget 512M      # Peak-RSS budget for SipLLM's own memory (pin hot layers, stream rest)
 ./build/llm model.gguf --reuse               # Cross-turn prefix context reuse (zero prefill cost)
 ./build/llm model.gguf --save-session s.bin  # Serialize context cache to disk
 ./build/llm model.gguf --load-session s.bin  # Restore context cache from disk
@@ -303,7 +305,7 @@ Kosh governs the multi-turn lifecycle and token optimization:
 
 ### 3. RTK: KV Cache & Bounded Memory Management
 RTK manages memory bounds, tensor execution, and hardware threads:
-- **Hard RAM Ceiling (`--ram-budget`)**: Guarantees peak RSS never exceeds a specified limit (e.g. `--ram-budget 512M`). Hot layers are pinned resident; remaining layers stream seamlessly from storage.
+- **RAM Budget (`--ram-budget`)**: Plans SipLLM's own memory (resident and streamed weights, KV cache, scratch, tokenizer) to fit a budget (e.g. `--ram-budget 512M`), and refuses to start if even the smallest plan cannot fit (`--ram-budget-force` overrides). Hot layers are pinned resident; remaining layers stream from storage. It is a plan checked once at load, not an OS-enforced limit: the OS page cache that streaming reads go through is not counted, and inside an app only SipLLM's own share is. Measured peak RSS has stayed under the budget in every configuration tested since the measured-base fix (`bench/results/phone-budget-sweep-2026-10-26.json`); untested configurations are not covered by that measurement.
 - **Quantized KV Cache (`--kv-q8` / `KVPrecision::INT8`)**: Slashes KV cache memory usage by 50% with strictly bounded quantization delta, accompanied by grow-on-demand allocation so memory scales only with active tokens.
 - **Adaptive Work-Stealing Scheduler**: Multi-threaded thread pool with dynamic work stealing (`--schedule proportional2`, `adaptive`, `fixed16`) maximizing core utilization and eliminating pipeline stalls.
 
@@ -312,6 +314,8 @@ Nishachar is SipLLM's reference goal-driven autonomous agent runtime (`goal -> p
 - **Path A (CLI Foundation)**: Standalone autonomous executor (`nishachar_demo`) equipped with real tools (shell commands, filesystem exploration, ripgrep/search, calculator).
 - **Path B (Server-Side Integration)**: OpenAI-compatible `POST /v1/chat/completions` with `"agent": true` for client-directed tool orchestration. Agent requests run shell and file tools on the server host, so they are refused unless `llm_server` is started with `--allow-agent`; the server binds 127.0.0.1 unless `--host` is given.
 - **Zero-Dependency JSON Parser**: Hand-crafted JSON state machine (`ToolParser`, `ToolRegistry`) requiring zero third-party JSON libraries, providing robust structured-output tool dispatch.
+- **Path C (embedded, since v0.7.0)**: the C ABI's `sipllm_agent_*` calls and Dart's `SipllmAgent` run the agent loop inside an app. The engine keeps the conversation and parses tool calls; the app runs every tool. Qwen2.5's own tool format is detected from the model. See [`docs/api/c-abi.md`](docs/api/c-abi.md) and [`docs/api/dart.md`](docs/api/dart.md).
+- **Phone mode in the example app (opt-in):** through an Android accessibility service the user enables, the agent reads screens and clicks or scrolls allowlisted apps. It never types, never toggles switches, never reads password fields, and shows a Stop bar. It is a first proof: on a OnePlus Nord CE 2 with Qwen2.5-1.5B, one of three test goals passed.
 
 ### 5. Cross-Platform Edge Performance
 Built specifically for edge and resource-constrained environments:
@@ -363,9 +367,11 @@ See [`golden/README.md`](golden/README.md) for the full methodology.
 - **Production-Grade GGUF & Safetensors Loading** — Loads unmodified GGUF v2/v3 and Hugging Face Safetensors natively without external conversion.
 - **Model families** — Llama-family, Qwen2, Gemma 3 and Phi-2 checked against llama.cpp; Gemma 2/4, Phi-3/4, Mixtral MoE and GPT-2 implemented and unit-tested on synthetic weights. See [Model architectures](#model-architectures).
 - **Complete Quantization Matrix** — Full support for `F32`, `F16`, `BF16`, `Q4_0/1`, `Q5_0/1`, `Q8_0`, and all K-quants (`Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, plus `IQ4_NL`).
-- **SIMD Vector Acceleration** — int8 kernels for Q8_0 / Q4_K / Q6_K on ARM64 NEON `sdot` and x86_64 AVX2 (`--fast`; AVX2 untested on hardware), plus fp32 NEON / AVX2+FMA vector paths.
+- **SIMD Vector Acceleration** — int8 kernels for Q8_0 / Q4_K / Q6_K on ARM64 NEON `sdot` and x86_64 AVX2 (`--fast`; AVX2 measured on an Intel i7-12700H, not yet on AMD), plus fp32 NEON / AVX2+FMA vector paths.
+- **Hugging Face-exact BPE tokenization** — Qwen2, Llama-3 and SmolLM2 prompts split by each family's own pre-tokenizer regex; token IDs match HF `tokenizers` on all 3,011 test lines.
+- **Optional NVIDIA offload** — `--gpu-layers N|max` on Linux; `libcuda.so.1` is loaded at run time, so CPU-only machines need nothing extra.
 - **Bounded-Memory Layer Streaming** — Synchronous `pread`, double-buffered async prefetcher, and zero-copy `mmap` options keeping peak resident memory pinned to a single layer.
-- **Inviolable RAM Budget Ceiling (`--ram-budget`)** — Dynamic layer pinning with a smooth RAM↔speed dial.
+- **Planned RAM Budget (`--ram-budget`)** — Dynamic layer pinning with a smooth RAM↔speed dial; refuses a budget it cannot fit.
 - **Kosh Context Intelligence** — Zero-cost prefix reuse (`--reuse`), persistent SIPS v1 session checkpointing (`--save-session`/`--load-session`), prompt-lookup speculative decoding (`--spec N`, proven token-identical to plain decoding), and a semantic (radix-tree) prefix cache.
 - **Quantized KV Cache (`--kv-q8`)** — 8-bit KV cache with dynamic grow-on-demand allocation cutting memory footprint in half.
 - **Nishachar Autonomous Agent** — Reference goal-driven agent (`goal -> plan -> act -> verify`) with built-in zero-dependency tool calling across CLI (Path A) and OpenAI-compatible server (Path B).
@@ -412,10 +418,13 @@ must keep the golden validation matrix green. Please adhere to the [Code of Cond
 
 ## Roadmap
 
-### Shipped (latest tag v0.6.0)
+### Shipped (latest tag v0.7.0)
 - [x] Bounded-memory transformer layer streaming with `--ram-budget` peak-RSS ceiling.
-- [x] Llama-family, Qwen2, Gemma 3 and Phi-2 checked against llama.cpp; more families implemented on synthetic weights (see [Model architectures](#model-architectures)).
-- [x] Int8 `--fast` kernels for Q8_0, Q4_K and Q6_K: ARM64 NEON `sdot` (verified), x86_64 AVX2 (cross-compiled only).
+- [x] Llama-family, Qwen2, Gemma 3 and Phi-2 checked against llama.cpp; Gemma 4 12B checked against llama.cpp on x86 (contributed); more families implemented on synthetic weights (see [Model architectures](#model-architectures)).
+- [x] Int8 `--fast` kernels for Q8_0, Q4_K and Q6_K: ARM64 NEON `sdot` (verified), x86_64 AVX2 (measured on Intel, not AMD).
+- [x] Embedded agent API (`sipllm_agent_*`, Dart `SipllmAgent`) with caller-run tools, and HF-exact BPE tokenization for Qwen2 / Llama-3 / SmolLM2 (v0.7.0).
+- [x] Optional NVIDIA CUDA layer offload and batched multi-sequence decode (contributed, v0.7.0).
+- [x] LAN pooling v1: one model's layers split across machines (`--worker` / `--nodes`, pre-shared token, no encryption yet).
 - [x] Sip IR stable intermediate representation, binary format (`SIPR`), and inspection tools (`ir_dump`).
 - [x] Kosh context reuse (`--reuse`) and persistent SIPS v1 session serialization.
 - [x] Nishachar goal-driven autonomous agent runtime (Path A CLI & Path B OpenAI-compatible server).
@@ -427,18 +436,18 @@ must keep the golden validation matrix green. Please adhere to the [Code of Cond
 Run LLMs **better than LiteRT / MediaPipe LLM Inference on ARM and AMD CPUs**: an
 order of magnitude less RAM at competitive speed. The RAM half is measured; the speed
 half needs:
-- [x] Integer K-quant kernels (Q4_K, Q6_K × int8 activations): resident 4-bit decode 24% → 62–67% of llama.cpp on M3.
-- [ ] Run and verify the AVX2 path on a real AMD/Intel host (`make test`, then the bench).
-- [x] On-device numbers from a real phone (Dimensity 900): 2–10.6× less RAM than llama.cpp, 48–68% of its decode, 19% of its prefill.
-- [ ] Batched int8 kernel for prefill (the on-device bottleneck: 7.5 vs llama.cpp's 39 tok/s).
-- [ ] Same-hardware head-to-head against LiteRT-LM (published anchor, S24 Ultra CPU, not ours: Gemma3-1B int4 at 50–55 tok/s in ~1 GB).
-- [ ] Remaining M3 gap (62–67% → parity): fp32 attention/KV path, prefill (73 vs 266 tok/s).
+- [x] Integer K-quant kernels (Q4_K, Q6_K × int8 activations): resident 4-bit decode 24% → 73% of llama.cpp on M3 (wave 16).
+- [ ] Run and verify the AVX2 path on a real AMD host (measured on Intel i7-12700H only).
+- [x] On-device numbers from a real phone (Dimensity 900): about 2× less RAM than llama.cpp resident, 81% of its decode, 66% of its prefill (wave 16).
+- [x] Batched int8 kernels for prefill (wave 14) and the interleaved IL4 layout (waves 15–16).
+- [ ] Close the phone prefill gap (47 vs 71 tok/s on TinyLlama, 8 threads) (#80).
+- [ ] Same-hardware head-to-head against LiteRT-LM on more than one model. On the Dimensity 900 with SmolLM2-135M and a ~1,000-token prompt, LiteRT-LM v0.11.0 on the CPU prefilled at 97–125 tok/s and decoded at 13–16 in 437 MB.
 
 ### Future Horizons
-- [ ] First-class mobile bindings (Flutter / Android JNI / iOS Swift framework).
+- [ ] First-class mobile bindings beyond Flutter (Android JNI / iOS Swift framework).
 - [ ] Multimodal vision encoder (ViT) and projector integration.
-- [ ] Multi-device distributed layer streaming across local network nodes.
-- [ ] Expanded Vulkan full-layer compute pipeline for unified memory edge GPUs.
+- [ ] Encrypted, code-confirmed pairing for LAN pooling, then pooled phones at a useful speed.
+- [ ] A phone GPU path that runs (research; the current Vulkan backend is a stub).
 
 ## License
 

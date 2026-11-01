@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sipllm_accessibility_description">Lets the SipLLM on-device agent read the screen of allowed apps and tap or scroll in them, only while you run an agent goal. Screen text stays on this phone. Turn it off here when you are done.</string>
+</resources>

@@ -120,12 +120,16 @@ class _ChatScreenState extends State<ChatScreen> {
             StatsBar(
               stats: controller.lastStats,
               generating: controller.generating,
-              threads: controller.threads,
+              // What the loaded model actually runs with (auto picks the fast cores).
+              threads: controller.runtime?.threads ?? controller.effectiveThreads,
             ),
           Expanded(child: _messageArea(controller, loaded)),
           if (!loaded) _noModelBanner(),
           ChatInput(
-            enabled: loaded,
+            // While an agent run uses the model, a send would fail with
+            // "runtime is busy".
+            enabled: loaded && !controller.agentRunning,
+            disabledHint: loaded ? 'The agent is using the model…' : 'Load a model to chat',
             generating: controller.generating,
             onSend: (text) => context.read<SipllmController>().send(text),
             onStop: () => context.read<SipllmController>().cancelGeneration(),

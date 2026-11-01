@@ -33,7 +33,14 @@ class _WearScreenState extends State<WearScreen> {
     final wear = context.read<SipllmController>().wear;
     unawaited(wear.listenIncoming());
     _sub = wear.events().listen(
-      (p) => setState(() => _progress = p),
+      (p) {
+        if (!mounted) return;
+        setState(() => _progress = p);
+        // A model pushed from the phone lands in the models folder: list it.
+        if (p.direction == TransferDirection.receive && p.state == TransferState.completed) {
+          context.read<SipllmController>().rescanModels();
+        }
+      },
       onError: (_) {},
     );
   }
@@ -169,7 +176,7 @@ class _WearScreenState extends State<WearScreen> {
                 else
                   IconButton(
                     icon: const Icon(LucideIcons.play, color: AppTheme.primary, size: 18),
-                    onPressed: () => c.loadModel(m),
+                    onPressed: () => _load(c, m),
                   ),
               ]),
             ),
@@ -232,6 +239,16 @@ class _WearScreenState extends State<WearScreen> {
         ]),
       ],
     );
+  }
+
+  // A failed load used to be an unhandled Future error: nothing shown.
+  Future<void> _load(SipllmController c, ManagedModel m) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      await c.loadModel(m);
+    } catch (e) {
+      messenger?.showSnackBar(SnackBar(content: Text('Could not load ${m.name}: $e')));
+    }
   }
 
   void _send(SipllmController c) {

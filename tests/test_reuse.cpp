@@ -57,6 +57,39 @@ static int tok_len(const std::string &path, const std::string &s) {
   return (int)tok.encode(s, /*add_bos=*/true).size();
 }
 
+TEST(reuse_after_unreset_generation_matches_fresh) {
+  // The agent ABI turns reuse on for its own steps on a context the app may
+  // have chatted on without a reset. committed_ must mirror the KV after a
+  // reuse-off generate (prompt and decoded tokens, not the stopping one), so a
+  // reuse step there produces exactly what it produces on a fresh context.
+  const std::string path = make_toy();
+  auto run = [&](bool chat_first) {
+    auto src = open_model(path);
+    LayerLoader::Options opt;
+    opt.residency = Residency::FP32;
+    opt.async = false;
+    opt.n_buffers = 1;
+    Runtime rt(std::move(src), opt, /*max_ctx=*/0, /*threads=*/1);
+    SamplerConfig greedy;
+    greedy.temperature = 0.0f;
+    GenStats st;
+    if (chat_first) {
+      // Two chat turns, no reset; the second one is stopped by its callback.
+      // Shares "agent prompt: hel" with the agent's prompt, so the reuse step
+      // keeps that KV and must recompute from the first differing token.
+      rt.generate("agent prompt: hel", 6, greedy, nullptr, &st);
+      int n = 0;
+      rt.generate(" and more", 6, greedy,
+                  [&](const std::string &, int64_t) { return ++n < 3; }, &st);
+    }
+    rt.set_context_reuse(true);
+    std::string out = rt.generate("agent prompt: hello there", 8, greedy, nullptr, &st);
+    std::string out2 = rt.generate("agent prompt: hello there" + out + " next", 8, greedy, nullptr, &st);
+    return out + "|" + out2;
+  };
+  CHECK(run(true) == run(false));
+}
+
 TEST(reuse_matches_full_prefill) {
   const std::string path = make_toy();
   const std::string p1 = "The capital of France";

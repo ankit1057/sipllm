@@ -13,7 +13,7 @@ REPO="ankit1057/sipllm"
 # The release whose prebuilt bundles (sipllm-<ver>-<os>-<arch>.tar.gz) this
 # installer fetches; with no bundle for the host it builds from source. Bump it
 # when a release is cut and its assets are uploaded.
-VERSION="0.6.0"
+VERSION="0.7.0"
 PREFIX="${SIPLLM_PREFIX:-$HOME/.sipllm}"
 BIN="$PREFIX/bin"
 FORCE_BUILD="${SIPLLM_BUILD:-0}"

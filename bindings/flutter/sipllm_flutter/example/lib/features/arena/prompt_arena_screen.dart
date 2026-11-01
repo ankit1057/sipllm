@@ -15,7 +15,13 @@ class PromptArenaScreen extends StatefulWidget {
   State<PromptArenaScreen> createState() => _PromptArenaScreenState();
 }
 
-class _PromptArenaScreenState extends State<PromptArenaScreen> {
+// Kept alive: the Hub's TabBarView disposes a tab that leaves the screen,
+// which lost the scorecard and stopped a suite part-way.
+class _PromptArenaScreenState extends State<PromptArenaScreen>
+    with AutomaticKeepAliveClientMixin<PromptArenaScreen> {
+  @override
+  bool get wantKeepAlive => true;
+
   final List<Map<String, String>> _suite = const [
     {'category': 'Story', 'prompt': 'Write a 2-paragraph sci-fi story about a rogue AI on a space station.'},
     {'category': 'Math', 'prompt': 'Solve: If 3 workers take 6 hours to build a wall, how long will 9 workers take?'},
@@ -28,7 +34,7 @@ class _PromptArenaScreenState extends State<PromptArenaScreen> {
   bool _runningSuite = false;
 
   Future<void> _runArena(SipllmController controller) async {
-    if (!controller.isModelLoaded || _runningSuite) return;
+    if (!controller.isModelLoaded || _runningSuite || controller.runtimeInUse) return;
     final modelName = controller.loadedModel?.name ?? 'Unknown Model';
     setState(() {
       _runningSuite = true;
@@ -36,17 +42,25 @@ class _PromptArenaScreenState extends State<PromptArenaScreen> {
     });
 
     for (final item in _suite) {
+      if (!controller.isModelLoaded) break; // unloaded mid-suite
       final category = item['category']!;
       final prompt = item['prompt']!;
       final stopwatch = Stopwatch()..start();
       int tokens = 0;
       StringBuffer responseBuf = StringBuffer();
 
-      await for (final token in controller.generateStream(prompt)) {
-        tokens++;
-        responseBuf.write(token.piece);
+      try {
+        await for (final token in controller.generateStream(prompt)) {
+          tokens++;
+          responseBuf.write(token.piece);
+        }
+      } catch (e) {
+        // A failed prompt (model unloaded, runtime busy) is recorded, and the
+        // suite ends instead of leaving the button stuck on "Running".
+        responseBuf.write('[error: $e]');
       }
       stopwatch.stop();
+      if (!mounted) return;
 
       final elapsedSec = stopwatch.elapsedMilliseconds / 1000.0;
       final tokPerSec = elapsedSec > 0 ? tokens / elapsedSec : 0.0;
@@ -63,6 +77,7 @@ class _PromptArenaScreenState extends State<PromptArenaScreen> {
       });
     }
 
+    if (!mounted) return;
     setState(() {
       _runningSuite = false;
     });
@@ -90,6 +105,7 @@ class _PromptArenaScreenState extends State<PromptArenaScreen> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin
     final c = context.watch<SipllmController>();
 
     return Scaffold(
@@ -127,7 +143,7 @@ class _PromptArenaScreenState extends State<PromptArenaScreen> {
                   width: double.infinity,
                   height: 44,
                   child: ElevatedButton.icon(
-                    onPressed: _runningSuite || !c.isModelLoaded ? null : () => _runArena(c),
+                    onPressed: _runningSuite || !c.isModelLoaded || c.runtimeInUse ? null : () => _runArena(c),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppTheme.accent,
                       foregroundColor: Colors.black,

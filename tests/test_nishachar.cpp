@@ -320,6 +320,144 @@ TEST(empty_generation) {
     CHECK(r.tool_calls() == 0);
 }
 
+TEST(tool_schema_rendered_once) {
+    // The tool block is prefill paid on every step. run() used to add it to the
+    // system message and render_chat() added it again: two copies, about a
+    // third of a real 433-token Qwen2.5 step-0 prompt.
+    Nishachar agent = make_agent();
+    auto prompts = std::make_shared<std::vector<std::string>>();
+    AgentGenerator gen = [prompts](const std::string& p) -> std::string {
+        prompts->push_back(p);
+        return prompts->size() == 1 ? kEchoHi : "done";
+    };
+    AgentResult r = agent.run("echo hi", gen);
+    CHECK(r.stop == AgentStop::Done);
+    CHECK(prompts->size() == 2);
+    const std::string block = agent.tools().system_prompt_block();
+    for (const std::string& p : *prompts) {
+        size_t first = p.find(block);
+        CHECK_MSG(first != std::string::npos, "the tool block is missing from the prompt");
+        CHECK_MSG(p.find(block, first + 1) == std::string::npos,
+                  "the tool block appears more than once in the prompt");
+        CHECK(p.find(AgentConfig{}.system_preamble) != std::string::npos);
+    }
+}
+
+TEST(qwen_tool_format_feeds_results_as_tool_response) {
+    // Opt-in Qwen format: schemas in <tools>, the result back as <tool_response>
+    // in a user turn, which is what Qwen2.5 was trained on.
+    Nishachar agent = make_agent();
+    auto prompts = std::make_shared<std::vector<std::string>>();
+    AgentGenerator gen = [prompts](const std::string& p) -> std::string {
+        prompts->push_back(p);
+        return prompts->size() == 1 ? kEchoHi : "done";
+    };
+    AgentConfig cfg;
+    cfg.tool_format = ToolPromptFormat::Qwen;
+    AgentResult r = agent.run("echo hi", gen, cfg);
+    CHECK(r.stop == AgentStop::Done);
+    CHECK(r.final_text == "done");
+    CHECK(prompts->size() == 2);
+    CHECK((*prompts)[0].find("<tools>\n{\"type\": \"function\"") != std::string::npos);
+    CHECK((*prompts)[1].find(std::string(kEchoHi) + "<|im_end|>\n<|im_start|>user\n<tool_response>\nhi\n"
+                             "</tool_response><|im_end|>\n<|im_start|>assistant\n") != std::string::npos);
+    // The default stays the compact format.
+    CHECK(AgentConfig{}.tool_format == ToolPromptFormat::Compact);
+}
+
+TEST(session_steps_like_run) {
+    // The caller-stepped session: it hands back the parsed call, waits for the
+    // result, and ends exactly as run() does on the same model outputs.
+    Nishachar agent = make_agent();
+    AgentSession s(agent, "echo hi", AgentConfig{});
+    CHECK(!s.finished() && !s.awaiting_result());
+    CHECK(s.submit_output(kEchoHi) == AgentSession::Event::ToolCall);
+    CHECK(s.awaiting_result());
+    CHECK(s.pending_call().name == "echo");
+    CHECK(s.pending_call().get("text") == "hi");
+    s.submit_result("hi from the app", true);
+    CHECK(!s.awaiting_result() && !s.finished());
+    CHECK(s.prompt().find("hi from the app") != std::string::npos);   // fed back
+    CHECK(s.submit_output("all done") == AgentSession::Event::Final);
+    CHECK(s.finished());
+
+    const AgentResult& r = s.result();
+    AgentResult ran = agent.run("echo hi", scripted({kEchoHi, "all done"}));
+    CHECK(r.stop == AgentStop::Done && ran.stop == AgentStop::Done);
+    CHECK(r.steps_taken() == 2 && ran.steps_taken() == 2);
+    CHECK(r.final_text == "all done" && ran.final_text == "all done");
+    CHECK(r.steps[0].tool_name == "echo" && r.steps[0].tool_result == "hi from the app");
+    CHECK(r.steps[0].tool_args_json == ran.steps[0].tool_args_json);
+}
+
+TEST(session_bounds_and_errors) {
+    Nishachar agent = make_agent();
+    AgentConfig cfg;
+    cfg.max_steps = 2;
+    AgentSession s(agent, "loop", cfg);
+    for (int i = 0; i < 2; ++i) {
+        CHECK(!s.finished());
+        CHECK(s.submit_output(kEchoHi) == AgentSession::Event::ToolCall);
+        s.submit_result("hi", true);
+    }
+    CHECK(s.finished());
+    CHECK(s.result().stop == AgentStop::MaxSteps);
+    CHECK(s.result().steps_taken() == 2);
+
+    cfg.max_steps = 8;
+    cfg.stop_on_tool_error = true;
+    AgentSession e(agent, "fail", cfg);
+    CHECK(e.submit_output(kBoom) == AgentSession::Event::ToolCall);
+    e.submit_result("error: the app refused", false);
+    CHECK(e.finished());
+    CHECK(e.result().stop == AgentStop::ToolError);
+    CHECK(!e.result().steps[0].tool_ok);
+
+    AgentSession empty(agent, "nothing", AgentConfig{});
+    CHECK(empty.submit_output("") == AgentSession::Event::Empty);
+    CHECK(empty.finished() && empty.result().stop == AgentStop::Empty);
+
+    cfg.max_steps = 0;
+    AgentSession none(agent, "zero", cfg);
+    CHECK(none.finished());
+    CHECK(none.result().stop == AgentStop::MaxSteps && none.result().steps_taken() == 0);
+}
+
+TEST(malformed_calls_never_dispatch) {
+    // Model outputs that look like calls but are not usable ones must end the
+    // run inside the bound with nothing dispatched, through run() and through
+    // the stepped session alike.
+    const std::vector<std::string> bad = {
+        "<tool_call>{\"name\":\"echo\",\"arguments\":{\"text\":\"hi",   // cut off by max_new
+        "<tool_call>{\"arguments\":{\"text\":\"hi\"}}</tool_call>",      // no name
+        "<tool_call>{\"name\":\"nope\",\"arguments\":{}}</tool_call>",   // unregistered
+        "{\"name\": 42, \"arguments\": {}}",                             // name not a string
+    };
+    for (const std::string& out : bad) {
+        Nishachar agent = make_agent();
+        // run() feeds a malformed call's parse error back so the model can
+        // retry (it may use every step); the stepped session ends at once.
+        AgentResult r = agent.run("x", always(out));
+        CHECK_MSG(r.tool_calls() == 0, ("dispatched: " + out).c_str());
+        CHECK_MSG(r.steps_taken() >= 1 && r.steps_taken() <= AgentConfig{}.max_steps, ("did not end: " + out).c_str());
+        AgentSession s(agent, "x", AgentConfig{});
+        CHECK_MSG(s.submit_output(out) == AgentSession::Event::Final, ("session: " + out).c_str());
+        CHECK(s.finished() && !s.awaiting_result());
+    }
+    // A string where the arguments object should be, and not JSON-encoded
+    // arguments either: run() does not dispatch it, feeds the parse error back,
+    // and the next reply ends the run.
+    Nishachar agent = make_agent();
+    AgentResult r = agent.run("x", scripted({"<tool_call>{\"name\":\"echo\",\"arguments\":\"hi\"}</tool_call>", "done"}));
+    CHECK(r.tool_calls() == 0 && r.steps[0].malformed);
+    CHECK(r.stop == AgentStop::Done);
+    // The doubled braces some GGUF templates teach still parse to the call.
+    AgentSession s(agent, "x", AgentConfig{});
+    CHECK(s.submit_output("<tool_call>\n{{\"name\": \"echo\", \"arguments\": {\"text\": \"hi\"}}}}\n</tool_call>") ==
+          AgentSession::Event::ToolCall);
+    CHECK(s.pending_call().name == "echo" && s.pending_call().get("text") == "hi");
+}
+
 TEST(report_mentions) {
     Nishachar agent = make_agent();
     AgentResult r =

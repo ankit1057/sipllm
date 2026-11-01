@@ -1,0 +1,1107 @@
+{
+"package": "com.oplus.battery",
+"nodes": [
+{
+"i": 0,
+"p": -1,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 1,
+"p": 0,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 2,
+"p": 1,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 3,
+"p": 2,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 4,
+"p": 3,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 5,
+"p": 4,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+2245
+]
+},
+{
+"i": 6,
+"p": 5,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+0,
+1080,
+288
+]
+},
+{
+"i": 7,
+"p": 6,
+"text": "",
+"desc": "",
+"cls": "ViewGroup",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+107,
+1080,
+287
+]
+},
+{
+"i": 8,
+"p": 7,
+"text": "",
+"desc": "Navigate up",
+"cls": "ImageButton",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+18,
+137,
+174,
+287
+]
+},
+{
+"i": 9,
+"p": 7,
+"text": "Battery",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+174,
+178,
+1047,
+243
+]
+},
+{
+"i": 10,
+"p": 5,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+288,
+1080,
+2245
+]
+},
+{
+"i": 11,
+"p": 10,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+288,
+1080,
+2245
+]
+},
+{
+"i": 12,
+"p": 11,
+"text": "",
+"desc": "",
+"cls": "FrameLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+288,
+1080,
+2245
+]
+},
+{
+"i": 13,
+"p": 12,
+"text": "",
+"desc": "",
+"cls": "RecyclerView",
+"click": false,
+"edit": false,
+"scroll": true,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+288,
+1080,
+2245
+],
+"more_down": false,
+"more_up": false
+},
+{
+"i": 14,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+288,
+1080,
+603
+]
+},
+{
+"i": 15,
+"p": 14,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+72,
+336,
+1008,
+441
+]
+},
+{
+"i": 16,
+"p": 15,
+"text": "100%",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+72,
+336,
+248,
+441
+]
+},
+{
+"i": 17,
+"p": 15,
+"text": "Fully charged",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+266,
+380,
+481,
+429
+]
+},
+{
+"i": 18,
+"p": 14,
+"text": "",
+"desc": "",
+"cls": "View",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+72,
+459,
+1008,
+579
+]
+},
+{
+"i": 19,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+603,
+1080,
+651
+]
+},
+{
+"i": 20,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+48,
+651,
+1032,
+1228
+]
+},
+{
+"i": 21,
+"p": 20,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+711,
+1032,
+760
+]
+},
+{
+"i": 22,
+"p": 21,
+"text": "Battery usage (last 24 hours)",
+"desc": "",
+"cls": "TextView",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+711,
+562,
+760
+]
+},
+{
+"i": 23,
+"p": 21,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+562,
+711,
+622,
+759
+]
+},
+{
+"i": 24,
+"p": 23,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+574,
+711,
+622,
+759
+]
+},
+{
+"i": 25,
+"p": 20,
+"text": "",
+"desc": "",
+"cls": "View",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+751,
+1032,
+1228
+]
+},
+{
+"i": 26,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1228,
+1080,
+1494
+]
+},
+{
+"i": 27,
+"p": 26,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+48,
+1228,
+1032,
+1470
+]
+},
+{
+"i": 28,
+"p": 27,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1228,
+984,
+1229
+]
+},
+{
+"i": 29,
+"p": 28,
+"text": "",
+"desc": "",
+"cls": "View",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1228,
+984,
+1229
+]
+},
+{
+"i": 30,
+"p": 27,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+48,
+1241,
+1032,
+1470
+]
+},
+{
+"i": 31,
+"p": 30,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+48,
+1277,
+1032,
+1434
+]
+},
+{
+"i": 32,
+"p": 31,
+"text": "Battery usage by app",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1277,
+499,
+1335
+]
+},
+{
+"i": 33,
+"p": 31,
+"text": "",
+"desc": "",
+"cls": "GridView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1359,
+363,
+1434
+]
+},
+{
+"i": 34,
+"p": 33,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1359,
+171,
+1434
+]
+},
+{
+"i": 35,
+"p": 34,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1359,
+171,
+1434
+]
+},
+{
+"i": 36,
+"p": 30,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1334,
+984,
+1376
+]
+},
+{
+"i": 37,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1494,
+1080,
+1542
+]
+},
+{
+"i": 38,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1542,
+1080,
+1824
+]
+},
+{
+"i": 39,
+"p": 38,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1566,
+924,
+1800
+]
+},
+{
+"i": 40,
+"p": 39,
+"text": "Power saving mode",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1602,
+924,
+1660
+]
+},
+{
+"i": 41,
+"p": 39,
+"text": "Can last about 2 d 1 h 55 min",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1669,
+924,
+1712
+]
+},
+{
+"i": 42,
+"p": 39,
+"text": "Off",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1721,
+924,
+1764
+]
+},
+{
+"i": 43,
+"p": 38,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+924,
+1626,
+984,
+1740
+]
+},
+{
+"i": 44,
+"p": 43,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+924,
+1626,
+984,
+1740
+]
+},
+{
+"i": 45,
+"p": 44,
+"text": "",
+"desc": "",
+"cls": "ImageView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+960,
+1662,
+984,
+1704
+]
+},
+{
+"i": 46,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1824,
+1080,
+1872
+]
+},
+{
+"i": 47,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+1872,
+1080,
+2190
+]
+},
+{
+"i": 48,
+"p": 47,
+"text": "",
+"desc": "",
+"cls": "RelativeLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1896,
+828,
+2166
+]
+},
+{
+"i": 49,
+"p": 48,
+"text": "Optimised night charging",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1932,
+828,
+1990
+]
+},
+{
+"i": 50,
+"p": 48,
+"text": "To decelerate battery aging, your device learns your sleep schedule and waits to finish charging past 80% until just before you wake up.",
+"desc": "",
+"cls": "TextView",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+96,
+1999,
+828,
+2130
+]
+},
+{
+"i": 51,
+"p": 47,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+828,
+1998,
+984,
+2064
+]
+},
+{
+"i": 52,
+"p": 51,
+"text": "On",
+"desc": "",
+"cls": "Switch",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": true,
+"checked": true,
+"password": false,
+"enabled": true,
+"b": [
+876,
+1998,
+984,
+2064
+]
+},
+{
+"i": 53,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": false,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+2190,
+1080,
+2238
+]
+},
+{
+"i": 54,
+"p": 13,
+"text": "",
+"desc": "",
+"cls": "LinearLayout",
+"click": true,
+"edit": false,
+"scroll": false,
+"check": false,
+"checked": false,
+"password": false,
+"enabled": true,
+"b": [
+0,
+2238,
+1080,
+2245
+]
+}
+]
+}

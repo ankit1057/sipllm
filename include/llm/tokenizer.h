@@ -24,6 +24,18 @@
 
 namespace llm {
 
+// Byte-level BPE pre-tokenizer (the regex split before merges). Legacy is the
+// ASCII approximation every BPE model used before; the others reproduce the
+// Hugging Face split regex of that family exactly, over Unicode categories.
+enum class BpePre { Legacy, Qwen2, Llama3, SmolLM };
+
+// From a GGUF tokenizer.ggml.pre value; anything unverified (or absent, as in
+// Phi-2) is Legacy.
+BpePre bpe_pre_from_name(const std::string& pre);
+
+// Split `text` (no special tokens) into the chunks BPE merges run within.
+std::vector<std::string> bpe_pretokenize(const std::string& text, BpePre pre);
+
 class Tokenizer {
 public:
     enum class Kind { Byte, SentencePiece, BPE, SpmBpe };
@@ -63,6 +75,7 @@ private:
     int64_t bos_ = -1, eos_ = -1;
     std::vector<int64_t> eog_ids_;
     std::vector<int64_t> special_ids_;   // control / user-defined / unknown, longest text first
+    BpePre pre_ = BpePre::Legacy;        // from tokenizer.ggml.pre
     bool add_bos_ = true;                // model wants BOS (tokenizer.ggml.add_bos_token)
     bool add_space_prefix_ = true;       // SPM dummy prefix (tokenizer.ggml.add_space_prefix)
 };
