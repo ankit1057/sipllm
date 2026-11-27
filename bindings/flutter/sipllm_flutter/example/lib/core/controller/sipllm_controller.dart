@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -63,7 +64,9 @@ class SipllmController extends ChangeNotifier {
   double temperature = 0.7;
   double topP = 0.95;
   int maxTokens = 256;
-  int maxCtx = 2048;
+  // 4096: a Phone-mode agent run holds the tools, the goal and one compact
+  // screen per step (~170 tokens each) in one conversation.
+  int maxCtx = 4096;
   String systemPrompt = 'You are SipLLM, a concise, helpful on-device assistant.';
 
   // ---- chat ----------------------------------------------------------------
@@ -154,6 +157,7 @@ class SipllmController extends ChangeNotifier {
     _modelsDir = await _resolveDownloadsSipLlmDir();
     await Directory(_modelsDir!).create(recursive: true);
     await _rebuildModelIndex();
+    await _loadHistory();
 
     _initialized = true;
     notifyListeners();
@@ -415,7 +419,7 @@ class SipllmController extends ChangeNotifier {
       } catch (_) {}
     }
 
-    final prompt = _template.build(system, List.of(messages));
+    final prompt = _template.build(system, _fitHistory(system));
     messages.add(assistant);
     notifyListeners();
 
@@ -446,6 +450,7 @@ class SipllmController extends ChangeNotifier {
           } catch (_) {}
         }
         notifyListeners();
+        unawaited(_saveHistory());
         if (!completer.isCompleted) completer.complete();
       },
       onError: (Object e) {
@@ -455,10 +460,27 @@ class SipllmController extends ChangeNotifier {
         generating = false;
         _genSub = null;
         notifyListeners();
+        unawaited(_saveHistory());
         if (!completer.isCompleted) completer.complete();
       },
     );
     return completer.future;
+  }
+
+  /// The newest turns that fit the context with room left for the reply. The
+  /// app has no tokenizer, so it budgets ~3 characters per token, which leaves
+  /// margin for English and code. Without this, a history that survives
+  /// restarts would eventually overflow the context on every send.
+  List<ChatMessage> _fitHistory(String system) {
+    final ctx = maxCtx > 0 ? maxCtx : 4096;
+    var budget = (ctx - maxTokens - 64) * 3 - system.length;
+    final kept = <ChatMessage>[];
+    for (final m in messages.reversed) {
+      budget -= m.text.length + 16;   // + turn markers
+      if (budget < 0 && kept.isNotEmpty) break;
+      kept.add(m);
+    }
+    return kept.reversed.toList();
   }
 
   void cancelGeneration() => _rt?.cancel();
@@ -482,6 +504,48 @@ class SipllmController extends ChangeNotifier {
     _rt?.reset();
     messages.clear();
     notifyListeners();
+    unawaited(_saveHistory());
+  }
+
+  // ---- chat history (persisted across launches) ---------------------------
+  Future<File> _historyFile() async {
+    final support = await getApplicationSupportDirectory();
+    return File(p.join(support.path, 'chat_history.json'));
+  }
+
+  Future<void> _loadHistory() async {
+    try {
+      final f = await _historyFile();
+      if (!f.existsSync()) return;
+      final list = jsonDecode(await f.readAsString()) as List;
+      messages
+        ..clear()
+        ..addAll(list.map((e) {
+          final m = e as Map<String, dynamic>;
+          return ChatMessage(
+            text: m['text'] as String,
+            isUser: m['user'] as bool,
+            timestamp: DateTime.tryParse(m['ts'] as String? ?? ''),
+          );
+        }));
+    } catch (_) {
+      // A corrupt history file must not stop the app; start empty.
+    }
+  }
+
+  Future<void> _saveHistory() async {
+    try {
+      final f = await _historyFile();
+      final data = jsonEncode([
+        for (final m in messages)
+          if (!m.streaming)
+            {'text': m.text, 'user': m.isUser, 'ts': m.timestamp.toIso8601String()}
+      ]);
+      // Write then rename, so a kill mid-write keeps the previous history.
+      final tmp = File('${f.path}.tmp');
+      await tmp.writeAsString(data, flush: true);
+      await tmp.rename(f.path);
+    } catch (_) {}
   }
 
   // ---- RAG memory ----------------------------------------------------------

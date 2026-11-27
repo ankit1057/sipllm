@@ -56,6 +56,10 @@ void sipllmWorkerMain(SipllmWorkerInit init) {
     'threads': threads,
   });
 
+  // Agents created on this context, by id. Freed before the context.
+  final agents = <int, Pointer<SipllmAgentC>>{};
+  var nextAgent = 1;
+
   commands.listen((message) {
     final m = message as Map;
     switch (m['cmd'] as String) {
@@ -65,12 +69,177 @@ void sipllmWorkerMain(SipllmWorkerInit init) {
         _embed(b, ctx, m);
       case 'reset':
         b.reset(ctx);
+      case 'agent_new':
+        final port = m['port'] as SendPort;
+        final r = _agentNew(b, ctx, m);
+        if (r.agent == nullptr) {
+          port.send({'error': r.error ?? 'sipllm_agent_new failed'});
+        } else {
+          final id = nextAgent++;
+          agents[id] = r.agent;
+          port.send({'agent': id});
+        }
+      case 'agent_start':
+        _agentStart(b, agents[m['agent'] as int], m);
+      case 'agent_step':
+        _agentStep(b, agents[m['agent'] as int], m);
+      case 'agent_submit':
+        final port = m['port'] as SendPort;
+        final a = agents[m['agent'] as int];
+        if (a == null) {
+          port.send({'error': 'agent was freed'});
+        } else {
+          _agentSubmit(b, a, m);
+        }
+      case 'agent_free':
+        final a = agents.remove(m['agent'] as int);
+        if (a != null) b.agentFree(a);
       case 'close':
+        for (final a in agents.values) {
+          b.agentFree(a);
+        }
+        agents.clear();
         b.close(ctx);
         commands.close();
+        // The context is gone: tell the main isolate so it can stop waiting.
+        (m['port'] as SendPort?)?.send({'closed': true});
         Isolate.exit();
     }
   });
+}
+
+class _AgentNewResult {
+  const _AgentNewResult(this.agent, this.error);
+  final Pointer<SipllmAgentC> agent;
+  final String? error;
+}
+
+_AgentNewResult _agentNew(
+    SipllmBindings b, Pointer<SipllmCtx> ctx, Map<Object?, Object?> m) {
+  final arena = Arena();
+  try {
+    final p = arena<SipllmAgentParamsC>();
+    b.agentParamsDefault(p);
+    p.ref.maxSteps = m['maxSteps'] as int;
+    p.ref.maxNewTokens = m['maxNewTokens'] as int;
+    p.ref.toolFormat = m['toolFormat'] as int;
+    p.ref.stopOnToolError = (m['stopOnToolError'] as bool) ? 1 : 0;
+    final preamble = m['systemPreamble'] as String?;
+    if (preamble != null) {
+      p.ref.systemPreamble = preamble.toNativeUtf8(allocator: arena);
+    }
+    final errC = arena.allocate<Uint8>(512).cast<Utf8>();
+    errC.cast<Uint8>().value = 0;
+    final a = b.agentNew(ctx, p, errC, 512);
+    if (a == nullptr) return _AgentNewResult(a, errC.toDartString());
+    // Tools: [[name, description, [[param, type, required, description], ...]], ...]
+    for (final t in (m['tools'] as List)) {
+      final tool = t as List;
+      final nameC = (tool[0] as String).toNativeUtf8(allocator: arena);
+      final descC = (tool[1] as String).toNativeUtf8(allocator: arena);
+      var ok = b.agentAddTool(a, nameC, descC) == 0;
+      for (final pr in (tool[2] as List)) {
+        final param = pr as List;
+        ok = ok &&
+            b.agentAddParam(
+                    a,
+                    nameC,
+                    (param[0] as String).toNativeUtf8(allocator: arena),
+                    param[1] as int,
+                    (param[2] as bool) ? 1 : 0,
+                    (param[3] as String).toNativeUtf8(allocator: arena)) ==
+                0;
+      }
+      if (!ok) {
+        b.agentFree(a);
+        return _AgentNewResult(nullptr, 'invalid tool declaration: ${tool[0]}');
+      }
+    }
+    return _AgentNewResult(a, null);
+  } finally {
+    arena.releaseAll();
+  }
+}
+
+void _agentStart(
+    SipllmBindings b, Pointer<SipllmAgentC>? a, Map<Object?, Object?> m) {
+  final port = m['port'] as SendPort;
+  if (a == null) {
+    port.send({'error': 'agent was freed'});
+    return;
+  }
+  final arena = Arena();
+  try {
+    final errC = arena.allocate<Uint8>(512).cast<Utf8>();
+    errC.cast<Uint8>().value = 0;
+    final rc = b.agentStart(
+        a, (m['goal'] as String).toNativeUtf8(allocator: arena), errC, 512);
+    port.send(rc == 0 ? {'started': true} : {'error': errC.toDartString()});
+  } finally {
+    arena.releaseAll();
+  }
+}
+
+void _agentStep(
+    SipllmBindings b, Pointer<SipllmAgentC>? a, Map<Object?, Object?> m) {
+  final port = m['port'] as SendPort;
+  if (a == null) {
+    port.send({'error': 'agent was freed'});
+    return;
+  }
+  final arena = Arena();
+  final callback = NativeCallable<SipllmTokenCbNative>.isolateLocal(
+    (Pointer<Utf8> piece, int tokenId, Pointer<Void> user) {
+      port.send({'token': piece.toDartString(), 'id': tokenId});
+      return 1;
+    },
+    exceptionalReturn: 0,
+  );
+  try {
+    final statsC = arena<SipllmStatsC>();
+    final errC = arena.allocate<Uint8>(512).cast<Utf8>();
+    errC.cast<Uint8>().value = 0;
+    // NULL sampler: greedy. Tool names and arguments must not be sampled.
+    final ev = b.agentStep(
+        a, nullptr, callback.nativeFunction, nullptr, statsC, errC, 512);
+    final reply = <String, Object?>{
+      'event': ev,
+      'steps': b.agentSteps(a),
+      'text': b.agentText(a).toDartString(),
+      'stats': _readStats(statsC.ref).toMap(),
+    };
+    if (ev == kAgentError) reply['error'] = errC.toDartString();
+    if (ev == kAgentToolCall) {
+      reply['name'] = b.agentToolName(a).toDartString();
+      reply['raw'] = b.agentToolArgsJson(a).toDartString();
+      final n = b.agentArgCount(a);
+      reply['args'] = [
+        for (var i = 0; i < n; i++)
+          [b.agentArgKey(a, i).toDartString(), b.agentArgValue(a, i).toDartString()]
+      ];
+    }
+    port.send({'step': reply});
+  } catch (e) {
+    port.send({'error': '$e'});
+  } finally {
+    callback.close();
+    arena.releaseAll();
+  }
+}
+
+void _agentSubmit(
+    SipllmBindings b, Pointer<SipllmAgentC> a, Map<Object?, Object?> m) {
+  final port = m['port'] as SendPort;
+  final arena = Arena();
+  try {
+    final rc = b.agentSubmitResult(
+        a,
+        (m['result'] as String).toNativeUtf8(allocator: arena),
+        (m['ok'] as bool) ? 1 : 0);
+    port.send({'submitted': rc, 'stop': b.agentStopReason(a), 'steps': b.agentSteps(a)});
+  } finally {
+    arena.releaseAll();
+  }
 }
 
 class _OpenResult {

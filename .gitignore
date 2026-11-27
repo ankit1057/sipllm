@@ -36,3 +36,15 @@ __pycache__/
 *.pyc
 /build-android/
 /bench/device/
+.cxx/
+*.ninja*
+compile_commands.json
+compile_commands.json.bin
+configure_fingerprint.bin
+CMakeCache.txt
+CMakeFiles/
+CMakeSystem.cmake
+CMakeError.log
+CMakeOutput.log
+VerifyGlobs.cmake
+build.ninja

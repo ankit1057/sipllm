@@ -256,6 +256,75 @@ TEST(e2e_stale_prefetch_never_clobbers_requested_layer) {
     CHECK_MSG(!stale_ran, "a stale prefetch (layer 3) ran after the request for layer 2");
 }
 
+// A WeightSource whose read of one layer's ffn_down throws while armed: an I/O
+// error in the middle of a run (flash read error, model file replaced, LAN
+// source drop). ffn_down is read after the attention weights, so the failure
+// lands with the slot already half refilled.
+class FailingSource : public WeightSource {
+public:
+    FailingSource(const WeightSource& in, int fail_layer) : in_(in), fail_(fail_layer) {}
+    const std::vector<TensorInfo>& tensors() const override { return in_.tensors(); }
+    const TensorInfo* find(const std::string& n) const override { return in_.find(n); }
+    void read_raw_at(uint64_t off, void* dst, uint64_t n) const override { in_.read_raw_at(off, dst, n); }
+    uint64_t file_size() const override { return in_.file_size(); }
+    bool has_meta(const std::string& k) const override { return in_.has_meta(k); }
+    const MetaValue* meta(const std::string& k) const override { return in_.meta(k); }
+    void read_raw(const TensorInfo& t, void* dst) const override {
+        int l = -1;
+        if (armed && std::sscanf(t.name.c_str(), "blk.%d.", &l) == 1 && l == fail_ &&
+            t.name == names::blk(l, "ffn_down.weight"))
+            throw Error("injected read failure");
+        in_.read_raw(t, dst);
+    }
+    std::atomic<bool> armed{false};
+
+private:
+    const WeightSource& in_;
+    const int fail_;
+};
+
+TEST(e2e_worker_read_error_reaches_caller) {
+    // A read that fails mid-layer must reach the caller of loadLayer as an
+    // exception. On the async worker it used to escape the thread, and
+    // std::terminate then killed the whole process, an embedding app included.
+    // Async: layer 1 fails as a prefetch, layer 2 as a direct (miss-path) load.
+    // Sync: layer 1 fails over the slot that held layer 0.
+    // Once reads succeed again, every layer must load with its own bytes; a
+    // half-refilled slot must never be served as a hit.
+    ToyConfig tc; tc.n_layers = 4; tc.dim = 48; tc.n_heads = 4; tc.n_kv_heads = 4;
+    tc.ffn_dim = 96; tc.vocab_size = 40; tc.seed = 99;
+    std::string path = scratch("toy_readfail.llmw");
+    write_toy_model(path, tc);
+
+    struct Case { bool async; int fail_layer; };
+    for (Case c : {Case{true, 1}, Case{true, 2}, Case{false, 1}}) {
+        ModelFile file(path);
+        FailingSource src(file, c.fail_layer);
+        ModelConfig cfg = ModelConfig::from_source(src);
+        LayerLoader::Options opt; opt.async = c.async; opt.n_buffers = c.async ? 2 : 1;
+        opt.residency = Residency::Quantized;
+        LayerLoader loader(&src, cfg, opt);
+
+        src.armed = true;
+        loader.loadLayer(0);                  // async: enqueues the prefetch of layer 1
+        std::string what;
+        try { loader.loadLayer(c.fail_layer); } catch (const Error& e) { what = e.what(); }
+        CHECK_MSG(what.find("injected read failure") != std::string::npos,
+                  "a read error did not reach the caller of loadLayer");
+
+        src.armed = false;                    // the loader must still be usable
+        for (int layer : {0, c.fail_layer}) {
+            loader.loadLayer(layer);
+            const TensorInfo* q = file.find(names::blk(layer, "attn_q.weight"));
+            std::vector<uint8_t> want(q->nbytes);
+            file.read_raw(*q, want.data());
+            WeightRef w = loader.getWeight(Role::AttnQ);
+            CHECK_MSG(w.valid() && std::memcmp(w.data, want.data(), want.size()) == 0,
+                      "after a failed read, a layer loaded with the wrong bytes");
+        }
+    }
+}
+
 int main() {
     printf("== test_e2e ==\n");
     return llmtest::run_all();

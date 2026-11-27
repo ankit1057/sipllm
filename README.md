@@ -6,8 +6,8 @@
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-**A bounded-memory LLM runtime: models larger than available RAM run under a hard, configurable peak-RSS ceiling, CPU-first, with zero dependencies.**
-SipLLM *sips* weights off storage — one transformer layer at a time — so peak RAM tracks a single resident layer, not the whole model: measured at 122 MB vs 1323 MB for llama.cpp on the same TinyLlama Q4_K_M file (10.8× less), and the gap widens with model size. Output is checked token for token against llama.cpp on Llama-family, Qwen2, Gemma 3 and Phi-2 models; see [Model architectures](#model-architectures) for what is and is not validated.
+**A bounded-memory LLM runtime: models larger than available RAM run under a configurable peak-RSS budget, CPU-first, with zero dependencies.** Weights are bounded; the KV cache is not, so the bound holds at short and medium context only (see [Known limitations](#known-limitations-and-trade-offs)).
+SipLLM *sips* weights off storage — one transformer layer at a time — so the weights' share of peak RAM tracks a single resident layer, not the whole model: measured at 122 MB vs 1323 MB for llama.cpp on the same TinyLlama Q4_K_M file (10.8× less), and the gap widens with model size. Output is checked token for token against llama.cpp on Llama-family, Qwen2, Gemma 3 and Phi-2 models; see [Model architectures](#model-architectures) for what is and is not validated.
 
 > ### Status
 > **Latest tagged release: v0.6.0** (see [`CHANGELOG.md`](CHANGELOG.md) for what changed
@@ -26,6 +26,8 @@ SipLLM *sips* weights off storage — one transformer layer at a time — so pea
 > llama.cpp's 1251 MB at 18.7 tok/s — 2–10.6× less RAM at half to two-thirds of the
 > decode speed and a fifth of the prefill. The AVX2 path for AMD is cross-compiled only
 > and has never been run. On Apple M3, resident 4-bit decode is 62–67% of llama.cpp.
+> Nor can they use long context: the KV cache stays in RAM and grows with every token,
+> so a 1M-token context would need 12–262 GB of it (see [Known limitations](#known-limitations-and-trade-offs)).
 
 **Edge-first, and therefore CPU-first.** This engine targets phones, SBCs, and
 other edge hardware — where there's plenty of storage but very little RAM and
@@ -132,7 +134,8 @@ never with model depth/total size — a deeper model of the same width has flat
 peak RSS (`toy_scaling` in `bench/results/`). Streaming an off-cache model is
 disk-bound, so this bounded-memory extreme trades speed (well under 1 tok/s here)
 for footprint; raise `--ram-budget` to pin hot layers and climb the RAM↔speed
-dial.
+dial. Every row uses `--ctx 512`. The KV cache is not streamed, so at long context
+it, not the weights, sets peak RAM (see [Known limitations](#known-limitations-and-trade-offs)).
 
 ```bash
 sipllm pull llama3.1:8b:q4_k_m
@@ -229,7 +232,7 @@ sipllm rm tinyllama:q8_0          # Remove model from local storage
 For advanced profiling, benchmark scripting, and low-level tuning:
 ```bash
 ./build/llm model.gguf -p "prompt" -n 64 --greedy
-./build/llm model.gguf --ram-budget 512M      # Hard peak-RSS ceiling (pin hot layers, stream rest)
+./build/llm model.gguf --ram-budget 512M      # Peak-RSS budget for SipLLM's own memory (pin hot layers, stream rest)
 ./build/llm model.gguf --reuse               # Cross-turn prefix context reuse (zero prefill cost)
 ./build/llm model.gguf --save-session s.bin  # Serialize context cache to disk
 ./build/llm model.gguf --load-session s.bin  # Restore context cache from disk
@@ -303,8 +306,8 @@ Kosh governs the multi-turn lifecycle and token optimization:
 
 ### 3. RTK: KV Cache & Bounded Memory Management
 RTK manages memory bounds, tensor execution, and hardware threads:
-- **Hard RAM Ceiling (`--ram-budget`)**: Guarantees peak RSS never exceeds a specified limit (e.g. `--ram-budget 512M`). Hot layers are pinned resident; remaining layers stream seamlessly from storage.
-- **Quantized KV Cache (`--kv-q8` / `KVPrecision::INT8`)**: Slashes KV cache memory usage by 50% with strictly bounded quantization delta, accompanied by grow-on-demand allocation so memory scales only with active tokens.
+- **RAM Budget (`--ram-budget`)**: Plans SipLLM's own memory (resident and streamed weights, KV cache, scratch, tokenizer) to fit a budget (e.g. `--ram-budget 512M`), and refuses to start if even the smallest plan cannot fit (`--ram-budget-force` overrides). Hot layers are pinned resident; remaining layers stream from storage. It is a plan checked once at load, not an OS-enforced limit: the OS page cache that streaming reads go through is not counted, and inside an app only SipLLM's own share is. Measured peak RSS has stayed under the budget in every configuration tested since the measured-base fix (`bench/results/phone-budget-sweep-2026-10-26.json`); untested configurations are not covered by that measurement.
+- **Quantized KV Cache (`--kv-q8` / `KVPrecision::Q8_0`)**: Stores the KV cache as Q8_0 (34 bytes per 32 values) instead of the default fp32, about 27% of the default size, with strictly bounded quantization delta. Without `--ram-budget` the cache grows on demand, so memory scales only with active tokens; under a budget it is allocated at the full planned context (#81).
 - **Adaptive Work-Stealing Scheduler**: Multi-threaded thread pool with dynamic work stealing (`--schedule proportional2`, `adaptive`, `fixed16`) maximizing core utilization and eliminating pipeline stalls.
 
 ### 4. Nishachar: Autonomous Execution Agent
@@ -365,7 +368,7 @@ See [`golden/README.md`](golden/README.md) for the full methodology.
 - **Complete Quantization Matrix** — Full support for `F32`, `F16`, `BF16`, `Q4_0/1`, `Q5_0/1`, `Q8_0`, and all K-quants (`Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, plus `IQ4_NL`).
 - **SIMD Vector Acceleration** — int8 kernels for Q8_0 / Q4_K / Q6_K on ARM64 NEON `sdot` and x86_64 AVX2 (`--fast`; AVX2 untested on hardware), plus fp32 NEON / AVX2+FMA vector paths.
 - **Bounded-Memory Layer Streaming** — Synchronous `pread`, double-buffered async prefetcher, and zero-copy `mmap` options keeping peak resident memory pinned to a single layer.
-- **Inviolable RAM Budget Ceiling (`--ram-budget`)** — Dynamic layer pinning with a smooth RAM↔speed dial.
+- **Planned RAM Budget (`--ram-budget`)** — Dynamic layer pinning with a smooth RAM↔speed dial; refuses a budget it cannot fit.
 - **Kosh Context Intelligence** — Zero-cost prefix reuse (`--reuse`), persistent SIPS v1 session checkpointing (`--save-session`/`--load-session`), prompt-lookup speculative decoding (`--spec N`, proven token-identical to plain decoding), and a semantic (radix-tree) prefix cache.
 - **Quantized KV Cache (`--kv-q8`)** — 8-bit KV cache with dynamic grow-on-demand allocation cutting memory footprint in half.
 - **Nishachar Autonomous Agent** — Reference goal-driven agent (`goal -> plan -> act -> verify`) with built-in zero-dependency tool calling across CLI (Path A) and OpenAI-compatible server (Path B).
@@ -401,6 +404,75 @@ and moves on — ensuring peak RSS strictly tracks *layer* size, not *model* siz
 
 For a comprehensive walkthrough of the forward pass, prefetch pipelining, and memory bounds,
 see [**docs/streaming-loader.md**](docs/streaming-loader.md).
+
+## Known limitations and trade-offs
+
+SipLLM bounds one thing: the weights' share of RAM. It pays for that in speed, and it
+does not bound the memory that grows with context. Figures marked *arithmetic* are
+calculated from model shapes and the engine's own sizing code, not measured.
+
+### Long context is not bounded
+
+- **Only weights stream; the KV cache stays in RAM.** Under `--ram-budget` the planner
+  prices the KV cache at the full context and allocates it up front (#81). When the
+  context does not fit, it is shortened (if `--ctx` was not given) or the run is refused.
+  Nothing moves KV to storage.
+- **Prefill holds the whole prompt's activations in RAM** too: `ctx × dim` fp32 values,
+  because every layer is streamed once and runs all prompt positions.
+- **Both grow linearly with context.** KV bytes = `2 × layers × kv_dim × bytes per value ×
+  tokens`, with 4 bytes per value by default (fp32) and 1.0625 with `--kv-q8`. There is
+  no fp16 KV cache.
+- **Sliding-window layers still get a full-context KV cache.** Gemma 3's local layers
+  attend to a window but keep every position, so their memory saving is not realized.
+- **The engine implements only dense attention and fixed sliding windows.** It has no
+  sparse, paged-to-storage or chunked long-context attention. No model validated here is
+  trained beyond 128k tokens.
+
+At 1M tokens (*arithmetic*):
+
+| model | trained context | KV, default fp32 | KV, `--kv-q8` | prefill activations |
+|:------|----------------:|-----------------:|--------------:|--------------------:|
+| TinyLlama-1.1B       | 2k   | 45 GB  | 12 GB | 8.2 GB  |
+| Qwen2.5-1.5B         | 32k  | 57 GB  | 15 GB | 6.1 GB  |
+| Llama-3.1-8B         | 128k | 262 GB | 70 GB | 16.4 GB |
+| Qwen2.5-7B-Instruct-1M | 1M | 115 GB | 31 GB | 14.3 GB |
+
+Streaming the KV cache from storage, as SipLLM does for weights, would not rescue this
+(*arithmetic*, for a design that does not exist yet):
+
+- Dense attention reads the whole cache for every generated token: 12–262 GB per token,
+  or 12–262 s per token at an assumed 1 GB/s sustained read.
+- A 1M-token prompt re-reads earlier KV once per query tile: about 1.5–256 TB of reads,
+  depending on model, KV precision and tile size (4096 to 512 tokens).
+- Compute alone is out of reach on a phone. Averaged over a 1M-token prefill, attention
+  costs 13–41× the weight matmuls. Qwen2.5-1.5B prefills at 21.15 tok/s on a Dimensity 900
+  phone (`bench/results/phone-budget-sweep-2026-10-26.json`). At that rate the weight work
+  alone takes 13 hours, and about 16 days with attention, assuming attention runs as fast
+  as the matmuls.
+
+The usable context is whatever KV cache and activations fit in RAM next to the pinned
+weights. Under a `--ram-budget`, the planner reports the context and KV size it planned for.
+
+### What the bounded-weights design gives up (measured)
+
+- **Streamed decode is storage-bound.** On a Dimensity 900 phone, Llama-3.1-8B Q4_K_M
+  streamed with `--ram-budget 0` decoded at 0.13 tok/s in 205 MB, reading 78 GB from
+  storage for 31 tokens. llama.cpp ran the same file at 2.5 tok/s by holding 4.7 GB and
+  leaving the phone 0.16 GB available ([`CHANGELOG.md`](CHANGELOG.md) scorecard).
+- **Partial residency costs speed even when storage is idle.** Qwen2.5-1.5B Q8_0 decoded
+  at 3.43 tok/s at `--ram-budget 1200M` against 7.71 fully resident, with only 3.8 MB read
+  from storage: the OS had the file cached
+  (`bench/results/phone-budget-sweep-2026-10-26.json`). Copying cached pages into SipLLM's
+  own buffers is the suspected cost. It has not been profiled.
+- **Prefill is slower than llama.cpp.** On the same phone, Qwen2.5-1.5B prefill ran at
+  21.15 tok/s against 44.9, and TinyLlama Q4_K_M at 47.0 against 71.4.
+- **The budget is a plan, not an OS limit.** It is checked once at load. The OS page
+  cache that streaming reads go through is not counted, and inside an app only SipLLM's
+  own share is.
+- **A phone GPU adds no memory.** Phone GPUs share system RAM, so offload cannot raise the
+  largest runnable model.
+- **Untested ground.** The x86-64 AVX2 path has never run on real hardware, and energy
+  per token has never been measured.
 
 ## Contributing
 

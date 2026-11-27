@@ -95,72 +95,93 @@ std::string Nishachar::dispatch(const ToolCall& call, bool& ok) const {
     }
 }
 
-AgentResult Nishachar::run(const std::string& goal, const AgentGenerator& gen,
-                           const AgentConfig& cfg) const {
-    AgentResult result;
-    result.goal = goal;
+// ============================================================================
+// AgentSession
+// ============================================================================
+AgentSession::AgentSession(const Nishachar& agent, const std::string& goal,
+                           const AgentConfig& cfg)
+    : registry_(agent.tools()), cfg_(cfg) {
+    result_.goal = goal;
     // Default outcome: if every step calls a tool and the bound is exhausted, we
-    // stopped for MaxSteps. Overridden on any Done/Empty/ToolError break below.
-    result.stop = AgentStop::MaxSteps;
+    // stopped for MaxSteps. Overridden on any Done/Empty/ToolError end below.
+    result_.stop = AgentStop::MaxSteps;
+    // render_chat() appends the registry's tool block to the system message, so
+    // the preamble goes in alone (adding the block here rendered it twice).
+    messages_.push_back({ChatMessage::Role::System, cfg_.system_preamble, ""});
+    messages_.push_back({ChatMessage::Role::User, goal, ""});
+    finished_ = cfg_.max_steps <= 0;
+}
 
-    std::vector<ChatMessage> messages;
-    messages.push_back({ChatMessage::Role::System,
-                        cfg.system_preamble + "\n\n" + registry_.system_prompt_block(),
-                        ""});
-    messages.push_back({ChatMessage::Role::User, goal, ""});
+std::string AgentSession::prompt() const {
+    return render_chat(messages_, registry_, cfg_.style, /*add_gen_prompt=*/true,
+                       cfg_.tool_format);
+}
 
-    for (int step = 0; step < cfg.max_steps; ++step) {
-        std::string prompt = render_chat(messages, registry_, cfg.style,
-                                         /*add_gen_prompt=*/true);
-        std::string out = gen(prompt);
-
-        if (out.empty()) {
-            result.stop = AgentStop::Empty;
-            break;
-        }
-
-        // Fresh parser per step, default markers (do NOT call set_markers). It
-        // rejects unregistered tools -> such output is treated as a final answer.
-        ToolParser parser(registry_);
-        parser.feed(out);
-
-        if (parser.state() == ToolParser::State::Done) {
-            const ToolCall call = parser.parsed_call();
-            bool ok = true;
-            std::string tool_result = dispatch(call, ok);
-
-            AgentStep s;
-            s.index = step;
-            s.model_output = out;
-            s.had_tool_call = true;
-            s.tool_name = call.name;
-            s.tool_args_json = call.raw_json;
-            s.tool_result = tool_result;
-            s.tool_ok = ok;
-            result.steps.push_back(std::move(s));
-
-            messages.push_back({ChatMessage::Role::Assistant, out, ""});
-            messages.push_back({ChatMessage::Role::Tool, tool_result, ""});
-
-            if (!ok && cfg.stop_on_tool_error) {
-                result.stop = AgentStop::ToolError;
-                break;
-            }
-            continue;
-        }
-
-        // No tool call -> this is the final answer.
-        AgentStep s;
-        s.index = step;
-        s.model_output = out;
-        s.had_tool_call = false;
-        result.steps.push_back(std::move(s));
-        result.final_text = out;
-        result.stop = AgentStop::Done;
-        break;
+AgentSession::Event AgentSession::submit_output(const std::string& out) {
+    const int index = result_.steps_taken();
+    if (out.empty()) {
+        result_.stop = AgentStop::Empty;
+        finished_ = true;
+        return Event::Empty;
     }
 
-    return result;
+    // Fresh parser per step, default markers (do NOT call set_markers). It
+    // rejects unregistered tools -> such output is treated as a final answer.
+    ToolParser parser(registry_);
+    parser.feed(out);
+
+    if (parser.state() == ToolParser::State::Done) {
+        pending_ = parser.parsed_call();
+        step_ = AgentStep{};
+        step_.index = index;
+        step_.model_output = out;
+        step_.had_tool_call = true;
+        step_.tool_name = pending_.name;
+        step_.tool_args_json = pending_.raw_json;
+        awaiting_ = true;
+        return Event::ToolCall;
+    }
+
+    // No tool call -> this is the final answer.
+    AgentStep s;
+    s.index = index;
+    s.model_output = out;
+    s.had_tool_call = false;
+    result_.steps.push_back(std::move(s));
+    result_.final_text = out;
+    result_.stop = AgentStop::Done;
+    finished_ = true;
+    return Event::Final;
+}
+
+void AgentSession::submit_result(const std::string& tool_result, bool ok) {
+    step_.tool_result = tool_result;
+    step_.tool_ok = ok;
+    messages_.push_back({ChatMessage::Role::Assistant, step_.model_output, ""});
+    messages_.push_back({ChatMessage::Role::Tool, tool_result, ""});
+    result_.steps.push_back(std::move(step_));
+    step_ = AgentStep{};
+    pending_ = ToolCall{};
+    awaiting_ = false;
+    if (!ok && cfg_.stop_on_tool_error) {
+        result_.stop = AgentStop::ToolError;
+        finished_ = true;
+    } else if (result_.steps_taken() >= cfg_.max_steps) {
+        finished_ = true;   // stop stays MaxSteps
+    }
+}
+
+AgentResult Nishachar::run(const std::string& goal, const AgentGenerator& gen,
+                           const AgentConfig& cfg) const {
+    AgentSession session(*this, goal, cfg);
+    while (!session.finished()) {
+        if (session.submit_output(gen(session.prompt())) != AgentSession::Event::ToolCall)
+            continue;   // Final or Empty: the session has finished
+        bool ok = true;
+        std::string tool_result = dispatch(session.pending_call(), ok);
+        session.submit_result(tool_result, ok);
+    }
+    return session.result();
 }
 
 } // namespace llm

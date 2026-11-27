@@ -166,6 +166,107 @@ SIPLLM_API int32_t sipllm_embed_dim(sipllm_ctx* ctx);
 SIPLLM_API int32_t sipllm_embed(sipllm_ctx* ctx, const char* text, int32_t pooling,
                                 float* out, int32_t out_cap, char* err_buf, int32_t err_cap);
 
+/* ---- agent (Nishachar), stepped by the caller -------------------------- *
+ * The engine owns the conversation, the chat template, tool-call parsing and
+ * the step bound; the caller owns the tools, so a tool can be asynchronous (a
+ * UI action, a permission prompt) and nothing executes inside the engine.
+ *
+ *   a = sipllm_agent_new(ctx, &params, err, cap);
+ *   sipllm_agent_add_tool(a, "read_file", "Read a text file.");
+ *   sipllm_agent_add_param(a, "read_file", "path", SIPLLM_PARAM_STRING, 1, "relative path");
+ *   sipllm_agent_start(a, "What does notes.txt say?", err, cap);
+ *   for (;;) {
+ *     int32_t ev = sipllm_agent_step(a, &sampler, cb, user, &stats, err, cap);
+ *     if (ev != SIPLLM_AGENT_TOOL_CALL) break;      // FINAL, a stop, or -1
+ *     ... run sipllm_agent_tool_name(a) with its arguments ...
+ *     sipllm_agent_submit_result(a, result_text, ok);
+ *   }
+ *
+ * A step generates one model turn (streaming pieces through `cb`) and stops at
+ * a closing </tool_call>. sipllm_cancel(ctx) stops an in-flight step at the
+ * next token boundary (so does a token callback returning 0); the step then
+ * returns SIPLLM_AGENT_CANCELLED and the session is unchanged. Prefill is not
+ * interruptible: a cancel lands once the first token is produced. An agent uses its context's KV cache and turns context
+ * reuse on for its own steps only: reset the context before chatting on it
+ * again. Strings returned by the accessors stay valid until the next step,
+ * submit_result, start or free. The agent must be freed before its context. */
+enum {
+  SIPLLM_PARAM_STRING = 0,
+  SIPLLM_PARAM_INT = 1,
+  SIPLLM_PARAM_FLOAT = 2,
+  SIPLLM_PARAM_BOOL = 3,
+  SIPLLM_PARAM_STRING_ARRAY = 4
+};
+
+enum {
+  SIPLLM_TOOL_FORMAT_AUTO = 0,    /* the model's own format when its template has one */
+  SIPLLM_TOOL_FORMAT_COMPACT = 1, /* SipLLM's compact tool list */
+  SIPLLM_TOOL_FORMAT_QWEN = 2     /* Qwen2.5 <tools> / <tool_response> */
+};
+
+/* sipllm_agent_step() results. */
+enum {
+  SIPLLM_AGENT_ERROR = -1,      /* message in err_buf; the session is unchanged      */
+  SIPLLM_AGENT_TOOL_CALL = 1,   /* run the tool, then sipllm_agent_submit_result()   */
+  SIPLLM_AGENT_FINAL = 2,       /* final answer in sipllm_agent_text()               */
+  SIPLLM_AGENT_MAX_STEPS = 3,   /* ended: step bound reached without a final answer  */
+  SIPLLM_AGENT_EMPTY = 4,       /* ended: the model produced no text                 */
+  SIPLLM_AGENT_TOOL_ERROR = 5,  /* ended: a tool failed and stop_on_tool_error is set */
+  SIPLLM_AGENT_CANCELLED = 6    /* sipllm_cancel() stopped this step                 */
+};
+
+typedef struct {
+  int32_t max_steps;          /* 0 = 8 */
+  int32_t max_new_tokens;     /* per step; 0 = 256 */
+  int32_t tool_format;        /* SIPLLM_TOOL_FORMAT_* */
+  int32_t stop_on_tool_error; /* 0: feed the error back to the model and continue */
+  const char* system_preamble; /* NULL = Nishachar's default preamble */
+} sipllm_agent_params;
+
+typedef struct sipllm_agent sipllm_agent;
+
+SIPLLM_API void sipllm_agent_params_default(sipllm_agent_params* out);
+SIPLLM_API sipllm_agent* sipllm_agent_new(sipllm_ctx* ctx, const sipllm_agent_params* p,
+                                          char* err_buf, int32_t err_cap);
+SIPLLM_API void sipllm_agent_free(sipllm_agent* a);
+
+/* Declare tools before sipllm_agent_start(); both return 0, or -1 on bad input
+ * or while a run is active. Re-adding a tool name replaces it. */
+SIPLLM_API int32_t sipllm_agent_add_tool(sipllm_agent* a, const char* name, const char* description);
+SIPLLM_API int32_t sipllm_agent_add_param(sipllm_agent* a, const char* tool, const char* name,
+                                          int32_t type, int32_t required, const char* description);
+
+/* Begin a run for `goal` (ending any previous one). 0, or -1 with err_buf. */
+SIPLLM_API int32_t sipllm_agent_start(sipllm_agent* a, const char* goal, char* err_buf, int32_t err_cap);
+
+/* Generate one model turn; returns SIPLLM_AGENT_*. `scfg`, `cb`, `stats` may be
+ * NULL (NULL scfg = greedy). */
+SIPLLM_API int32_t sipllm_agent_step(sipllm_agent* a, const sipllm_sampler* scfg,
+                                     sipllm_token_cb cb, void* user, sipllm_stats* stats,
+                                     char* err_buf, int32_t err_cap);
+
+/* The pending tool call (after SIPLLM_AGENT_TOOL_CALL). Arguments are the
+ * call's top-level keys; string values are unescaped, other JSON values are
+ * returned verbatim. */
+SIPLLM_API const char* sipllm_agent_tool_name(sipllm_agent* a);
+SIPLLM_API const char* sipllm_agent_tool_args_json(sipllm_agent* a);
+SIPLLM_API int32_t sipllm_agent_arg_count(sipllm_agent* a);
+SIPLLM_API const char* sipllm_agent_arg_key(sipllm_agent* a, int32_t i);
+SIPLLM_API const char* sipllm_agent_arg_value(sipllm_agent* a, int32_t i);
+
+/* The last step's raw model output (the final answer after SIPLLM_AGENT_FINAL). */
+SIPLLM_API const char* sipllm_agent_text(sipllm_agent* a);
+
+/* Feed the pending call's result back (ok=0: an error the model should see).
+ * Returns 1 if the run continues (call sipllm_agent_step again), 0 if it ended
+ * (sipllm_agent_stop_reason), -1 if no call was pending. */
+SIPLLM_API int32_t sipllm_agent_submit_result(sipllm_agent* a, const char* result, int32_t ok);
+
+/* Steps taken in the current run, and why it ended (SIPLLM_AGENT_FINAL,
+ * _MAX_STEPS, _EMPTY, _TOOL_ERROR), or 0 while it is still running. */
+SIPLLM_API int32_t sipllm_agent_steps(sipllm_agent* a);
+SIPLLM_API int32_t sipllm_agent_stop_reason(sipllm_agent* a);
+
 /* ---- device / build info (no context required) ------------------------- */
 SIPLLM_API const char* sipllm_version(void);
 SIPLLM_API int32_t sipllm_vulkan_compiled(void);

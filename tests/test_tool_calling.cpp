@@ -178,6 +178,89 @@ TEST(chat_template_zephyr) {
           "<|system|>\nBe brief.</s>\n<|user|>\nHello</s>\n<|assistant|>\n");
 }
 
+TEST(tool_json_schema) {
+    ToolDef t = *make_registry().find("get_weather");
+    CHECK(t.json_schema() ==
+          "{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", "
+          "\"description\": \"Get the weather for a city\", \"parameters\": {\"type\": \"object\", "
+          "\"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, "
+          "\"units\": {\"type\": \"string\", \"description\": \"metric or imperial\"}}, "
+          "\"required\": [\"city\"]}}}");
+    ToolDef q;
+    q.name = "say \"hi\"";
+    q.description = "line1\nline2";
+    q.params = {{"tags", ToolParamType::StringArray, false, "", ""}};
+    CHECK(q.json_schema() ==
+          "{\"type\": \"function\", \"function\": {\"name\": \"say \\\"hi\\\"\", "
+          "\"description\": \"line1\\nline2\", \"parameters\": {\"type\": \"object\", "
+          "\"properties\": {\"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}}}}}");
+}
+
+// Golden strings rendered by jinja2 from Qwen's official chat template
+// (Qwen/Qwen2.5-1.5B-Instruct tokenizer_config.json; HF's tojson: no key
+// sorting, no HTML escaping). The copy embedded in some GGUFs differs only in
+// writing the example call with doubled braces.
+static const char* kQwenToolHeader =
+    "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
+    "You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n"
+    "{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather for a city\", "
+    "\"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, "
+    "\"units\": {\"type\": \"string\", \"description\": \"metric or imperial\"}}, \"required\": [\"city\"]}}}\n</tools>\n\n"
+    "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
+    "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n";
+
+TEST(chat_template_qwen_tools_matches_gguf_template) {
+    ToolRegistry reg = make_registry();
+    const std::string call = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Pune\"}}\n</tool_call>";
+    std::vector<ChatMessage> msgs = {
+        {ChatMessage::Role::System, "Be brief.", ""},
+        {ChatMessage::Role::User, "weather in Pune?", ""},
+        {ChatMessage::Role::Assistant, call, ""},
+        {ChatMessage::Role::Tool, "31C, clear", ""},
+    };
+    const std::string want = std::string("<|im_start|>system\nBe brief.") + kQwenToolHeader +
+        "<|im_start|>user\nweather in Pune?<|im_end|>\n<|im_start|>assistant\n" + call +
+        "<|im_end|>\n<|im_start|>user\n<tool_response>\n31C, clear\n</tool_response><|im_end|>\n"
+        "<|im_start|>assistant\n";
+    CHECK(render_chat(msgs, reg, ChatTemplateStyle::Qwen2, true, ToolPromptFormat::Qwen) == want);
+    CHECK(render_chat(msgs, reg, ChatTemplateStyle::ChatML, true, ToolPromptFormat::Qwen) == want);
+
+    // No system message: the template's default system line.
+    std::vector<ChatMessage> bare = { {ChatMessage::Role::User, "weather in Pune?", ""} };
+    CHECK(render_chat(bare, reg, ChatTemplateStyle::Qwen2, true, ToolPromptFormat::Qwen) ==
+          std::string("<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.") +
+          kQwenToolHeader + "<|im_start|>user\nweather in Pune?<|im_end|>\n<|im_start|>assistant\n");
+
+    // Consecutive tool results share one user turn.
+    msgs.push_back({ChatMessage::Role::Tool, "humid", ""});
+    std::string two = render_chat(msgs, reg, ChatTemplateStyle::Qwen2, false, ToolPromptFormat::Qwen);
+    CHECK(two.find("<|im_start|>user\n<tool_response>\n31C, clear\n</tool_response>\n<tool_response>\n"
+                   "humid\n</tool_response><|im_end|>\n") != std::string::npos);
+}
+
+TEST(chat_template_qwen_tools_falls_back_to_compact) {
+    // Only ChatML-family styles have the Qwen tool format; no tools means no
+    // tool block. Both cases render exactly as the default (compact) format.
+    ToolRegistry reg = make_registry(), empty;
+    std::vector<ChatMessage> msgs = { {ChatMessage::Role::System, "Be brief.", ""},
+                                      {ChatMessage::Role::User, "Hi", ""} };
+    for (ChatTemplateStyle st : {ChatTemplateStyle::Llama3, ChatTemplateStyle::Gemma, ChatTemplateStyle::Zephyr})
+        CHECK(render_chat(msgs, reg, st, true, ToolPromptFormat::Qwen) == render_chat(msgs, reg, st, true));
+    CHECK(render_chat(msgs, empty, ChatTemplateStyle::Qwen2, true, ToolPromptFormat::Qwen) ==
+          render_chat(msgs, empty, ChatTemplateStyle::Qwen2, true));
+    CHECK(render_chat(msgs, reg, ChatTemplateStyle::Qwen2, true, ToolPromptFormat::Compact) ==
+          render_chat(msgs, reg, ChatTemplateStyle::Qwen2, true));
+}
+
+TEST(tool_format_from_model_reads_gguf_template) {
+    ModelConfig c;
+    CHECK(tool_format_from_model(c) == ToolPromptFormat::Compact);   // no template
+    c.chat_template = "{{'<|im_start|>' + message['role'] + '\\n'}}";
+    CHECK(tool_format_from_model(c) == ToolPromptFormat::Compact);   // ChatML, no tools
+    c.chat_template = "{%- if tools %}<|im_start|>system\\n<tools></tools><tool_call>\\n</tool_call>{%- endif %}";
+    CHECK(tool_format_from_model(c) == ToolPromptFormat::Qwen);
+}
+
 int main() {
     printf("== test_tool_calling ==\n");
     return llmtest::run_all();

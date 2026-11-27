@@ -120,6 +120,67 @@ final class SipllmStatsC extends Struct {
 typedef SipllmTokenCbNative = Int32 Function(
     Pointer<Utf8> piece, Int64 tokenId, Pointer<Void> user);
 
+// ---- agent ----------------------------------------------------------------
+final class SipllmAgentC extends Opaque {}
+
+final class SipllmAgentParamsC extends Struct {
+  @Int32()
+  external int maxSteps;
+  @Int32()
+  external int maxNewTokens;
+  @Int32()
+  external int toolFormat;
+  @Int32()
+  external int stopOnToolError;
+  external Pointer<Utf8> systemPreamble;
+}
+
+typedef _AgentParamsDefaultNative = Void Function(Pointer<SipllmAgentParamsC>);
+typedef _AgentParamsDefaultDart = void Function(Pointer<SipllmAgentParamsC>);
+typedef _AgentNewNative = Pointer<SipllmAgentC> Function(
+    Pointer<SipllmCtx>, Pointer<SipllmAgentParamsC>, Pointer<Utf8>, Int32);
+typedef _AgentNewDart = Pointer<SipllmAgentC> Function(
+    Pointer<SipllmCtx>, Pointer<SipllmAgentParamsC>, Pointer<Utf8>, int);
+typedef _AgentFreeNative = Void Function(Pointer<SipllmAgentC>);
+typedef _AgentFreeDart = void Function(Pointer<SipllmAgentC>);
+typedef _AgentAddToolNative = Int32 Function(
+    Pointer<SipllmAgentC>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _AgentAddToolDart = int Function(
+    Pointer<SipllmAgentC>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _AgentAddParamNative = Int32 Function(Pointer<SipllmAgentC>,
+    Pointer<Utf8>, Pointer<Utf8>, Int32, Int32, Pointer<Utf8>);
+typedef _AgentAddParamDart = int Function(Pointer<SipllmAgentC>, Pointer<Utf8>,
+    Pointer<Utf8>, int, int, Pointer<Utf8>);
+typedef _AgentStartNative = Int32 Function(
+    Pointer<SipllmAgentC>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _AgentStartDart = int Function(
+    Pointer<SipllmAgentC>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _AgentStepNative = Int32 Function(
+    Pointer<SipllmAgentC>,
+    Pointer<SipllmSamplerC>,
+    Pointer<NativeFunction<SipllmTokenCbNative>>,
+    Pointer<Void>,
+    Pointer<SipllmStatsC>,
+    Pointer<Utf8>,
+    Int32);
+typedef _AgentStepDart = int Function(
+    Pointer<SipllmAgentC>,
+    Pointer<SipllmSamplerC>,
+    Pointer<NativeFunction<SipllmTokenCbNative>>,
+    Pointer<Void>,
+    Pointer<SipllmStatsC>,
+    Pointer<Utf8>,
+    int);
+typedef _AgentStrNative = Pointer<Utf8> Function(Pointer<SipllmAgentC>);
+typedef _AgentStrDart = Pointer<Utf8> Function(Pointer<SipllmAgentC>);
+typedef _AgentIntNative = Int32 Function(Pointer<SipllmAgentC>);
+typedef _AgentIntDart = int Function(Pointer<SipllmAgentC>);
+typedef _AgentArgNative = Pointer<Utf8> Function(Pointer<SipllmAgentC>, Int32);
+typedef _AgentArgDart = Pointer<Utf8> Function(Pointer<SipllmAgentC>, int);
+typedef _AgentSubmitNative = Int32 Function(
+    Pointer<SipllmAgentC>, Pointer<Utf8>, Int32);
+typedef _AgentSubmitDart = int Function(Pointer<SipllmAgentC>, Pointer<Utf8>, int);
+
 // ---- native function typedefs --------------------------------------------
 typedef _ParamsDefaultNative = Void Function(Pointer<SipllmParamsC>);
 typedef _ParamsDefaultDart = void Function(Pointer<SipllmParamsC>);
@@ -252,6 +313,42 @@ class SipllmBindings {
   final _IntVoidDart hardwareConcurrency;
   final _OptimalThreadsDart optimalThreads;
   final _SetLogDart setLogLevel;
+
+  // Agent symbols resolve on first use, so a library built before the agent
+  // ABI still loads for chat and embeddings.
+  late final agentParamsDefault =
+      _lib.lookupFunction<_AgentParamsDefaultNative, _AgentParamsDefaultDart>(
+          'sipllm_agent_params_default');
+  late final agentNew =
+      _lib.lookupFunction<_AgentNewNative, _AgentNewDart>('sipllm_agent_new');
+  late final agentFree =
+      _lib.lookupFunction<_AgentFreeNative, _AgentFreeDart>('sipllm_agent_free');
+  late final agentAddTool = _lib.lookupFunction<_AgentAddToolNative,
+      _AgentAddToolDart>('sipllm_agent_add_tool');
+  late final agentAddParam = _lib.lookupFunction<_AgentAddParamNative,
+      _AgentAddParamDart>('sipllm_agent_add_param');
+  late final agentStart = _lib
+      .lookupFunction<_AgentStartNative, _AgentStartDart>('sipllm_agent_start');
+  late final agentStep =
+      _lib.lookupFunction<_AgentStepNative, _AgentStepDart>('sipllm_agent_step');
+  late final agentToolName = _lib
+      .lookupFunction<_AgentStrNative, _AgentStrDart>('sipllm_agent_tool_name');
+  late final agentToolArgsJson = _lib.lookupFunction<_AgentStrNative,
+      _AgentStrDart>('sipllm_agent_tool_args_json');
+  late final agentArgCount = _lib
+      .lookupFunction<_AgentIntNative, _AgentIntDart>('sipllm_agent_arg_count');
+  late final agentArgKey =
+      _lib.lookupFunction<_AgentArgNative, _AgentArgDart>('sipllm_agent_arg_key');
+  late final agentArgValue = _lib
+      .lookupFunction<_AgentArgNative, _AgentArgDart>('sipllm_agent_arg_value');
+  late final agentText =
+      _lib.lookupFunction<_AgentStrNative, _AgentStrDart>('sipllm_agent_text');
+  late final agentSubmitResult = _lib.lookupFunction<_AgentSubmitNative,
+      _AgentSubmitDart>('sipllm_agent_submit_result');
+  late final agentSteps =
+      _lib.lookupFunction<_AgentIntNative, _AgentIntDart>('sipllm_agent_steps');
+  late final agentStopReason = _lib.lookupFunction<_AgentIntNative,
+      _AgentIntDart>('sipllm_agent_stop_reason');
 }
 
 // Schedule policy + pooling enum constants (mirror sipllm_ffi.h).
@@ -265,3 +362,12 @@ const int kSchedAdaptive = 6;
 
 const int kPoolLast = 0;
 const int kPoolMean = 1;
+
+// Agent enum constants (mirror sipllm_ffi.h).
+const int kAgentError = -1;
+const int kAgentToolCall = 1;
+const int kAgentFinal = 2;
+const int kAgentMaxSteps = 3;
+const int kAgentEmpty = 4;
+const int kAgentToolError = 5;
+const int kAgentCancelled = 6;

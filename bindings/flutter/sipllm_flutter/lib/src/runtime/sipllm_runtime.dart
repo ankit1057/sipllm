@@ -12,6 +12,8 @@ import '../ffi/sipllm_bindings.dart';
 import 'sipllm_isolate.dart';
 import 'sipllm_types.dart';
 
+part 'sipllm_agent.dart';
+
 class SipllmException implements Exception {
   SipllmException(this.message);
   final String message;
@@ -40,9 +42,31 @@ class SipllmRuntime {
     this._cancelFn,
     this.modelInfo,
     this.threads,
-  );
+    this._exitPort,
+    Stream<Object?> exitEvents,
+  ) {
+    // A worker that dies (an uncaught error, a native abort that unwinds to
+    // Dart) must not leave callers waiting on replies that will never come.
+    exitEvents.listen((message) {
+      _workerGone = true;
+      _closed = true;
+      _busy = false;
+      final why = message is List && message.isNotEmpty
+          ? 'sipllm worker failed: ${message.first}'
+          : 'sipllm worker exited';
+      for (final fail in _inflight.toList()) {
+        fail(why);
+      }
+      _inflight.clear();
+      _exitPort.close();
+    });
+  }
 
   final Isolate _isolate;
+  final ReceivePort _exitPort;
+  bool _workerGone = false;
+  // One failer per in-flight request; called with a reason if the worker dies.
+  final Set<void Function(String)> _inflight = {};
   final SendPort _toWorker;
   final int _ctxAddress;
   final void Function(Pointer<SipllmCtx>) _cancelFn;
@@ -74,17 +98,37 @@ class SipllmRuntime {
     final mainBindings = loadSipllmBindings(libraryPath: libraryPath);
 
     final init = ReceivePort();
+    // Registered at spawn, so a worker that dies at any point is reported;
+    // broadcast so the open handshake and the runtime can both listen.
+    final exit = ReceivePort();
+    final exitEvents = exit.asBroadcastStream();
     final isolate = await Isolate.spawn(
       sipllmWorkerMain,
       SipllmWorkerInit(
           init.sendPort, libraryPath, modelPath, params.toMap(), logLevel),
       errorsAreFatal: true,
+      onError: exit.sendPort,
+      onExit: exit.sendPort,
       debugName: 'sipllm-worker',
     );
 
-    final first = await init.first as Map;
+    // The first message is the worker's hello, or its death notice if it
+    // failed before saying hello.
+    final firstEvent = Completer<Object?>();
+    init.listen((m) {
+      if (!firstEvent.isCompleted) firstEvent.complete(m);
+    });
+    // Left subscribed (it ignores everything after the handshake): cancelling
+    // would await, and a death notice in that gap would reach no listener.
+    exitEvents.listen((m) {
+      if (!firstEvent.isCompleted) {
+        firstEvent.complete({'error': 'sipllm worker exited during open: $m'});
+      }
+    });
+    final first = await firstEvent.future as Map;
     init.close();
     if (first['error'] != null) {
+      exit.close();
       isolate.kill(priority: Isolate.immediate);
       throw SipllmException(first['error'] as String);
     }
@@ -95,6 +139,8 @@ class SipllmRuntime {
       mainBindings.cancel,
       SipllmModelInfo.fromMap(first['modelInfo'] as Map<String, Object?>),
       first['threads'] as int,
+      exit,
+      exitEvents,
     );
   }
 
@@ -115,15 +161,23 @@ class SipllmRuntime {
     _busy = true;
     final controller = StreamController<SipllmToken>();
     final port = ReceivePort();
+    late final void Function(String) fail;
+    fail = (why) {
+      controller.addError(SipllmException(why));
+      _finish(port, controller);
+    };
+    _inflight.add(fail);
 
     port.listen((message) {
       final m = message as Map;
       if (m['token'] != null) {
         controller.add(SipllmToken(m['token'] as String, m['id'] as int));
       } else if (m['done'] == true) {
+        _inflight.remove(fail);
         _lastStats = SipllmStats.fromMap(m['stats'] as Map<String, Object?>);
         _finish(port, controller);
       } else if (m['error'] != null) {
+        _inflight.remove(fail);
         controller.addError(SipllmException(m['error'] as String));
         _finish(port, controller);
       }
@@ -147,7 +201,7 @@ class SipllmRuntime {
   void _finish(ReceivePort port, StreamController<SipllmToken> controller) {
     _busy = false;
     port.close();
-    controller.close();
+    if (!controller.isClosed) controller.close();
   }
 
   /// Convenience: collect the full completion as a single string.
@@ -181,7 +235,13 @@ class SipllmRuntime {
     _busy = true;
     final port = ReceivePort();
     final completer = Completer<Float32List>();
+    void fail(String why) {
+      if (!completer.isCompleted) completer.completeError(SipllmException(why));
+      port.close();
+    }
+    _inflight.add(fail);
     port.listen((message) {
+      _inflight.remove(fail);
       final m = message as Map;
       if (m['embedding'] != null) {
         completer.complete(m['embedding'] as Float32List);
@@ -204,6 +264,41 @@ class SipllmRuntime {
     }
   }
 
+  /// One request/reply exchange with the worker. Replies for which [isFinal]
+  /// is false go to [onMessage] (streamed tokens). Fails if the worker dies or
+  /// answers with an error.
+  Future<Map<Object?, Object?>> _request(
+    Map<String, Object?> msg, {
+    void Function(Map<Object?, Object?> m)? onMessage,
+    bool Function(Map<Object?, Object?> m)? isFinal,
+  }) {
+    if (_closed) return Future.error(SipllmException('runtime is closed'));
+    final port = ReceivePort();
+    final done = Completer<Map<Object?, Object?>>();
+    void fail(String why) {
+      if (!done.isCompleted) done.completeError(SipllmException(why));
+      port.close();
+    }
+
+    _inflight.add(fail);
+    port.listen((message) {
+      final m = message as Map<Object?, Object?>;
+      if (isFinal != null && !isFinal(m)) {
+        onMessage?.call(m);
+        return;
+      }
+      _inflight.remove(fail);
+      port.close();
+      if (m['error'] != null) {
+        done.completeError(SipllmException(m['error'] as String));
+      } else {
+        done.complete(m);
+      }
+    });
+    _toWorker.send({...msg, 'port': port.sendPort});
+    return done.future;
+  }
+
   /// Clear KV cache / conversation state.
   void reset() {
     if (_closed) return;
@@ -211,13 +306,25 @@ class SipllmRuntime {
   }
 
   /// Free the native context and shut down the worker isolate.
-  Future<void> close() async {
+  ///
+  /// An in-flight generation or agent step is cancelled first. The worker
+  /// handles `close` only once the native call returns, and a long prompt's
+  /// prefill cannot be interrupted, so this waits for the worker's reply
+  /// rather than killing the isolate with the context (and its weights) still
+  /// allocated. After [timeout] the isolate is killed anyway.
+  Future<void> close({Duration timeout = const Duration(seconds: 120)}) async {
     if (_closed) return;
-    _closed = true;
     if (_busy) cancel();
-    _toWorker.send({'cmd': 'close'});
-    // Give the worker a beat to free the context, then hard-stop the isolate.
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-    _isolate.kill(priority: Isolate.beforeNextEvent);
+    _closed = true;
+    if (_workerGone) return;
+    final reply = ReceivePort();
+    _toWorker.send({'cmd': 'close', 'port': reply.sendPort});
+    try {
+      await reply.first.timeout(timeout);
+    } on TimeoutException {
+      _isolate.kill(priority: Isolate.immediate);
+    } finally {
+      reply.close();
+    }
   }
 }

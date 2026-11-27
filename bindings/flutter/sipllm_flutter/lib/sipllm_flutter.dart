@@ -4,7 +4,8 @@
 /// and phone -> Wear OS model transfer over the Wearable Data Layer.
 library;
 
-// Inference runtime (isolate-backed FFI).
+// Inference runtime (isolate-backed FFI) and the Nishachar agent
+// (part of the runtime library).
 export 'src/runtime/sipllm_runtime.dart';
 export 'src/runtime/sipllm_types.dart';
 
